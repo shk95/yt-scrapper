@@ -214,6 +214,9 @@ per-address budget.** Measured, in this order, on the direct line:
 | Plain + ASR track immediately after that 429 | 200, 200 |
 | Full metadata extraction immediately after | succeeded in 1.2 s |
 | Translated track **of a different video**, first ever request | **429** |
+| Korean ASR on a Korean video, 10 in a row | 200 × 10 |
+| Korean ASR on three other Korean videos, first request each | 200, 200, 200 |
+| Time from exhausted to serving again, polled each minute | **6 min** |
 
 Three things follow, and only the first was guessed correctly at first:
 
@@ -225,7 +228,24 @@ Three things follow, and only the first was guessed correctly at first:
    translation request is refused while another video's is exhausted. So a bulk
    sweep does not get a few translations per video — it gets a few in total,
    then none for a while.
-3. It **refills on the order of half an hour**, not seconds.
+3. It **refills slowly**: once spent, 429 at +1 through +5 minutes and served
+   again at +6. After a longer rest it allowed three in a row, then 429 on the
+   next. That behaves like a token bucket holding three or four with a refill
+   near one per five minutes, which is an inference from those two runs rather
+   than a documented number.
+
+**None of this touches a video's own ASR track.** `ko` on a Korean video is
+`lang=ko&kind=asr` with no `tlang` — the transcription itself, not a translation
+of one — and it answered 200 ten times in a row on one video and first-try on
+three others, including while the translation budget was exhausted on the same
+address in the same minute. The roles invert with the video's language: on an
+English video Korean is the translated candidate, and on a Korean video it is
+English that is translated (`lang=ko&tlang=en`).
+
+That makes Korean-first cheapest exactly where it is wanted most. A sweep of
+Korean content asks only for original ASR tracks and meets no limit at all; only
+a sweep of *English* content asks for translations, and that is the case that
+degrades to English after the first few.
 
 An earlier version of this section said translations are "throttled far
 harder", from one loop where they answered 429 four times out of four. That

@@ -119,8 +119,9 @@ retried, because retrying cannot change the answer.
 ## `api/timedtext?...&tlang=ko answered 429 on egress direct`
 
 The `tlang=` parameter marks an auto-translated caption track, and those draw on
-a budget separate from everything else YouTube gives this address — a few
-requests, then 429 for roughly half an hour.
+a budget separate from everything else YouTube gives this address — three or
+four requests, then 429, then served again about six minutes later (polled each
+minute: 429 at +1 through +5, 200 at +6).
 
 **Nothing is wrong with the address.** Measured in the same second as one of
 these 429s: the plain caption track answered 200, the ASR track answered 200,
@@ -131,6 +132,10 @@ succeeds.
 
 The budget is **per address, not per video** — a different video's first
 translation request is refused while this one is exhausted. So the visible
-symptom under a bulk Korean-first sweep is that the first few videos come back
-in Korean and the rest come back in English. Check `language` and
+symptom under a bulk Korean-first sweep **of English videos** is that the first
+few come back in Korean and the rest come back in English. Check `language` and
 `is_automatic` in the payload before looking for a parser problem.
+
+Korean videos never reach this. Their Korean track is `lang=ko&kind=asr` with no
+`tlang` — the transcription itself — and it served 200 ten times in a row while
+this same address was refusing translations.

@@ -19,9 +19,11 @@ from pathlib import Path
 import pytest
 
 from tubedepth.collection import CollectionService
+from tubedepth.egress.transport import DirectEgress
 from tubedepth.payload_store import PayloadStore
 from tubedepth.sources import SourceRegistry
 from tubedepth.sources.comments import CommentsSource
+from tubedepth.sources.transcript import select_caption_track
 from tubedepth.sources.ytdlp_runtime import LibraryYtdlpRuntime
 
 pytestmark = pytest.mark.live
@@ -56,6 +58,35 @@ def test_live_a_real_transcript_still_parses_into_timed_segments(tmp_path: Path)
     assert payload["segments"], "caption body parsed to nothing — json3 shape may have changed"
     assert payload["full_text"].strip()
     assert payload["segments"][0]["duration_seconds"] > 0
+
+
+def test_live_a_korean_video_yields_its_own_transcription_not_a_translation(
+    tmp_path: Path,
+) -> None:
+    """The case the Korean-first ordering exists for.
+
+    A Korean video with no manual captions must resolve to `ko` marked
+    `kind=asr` with no `tlang` — the transcription itself. The translated
+    variant is drawn from a small per-address budget that a sweep exhausts in
+    three or four requests, so a change that quietly started fetching it would
+    turn a limitless path into a rationed one, and the only visible symptom
+    would be transcripts arriving in English.
+    """
+    dump = LibraryYtdlpRuntime().extract("9bZkp7q19f0", egress=DirectEgress())
+    assert not dump.get("subtitles"), "this video gained manual captions; pick another"
+
+    track = select_caption_track(dump, languages=("ko", "en"))
+
+    assert track.language == "ko"
+    assert "tlang=" not in track.url, "took a translation where the original exists"
+
+    payloads = PayloadStore(tmp_path)
+    service = CollectionService(runtime=LibraryYtdlpRuntime(), payloads=payloads)
+    collected = service.collect("video.transcript", "9bZkp7q19f0")
+
+    payload = json.loads(payloads.read(collected.payload.digest))
+    assert payload["language"] == "ko"
+    assert payload["segments"]
 
 
 def test_live_a_real_comment_harvest_still_threads_replies(tmp_path: Path) -> None:
