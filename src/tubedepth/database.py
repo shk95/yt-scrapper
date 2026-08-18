@@ -6,9 +6,11 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import Connection, create_engine, event
+from sqlalchemy import Column, Connection, Table, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
+from sqlalchemy.schema import CreateColumn
 
+from .errors import ConfigurationError
 from .models import Base
 
 
@@ -52,6 +54,43 @@ class Database:
 
     def create_schema(self) -> None:
         Base.metadata.create_all(self._engine)
+        self._repair_existing_tables()
+
+    def _repair_existing_tables(self) -> None:
+        """Add columns that appeared after this file was first created.
+
+        `create_all` only creates tables it does not find. A table that exists
+        but has fallen behind the model is left exactly as it is, and the gap
+        surfaces as `table jobs has no column named api_key_id` at the first
+        INSERT — inside a worker, long after the change that caused it. There
+        is no migration tool here yet, so this closes the one case that keeps
+        happening: a nullable column added to a table someone already has.
+
+        Anything else is refused by name rather than half-applied. A NOT NULL
+        column with no default cannot be filled in for rows that predate it,
+        and guessing a value is worse than saying which column is missing.
+        """
+        # One connection for the whole repair. Every transaction here is
+        # IMMEDIATE, so a second connection reflecting the schema would hold
+        # the write lock while this one waits for it — a self-inflicted
+        # `database is locked` that only appears once the file already exists.
+        with self._engine.begin() as connection:
+            for table in Base.metadata.sorted_tables:
+                rows = connection.exec_driver_sql(f"PRAGMA table_info({table.name})").fetchall()
+                existing = {row[1] for row in rows}
+                for column in table.columns:
+                    if column.name in existing:
+                        continue
+                    self._add_column(connection, table, column)
+
+    def _add_column(self, connection: Connection, table: Table, column: Column[object]) -> None:
+        if not column.nullable and column.default is None and column.server_default is None:
+            raise ConfigurationError(
+                "database schema is behind the code and cannot be repaired automatically: "
+                f"{table.name}.{column.name} is required and has no default"
+            )
+        definition = CreateColumn(column).compile(bind=self._engine)
+        connection.exec_driver_sql(f"ALTER TABLE {table.name} ADD COLUMN {definition}")
 
     @contextmanager
     def session(self) -> Iterator[Session]:

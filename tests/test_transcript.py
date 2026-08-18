@@ -31,7 +31,7 @@ def test_selection_returns_the_json3_track_for_the_requested_language(
 ) -> None:
     # json3 specifically: it is the only format that carries per-segment
     # timings as data rather than as text that has to be re-parsed.
-    track = select_caption_track(recorded_dump, language="ja")
+    track = select_caption_track(recorded_dump, languages=("ja",))
 
     assert track.language == "ja"
     assert track.format == "json3"
@@ -46,7 +46,7 @@ def test_a_manual_track_is_preferred_over_an_automatic_one(
     assert "en" in recorded_dump["subtitles"]
     assert "en" in recorded_dump["automatic_captions"]
 
-    track = select_caption_track(recorded_dump, language="en")
+    track = select_caption_track(recorded_dump, languages=("en",))
 
     assert track.is_automatic is False
 
@@ -57,7 +57,7 @@ def test_an_automatic_track_is_used_when_no_manual_one_exists(
     assert "ko" not in recorded_dump["subtitles"]
     assert "ko" in recorded_dump["automatic_captions"]
 
-    track = select_caption_track(recorded_dump, language="ko")
+    track = select_caption_track(recorded_dump, languages=("ko",))
 
     assert track.is_automatic is True
     assert track.language == "ko"
@@ -67,7 +67,7 @@ def test_a_language_the_video_does_not_have_is_reported_as_not_found(
     recorded_dump: dict[str, Any],
 ) -> None:
     with pytest.raises(NotFoundError, match="no caption track"):
-        select_caption_track(recorded_dump, language="zz")
+        select_caption_track(recorded_dump, languages=("zz",))
 
 
 @pytest.fixture
@@ -122,3 +122,68 @@ def test_events_carrying_no_text_are_dropped(recorded_json3: dict[str, Any]) -> 
     payload = {"events": [{"tStartMs": 0, "dDurationMs": 10, "id": 1}, *recorded_json3["events"]]}
 
     assert len(parse_json3(payload).segments) == 61
+
+
+def test_a_manual_track_wins_even_when_another_language_is_preferred_first(
+    recorded_dump: dict[str, Any],
+) -> None:
+    """The video's own captions beat a machine transcription in either language.
+
+    This is the whole point of the preference order: a person wrote the English
+    track on this video, and nobody wrote a Korean one, so asking for Korean
+    first must not demote a human transcript to an automatic one.
+    """
+    assert "ko" not in recorded_dump["subtitles"]
+    assert "en" in recorded_dump["subtitles"]
+
+    track = select_caption_track(recorded_dump, languages=("ko", "en"))
+
+    assert track.language == "en"
+    assert track.is_automatic is False
+
+
+def test_the_first_preferred_language_wins_among_manual_tracks(
+    recorded_dump: dict[str, Any],
+) -> None:
+    track = select_caption_track(recorded_dump, languages=("ja", "en"))
+
+    assert track.language == "ja"
+    assert track.is_automatic is False
+
+
+def test_the_original_automatic_track_beats_a_translation_of_it(
+    recorded_dump: dict[str, Any],
+) -> None:
+    """`automatic_captions["ko"]` on an English video is a translation of a
+    transcription — two lossy steps. yt-dlp marks the source language with an
+    `-orig` entry, and that one is the transcription itself.
+    """
+    stripped = dict(recorded_dump)
+    stripped["subtitles"] = {}
+
+    track = select_caption_track(stripped, languages=("ko", "en"))
+
+    assert track.language == "en"
+    assert track.is_automatic is True
+
+
+def test_a_translation_is_used_when_the_original_language_was_not_asked_for(
+    recorded_dump: dict[str, Any],
+) -> None:
+    stripped = dict(recorded_dump)
+    stripped["subtitles"] = {}
+
+    track = select_caption_track(stripped, languages=("ko",))
+
+    assert track.language == "ko"
+    assert track.is_automatic is True
+
+
+def test_no_track_in_any_preferred_language_names_all_of_them(
+    recorded_dump: dict[str, Any],
+) -> None:
+    with pytest.raises(NotFoundError) as caught:
+        select_caption_track({"subtitles": {}, "automatic_captions": {}}, languages=("ko", "en"))
+
+    assert "ko" in str(caught.value)
+    assert "en" in str(caught.value)

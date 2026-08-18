@@ -96,3 +96,22 @@ lookups an hour averaged over a day.
 
 `[lane.ryd] daily_budget` exists to stop before this happens. Seeing it means
 the budget is set too high, or more egresses are needed. It is not a bug.
+
+## `table jobs has no column named api_key_id`
+
+The database file predates the column. `create_all` never alters a table it
+already finds, so a schema change lands in new databases only and the old one
+fails at the first INSERT rather than at startup.
+
+`create_schema()` now repairs this itself for nullable columns — run any command
+that opens the database (`tubedepth jobs`, `tubedepth work`) and the column is
+added. A column that is required and has no default cannot be filled in for
+existing rows; that case refuses by name instead, and the fix is to migrate the
+file by hand or delete it if it holds nothing worth keeping.
+
+## `no caption track in any requested language: ko, en`
+
+Not a failure of extraction. The video has no Korean or English track of any
+kind — not manual, not automatic, not translated — which is common for music and
+ambience uploads with captions disabled. The job fails terminally and is not
+retried, because retrying cannot change the answer.

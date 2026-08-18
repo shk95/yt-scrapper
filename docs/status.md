@@ -176,6 +176,25 @@ Direct egress is a residential KT line in KR.
 
 ## Decisions that are expensive to reverse
 
+### Caption selection is manual-first across languages, not per language
+
+`video.transcript` asks for Korean then English, and the order it resolves them
+in is not the order it was given. A track a person wrote wins over a machine one
+*in either language*, because the alternative — honouring language order first —
+returns a Korean machine translation of an English machine transcription for
+every English video with real captions on it — two lossy steps where the
+uploader's own text was sitting right there.
+
+Within the automatic tracks the `-orig` key wins: yt-dlp marks the language the
+transcription was actually made in, and the other 156 are that transcription
+translated. So a Korean video yields `Korean (Original)` and an English one
+yields English, which is what asking for both languages should mean.
+
+The consequence to accept: asking for two languages does not fetch two
+transcripts. One job produces one track, and the payload's `language` and
+`is_automatic` say which one it got. Per-language fan-out would be a second
+kind, not a parameter — the fingerprint is over kind and target only.
+
 **`yt-dlp` is pinned with no upper bound.** Every other dependency is capped
 (`pydantic>=2.9,<3`). yt-dlp breaks *forward* — when YouTube changes, an old
 version stops working — so a cap converts the standard fix (`just update-ytdlp`)
@@ -245,7 +264,22 @@ the worker ever stops being long-lived.
 
 ## Bugs worth remembering
 
-_(none yet)_
+**`table jobs has no column named api_key_id`.** `create_all` creates tables it
+cannot find and leaves tables it finds alone, so every column added after a
+database file exists is missing from that file for good. The gap does not show
+up at startup — `create_schema()` reports success — it shows up at the first
+INSERT, inside a worker, long after the change that caused it. Any development
+database predating the API-key commit hit this. `Database._repair_existing_tables`
+now adds nullable columns and refuses anything else by name; it is not a
+migration tool and does not pretend to be one (nothing renames, drops or
+backfills). Alembic is still the real answer and is still unbuilt.
+
+**Reflection deadlocked against the repair.** The first version of that repair
+used `inspect(engine)` and then `engine.begin()` — two connections, and *every*
+transaction here is `BEGIN IMMEDIATE`, so the reflecting one held the write lock
+while the altering one waited five seconds for it and raised `database is
+locked`. The engine-wide IMMEDIATE is worth this: anything that reads and writes
+in one operation has to do both on one connection.
 
 ---
 

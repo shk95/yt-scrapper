@@ -26,6 +26,13 @@ from .ytdlp_runtime import YtdlpRuntime
 # per-segment timings as data rather than as text needing a second parser.
 CAPTION_FORMAT = "json3"
 
+# yt-dlp appends this to the automatic-caption key for the language the
+# transcription was actually made in; the other 156 are translations of it.
+ORIGINAL_SUFFIX = "-orig"
+
+# Korean first, English second, and a manual track in either beats both.
+DEFAULT_LANGUAGES = ("ko", "en")
+
 
 @dataclass(frozen=True, slots=True)
 class CaptionTrack:
@@ -43,30 +50,55 @@ def _json3_track(tracks: Sequence[Mapping[str, Any]] | None) -> Mapping[str, Any
     return None
 
 
-def select_caption_track(dump: Mapping[str, Any], *, language: str) -> CaptionTrack:
-    """Pick the track to fetch for `language`.
-
-    A manual track wins over an automatic one for the same language: one is
-    written by a person and the other is a transcription, and they will
-    disagree. Callers who want the machine transcription can ask for it once
-    that is a thing anyone has asked for.
-    """
-    candidates = (
-        (dump.get("subtitles") or {}, False),
-        (dump.get("automatic_captions") or {}, True),
+def _track(bucket: Mapping[str, Any], language: str, *, is_automatic: bool) -> CaptionTrack | None:
+    found = _json3_track(bucket.get(language))
+    if found is None:
+        return None
+    return CaptionTrack(
+        # `language` rather than the key: an `-orig` key is yt-dlp's marker for
+        # the source language, not a language tag anyone should see.
+        language=language.removesuffix(ORIGINAL_SUFFIX),
+        name=found.get("name"),
+        is_automatic=is_automatic,
+        format=CAPTION_FORMAT,
+        url=found["url"],
     )
-    for bucket, is_automatic in candidates:
-        track = _json3_track(bucket.get(language))
-        if track is None:
-            continue
-        return CaptionTrack(
-            language=language,
-            name=track.get("name"),
-            is_automatic=is_automatic,
-            format=CAPTION_FORMAT,
-            url=track["url"],
-        )
-    raise NotFoundError(f"no caption track for language: {language}")
+
+
+def select_caption_track(dump: Mapping[str, Any], *, languages: Sequence[str]) -> CaptionTrack:
+    """Pick the track to fetch, best first.
+
+    Three tiers, and the order is the whole content of this function:
+
+    1. A track a person wrote, in the first preferred language that has one.
+       This wins across languages, not just within one: an English transcript
+       written by the uploader is better than a Korean machine translation of
+       a machine transcription, even for a caller who asked for Korean first.
+    2. The automatic track in the video's *own* language, if that language was
+       asked for. yt-dlp marks it with an `-orig` key; every other automatic
+       language is that transcription run through a translator, so preferring
+       it by language order alone would quietly pick the two-step-lossy one.
+    3. Any automatic track, in preferred order.
+    """
+    manual = dump.get("subtitles") or {}
+    automatic = dump.get("automatic_captions") or {}
+
+    for language in languages:
+        track = _track(manual, language, is_automatic=False)
+        if track is not None:
+            return track
+
+    for language in languages:
+        track = _track(automatic, language + ORIGINAL_SUFFIX, is_automatic=True)
+        if track is not None:
+            return track
+
+    for language in languages:
+        track = _track(automatic, language, is_automatic=True)
+        if track is not None:
+            return track
+
+    raise NotFoundError(f"no caption track in any requested language: {', '.join(languages)}")
 
 
 def parse_json3(
@@ -122,12 +154,12 @@ class TranscriptSource:
     default_freshness = timedelta(days=30)
     cost = SourceCost.STANDARD
 
-    def __init__(self, *, language: str = "en") -> None:
-        self._language = language
+    def __init__(self, *, languages: Sequence[str] = DEFAULT_LANGUAGES) -> None:
+        self._languages = tuple(languages)
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> Transcript:
         dump = runtime.extract(target, egress=egress)
-        track = select_caption_track(dump, language=self._language)
+        track = select_caption_track(dump, languages=self._languages)
         body = egress.fetch(track.url)
         return parse_json3(
             json.loads(body),
