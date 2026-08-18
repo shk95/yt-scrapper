@@ -129,3 +129,97 @@ def test_a_sustained_run_of_successes_resets_the_quarantine_streak() -> None:
     clock.advance(300.0)
 
     assert controller.is_available("vpn-jp1", Lane.RYD) is True
+
+
+def test_a_permit_is_refused_once_the_window_is_full() -> None:
+    # The window is a concurrency limit, not a number the controller merely
+    # remembers. Until something asks it for permission it controls nothing.
+    controller = RateController(clock=FakeClock())
+
+    assert controller.acquire("direct", Lane.YOUTUBE) is True
+    assert controller.acquire("direct", Lane.YOUTUBE) is False
+
+
+def test_releasing_a_permit_frees_the_slot() -> None:
+    controller = RateController(clock=FakeClock())
+    controller.acquire("direct", Lane.YOUTUBE)
+
+    controller.release("direct", Lane.YOUTUBE, Verdict.OK)
+
+    assert controller.acquire("direct", Lane.YOUTUBE) is True
+
+
+def test_a_successful_release_widens_the_window_for_the_next_caller() -> None:
+    clock = FakeClock()
+    controller = RateController(clock=clock)
+    controller.acquire("direct", Lane.YOUTUBE)
+    controller.release("direct", Lane.YOUTUBE, Verdict.OK)  # window 1.0 -> 2.0
+    clock.advance(60.0)
+
+    assert controller.acquire("direct", Lane.YOUTUBE) is True
+    assert controller.acquire("direct", Lane.YOUTUBE) is True
+
+
+def test_a_quarantined_egress_refuses_permits(sleep_free: None = None) -> None:
+    controller = RateController(clock=FakeClock())
+    controller.acquire("vpn-jp1", Lane.YOUTUBE)
+    controller.release("vpn-jp1", Lane.YOUTUBE, Verdict.BLOCKED)
+
+    assert controller.acquire("vpn-jp1", Lane.YOUTUBE) is False
+
+
+def test_a_minimum_interval_spaces_out_consecutive_permits() -> None:
+    # Concurrency and rate are different limits. A window of four with no
+    # spacing is four requests in the same millisecond, which is the shape
+    # that gets an address flagged even when the count is modest.
+    clock = FakeClock()
+    controller = RateController(clock=clock, minimum_interval_seconds=2.0)
+
+    assert controller.acquire("direct", Lane.RYD) is True
+    controller.release("direct", Lane.RYD, Verdict.OK)
+    assert controller.acquire("direct", Lane.RYD) is False
+
+    clock.advance(2.0)
+    assert controller.acquire("direct", Lane.RYD) is True
+
+
+def test_a_throttle_lengthens_the_interval_as_well_as_narrowing_the_window() -> None:
+    clock = FakeClock()
+    controller = RateController(clock=clock, minimum_interval_seconds=1.0)
+    controller.acquire("direct", Lane.RYD)
+
+    controller.release("direct", Lane.RYD, Verdict.THROTTLED)
+    clock.advance(1.0)
+
+    assert controller.acquire("direct", Lane.RYD) is False, "the interval should have doubled"
+    clock.advance(1.0)
+    assert controller.acquire("direct", Lane.RYD) is True
+
+
+def test_concurrent_callers_never_exceed_the_window() -> None:
+    """The controller is shared across worker threads, so it needs a lock.
+
+    Without one, two threads both read an in-flight count of zero against a
+    window of one and both proceed — which is precisely the over-sending the
+    controller exists to prevent, and it would appear only under load.
+    """
+    import threading
+
+    controller = RateController(clock=FakeClock())
+    granted: list[bool] = []
+    lock = threading.Lock()
+    start = threading.Barrier(16)
+
+    def contend() -> None:
+        start.wait()
+        outcome = controller.acquire("direct", Lane.YOUTUBE)
+        with lock:
+            granted.append(outcome)
+
+    threads = [threading.Thread(target=contend) for _ in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert sum(granted) == 1

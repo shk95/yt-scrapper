@@ -14,9 +14,11 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
+from ..egress.control import Lane
 from ..egress.transport import Egress
 from ..identifiers import TargetType
 from ..schemas import ListedVideo, VideoListing
+from .registry import SourceCost
 from .ytdlp_runtime import YtdlpRuntime
 
 # `extract_flat` is what makes a listing one request instead of one per video.
@@ -67,6 +69,10 @@ def normalize(dump: Mapping[str, Any], *, source_kind: str) -> VideoListing:
 class _ListingSource:
     kind: str
     target_type: TargetType
+    lane = Lane.YOUTUBE
+    # One flat request regardless of how many videos come back, which is what
+    # extract_flat buys.
+    cost = SourceCost.CHEAP
 
     def __init__(self, *, limit: int = DEFAULT_LIMIT) -> None:
         self._limit = limit

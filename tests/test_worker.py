@@ -7,11 +7,14 @@ which is the only way this loop gets exercised as often as it needs to be.
 
 from __future__ import annotations
 
+import threading
+import time
 from pathlib import Path
 
 from pydantic import BaseModel
 
 from tubedepth.database import Database
+from tubedepth.egress.control import Lane, RateController
 from tubedepth.egress.transport import Egress
 from tubedepth.errors import UpstreamError
 from tubedepth.identifiers import TargetType
@@ -19,6 +22,7 @@ from tubedepth.models import Job, JobState
 from tubedepth.payload_store import PayloadStore
 from tubedepth.schemas import ListedVideo, VideoListing
 from tubedepth.sources import SourceRegistry
+from tubedepth.sources.registry import SourceCost
 from tubedepth.sources.ytdlp_runtime import YtdlpRuntime
 from tubedepth.worker import Worker
 
@@ -30,6 +34,8 @@ class EchoPayload(BaseModel):
 class EchoSource:
     kind = "video.echo"
     target_type = TargetType.VIDEO
+    lane = Lane.YOUTUBE
+    cost = SourceCost.STANDARD
 
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -42,6 +48,8 @@ class EchoSource:
 class FailingSource:
     kind = "video.failing"
     target_type = TargetType.VIDEO
+    lane = Lane.YOUTUBE
+    cost = SourceCost.STANDARD
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
         raise UpstreamError(f"nothing came back for: {target}")
@@ -139,6 +147,8 @@ class ListingSource:
 
     kind = "channel.fake"
     target_type = TargetType.CHANNEL
+    lane = Lane.YOUTUBE
+    cost = SourceCost.STANDARD
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> VideoListing:
         return VideoListing(
@@ -182,3 +192,123 @@ def test_a_listing_job_without_a_follow_up_queues_nothing(tmp_path: Path) -> Non
 
     with database.session() as session:
         assert session.query(Job).filter(Job.state == JobState.QUEUED).count() == 0
+
+
+class SlowSource:
+    """A source that takes long enough to hold a slot."""
+
+    kind = "video.slow"
+    target_type = TargetType.VIDEO
+    lane = Lane.YOUTUBE
+    cost = SourceCost.EXPENSIVE
+
+    def __init__(self, seconds: float = 0.3) -> None:
+        self._seconds = seconds
+        self.concurrent = 0
+        self.peak = 0
+        self._lock = threading.Lock()
+
+    def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
+        with self._lock:
+            self.concurrent += 1
+            self.peak = max(self.peak, self.concurrent)
+        try:
+            time.sleep(self._seconds)
+            return EchoPayload(target=target)
+        finally:
+            with self._lock:
+                self.concurrent -= 1
+
+
+def test_a_concurrent_worker_runs_several_jobs_at_once(tmp_path: Path) -> None:
+    source = SlowSource(seconds=0.2)
+    database, _, payloads = build(tmp_path, source)
+    for index in range(6):
+        enqueue(database, "video.slow", f"video{index:07d}")
+    worker = Worker(
+        database=database,
+        registry=_registry(source),
+        payloads=payloads,
+        name="worker-1",
+        concurrency=3,
+        controller=RateController(window_ceiling=8),
+    )
+
+    started = time.monotonic()
+    completed = worker.drain()
+    elapsed = time.monotonic() - started
+
+    assert completed == 6
+    assert source.peak > 1, "jobs ran one at a time; the worker is still sequential"
+    assert elapsed < 6 * 0.2, f"no speed-up: {elapsed:.2f}s for six 0.2s jobs"
+
+
+def test_the_rate_controller_caps_how_many_run_at_once(tmp_path: Path) -> None:
+    """The AIMD window is a real limit, not a number kept for reporting.
+
+    This is what connects the controller to anything: without it the worker's
+    thread count is the only limit and the measured per-address tolerance is
+    decoration.
+    """
+    source = SlowSource(seconds=0.2)
+    database, _, payloads = build(tmp_path, source)
+    for index in range(6):
+        enqueue(database, "video.slow", f"video{index:07d}")
+    controller = RateController(window_ceiling=2)
+    worker = Worker(
+        database=database,
+        registry=_registry(source),
+        payloads=payloads,
+        name="worker-1",
+        concurrency=6,
+        controller=controller,
+    )
+
+    worker.drain()
+
+    assert source.peak <= 2, f"the window was exceeded: {source.peak} ran at once"
+
+
+def test_a_cheap_job_is_not_starved_by_a_queue_full_of_expensive_ones(
+    tmp_path: Path,
+) -> None:
+    # The failure this prevents is the common one in a system built for
+    # throughput: eight comment harvests take every slot and a sub-second
+    # dislike lookup waits minutes behind them.
+    slow = SlowSource(seconds=0.4)
+    quick = EchoSource()
+    database, _, payloads = build(tmp_path, slow, quick)
+    for index in range(8):
+        enqueue(database, "video.slow", f"slow{index:07d}")
+    enqueue(database, "video.echo", "quickone123")
+
+    worker = Worker(
+        database=database,
+        registry=_registry(slow, quick),
+        payloads=payloads,
+        name="worker-1",
+        concurrency=4,
+        controller=RateController(window_ceiling=8),
+    )
+    started = time.monotonic()
+    worker.drain()
+
+    with database.session() as session:
+        finished = session.get(Job, _identifier_of(session, "video.echo"))
+        assert finished is not None
+        assert finished.state is JobState.SUCCEEDED
+    assert quick.calls == ["quickone123"]
+    # Four expensive jobs deep, a cheap one would wait ~0.8s without a reserved
+    # slot. It should not.
+    assert time.monotonic() - started < 8 * 0.4
+
+
+def _identifier_of(session, kind: str) -> str:  # type: ignore[no-untyped-def]
+    return session.query(Job).filter(Job.kind == kind).one().identifier
+
+
+def _registry(*sources: object) -> SourceRegistry:
+    registry = SourceRegistry()
+    for source in sources:
+        registry.register(source)  # type: ignore[arg-type]
+    return registry

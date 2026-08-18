@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from datetime import timedelta
 
 from sqlalchemy import select, update
@@ -14,7 +15,9 @@ class JobRepository:
     def __init__(self, session: Session) -> None:
         self._session = session
 
-    def claim(self, *, worker: str, lease: timedelta) -> Job | None:
+    def claim(
+        self, *, worker: str, lease: timedelta, kinds: Sequence[str] | None = None
+    ) -> Job | None:
         """Take exactly one queued job, or return None.
 
         The write lock is held from the first statement of the transaction —
@@ -26,9 +29,15 @@ class JobRepository:
         belt and braces on top of that.
         """
         now = utcnow()
+        conditions = [Job.state == JobState.QUEUED, Job.scheduled_at <= now]
+        if kinds is not None:
+            # Filtered in the claim itself rather than claimed and put back: a
+            # job returned to the queue has burned an attempt and lost its place.
+            conditions.append(Job.kind.in_(kinds))
+
         candidate = self._session.scalars(
             select(Job.identifier)
-            .where(Job.state == JobState.QUEUED, Job.scheduled_at <= now)
+            .where(*conditions)
             .order_by(Job.scheduled_at, Job.created_at)
             .limit(1)
         ).one_or_none()

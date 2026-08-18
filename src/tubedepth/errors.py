@@ -27,3 +27,7 @@ class UpstreamError(TubedepthError):
 
 class ConfigurationError(TubedepthError):
     """Our own misconfiguration. Never the client's fault."""
+
+
+class RateLimitedError(UpstreamError):
+    """The upstream told us to slow down, or refused this address outright."""

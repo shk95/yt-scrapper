@@ -10,10 +10,11 @@ from __future__ import annotations
 import pytest
 from pydantic import BaseModel
 
+from tubedepth.egress.control import Lane
 from tubedepth.egress.transport import Egress
 from tubedepth.errors import ConfigurationError, NotFoundError
 from tubedepth.identifiers import TargetType
-from tubedepth.sources.registry import SourceRegistry
+from tubedepth.sources.registry import SourceCost, SourceRegistry
 from tubedepth.sources.ytdlp_runtime import YtdlpRuntime
 
 
@@ -31,6 +32,8 @@ class FakeSource:
 
     kind = "video.fake"
     target_type = TargetType.VIDEO
+    lane = Lane.YOUTUBE
+    cost = SourceCost.STANDARD
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> FakePayload:
         return FakePayload(target=target)
@@ -80,3 +83,34 @@ def test_every_source_the_project_ships_declares_a_kind() -> None:
     assert registry.kinds(), "the project ships no sources at all"
     for kind in registry.kinds():
         assert registry.get(kind).kind == kind
+
+
+def test_every_shipped_source_declares_a_lane_and_a_cost() -> None:
+    """Both are what the scheduler reads, and neither has a safe default.
+
+    A missing lane would put a Return YouTube Dislike request on YouTube's
+    budget; a missing cost would let a comment harvest take a slot reserved for
+    the sub-second jobs it would otherwise starve.
+    """
+    from tubedepth.egress.control import Lane
+    from tubedepth.sources import default_registry
+    from tubedepth.sources.registry import SourceCost
+
+    registry = default_registry()
+
+    for kind in registry.kinds():
+        source = registry.get(kind)
+        assert isinstance(source.lane, Lane), kind
+        assert isinstance(source.cost, SourceCost), kind
+
+
+def test_a_comment_harvest_is_declared_more_expensive_than_a_metadata_fetch() -> None:
+    # Not decoration: this ordering is what the reserved slots are built on,
+    # and it is measured — a harvest is ~50 requests against metadata's ~3.
+    from tubedepth.sources import default_registry
+    from tubedepth.sources.registry import SourceCost
+
+    registry = default_registry()
+
+    assert registry.get("video.comments").cost is SourceCost.EXPENSIVE
+    assert registry.get("video.metadata").cost is SourceCost.STANDARD

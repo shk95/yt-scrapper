@@ -18,8 +18,8 @@ Last updated: 2026-08-18.
 | M5 — comments | done (video.comments) |
 | queue wired end to end | **done** — enqueue → work → jobs collects for real |
 | M6 — discovery | done (channel.videos, search.videos, playlist.items) |
-| worker concurrency | **next** — the throughput ceiling is sequential today |
-| M3 — HTTP API and auth | after that |
+| worker concurrency + AIMD wired | done |
+| M3 — HTTP API and auth | **next** |
 | M4.5 — egress pool | deferred; see "decisions" below |
 
 Nothing under `src/tubedepth/` exists yet beyond the package marker. The plan
@@ -53,16 +53,28 @@ tool/checks/test with no uv on PATH               exit 69 (unverified)
   ... plus REQUIRE_NATIVE=1, as CI sets           exit 1 (failure)
 ```
 
-**Measured, 2026-08-18:** one enqueued channel with `--then video.metadata`
-produced 101 jobs and collected all of them in 2m28s — 2,456 jobs/hour, and
-that is the ceiling, because `Worker.drain` is a sequential loop. The earlier
-hand-measured figure of ~4,600/hour came from four concurrent extractions,
-which this code cannot yet do.
+**Measured, 2026-08-18.** Forty metadata jobs, same videos each run:
 
-**The AIMD rate controller in `egress/control.py` is not wired to anything.**
-It is tested and correct and nothing imports it. It gets connected when the
-worker gains concurrency, because that is the first moment there is a rate to
-control; until then it is a design that looks like a feature.
+| concurrency | wall clock | jobs/hour |
+| --- | --- | --- |
+| 1 | 59.4 s | 2,424 |
+| 4 | 25.5 s | 5,645 |
+| 8 | 17.1 s | 8,417 |
+
+**The rate controller is now the limiter, and that was verified rather than
+assumed.** Holding threads at twelve and moving only the AIMD window ceiling:
+
+| threads | window ceiling | wall clock |
+| --- | --- | --- |
+| 12 | 2 | 32.0 s |
+| 12 | 6 | 15.8 s |
+| 12 | 12 | 16.9 s |
+
+Throughput tracks the ceiling, not the thread count, so the controller is
+demonstrably in the path. The last row is the useful one: past roughly six
+concurrent extractions the bottleneck stops being us. That is the number the
+plan wanted measured instead of guessed, and `TUBEDEPTH_WINDOW_CEILING` is how
+an operator asks for a different one.
 
 **Not yet done in the queue:** lease reaping, cancellation, retries and
 backoff. `JobRepository.claim` takes a lease and counts attempts, but nothing

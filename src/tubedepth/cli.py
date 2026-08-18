@@ -13,6 +13,7 @@ import typer
 from . import __version__
 from .collection import CollectionService
 from .database import Database
+from .egress.control import RateController
 from .egress.transport import DirectEgress
 from .errors import TubedepthError
 from .fixture_capture import redact_for_fixture
@@ -107,18 +108,38 @@ def work(
     data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
         "var"
     ),
+    concurrency: Annotated[
+        int,
+        typer.Option(
+            "--concurrency",
+            "-c",
+            envvar="TUBEDEPTH_CONCURRENCY",
+            help="How many jobs may run at once, subject to the measured rate limit",
+        ),
+    ] = 4,
     once: Annotated[bool, typer.Option("--once", help="Take one job and stop")] = False,
 ) -> None:
     """Drain the queue.
 
     Every job goes through the same registry the CLI's own `collect` uses, so
     there is one implementation of what each kind means rather than two.
+
+    `--concurrency` is an upper bound, not a target. The rate controller
+    narrows it whenever YouTube pushes back and widens it again while requests
+    keep succeeding, so the effective figure is measured rather than chosen.
     """
     configure_logging()
     worker = Worker(
         database=_database(data_directory),
         payloads=_payload_store(data_directory),
         name=f"cli-{os.getpid()}",
+        concurrency=concurrency,
+        controller=RateController(
+            # The ceiling additive increase may not pass. Raising it is how an
+            # operator asks for more throughput; the controller still refuses
+            # to stay there if YouTube pushes back.
+            window_ceiling=float(os.environ.get("TUBEDEPTH_WINDOW_CEILING", "6"))
+        ),
     )
     completed = 1 if (once and worker.run_once()) else (0 if once else worker.drain())
     typer.echo(f"✓ {completed} job(s) completed")

@@ -16,10 +16,12 @@ import pytest
 from pydantic import BaseModel
 
 from tubedepth.collection import CollectionService
+from tubedepth.egress.control import Lane
 from tubedepth.egress.transport import Egress
 from tubedepth.identifiers import TargetType
 from tubedepth.payload_store import PayloadStore
 from tubedepth.sources import SourceRegistry
+from tubedepth.sources.registry import SourceCost
 from tubedepth.sources.ytdlp_runtime import YtdlpRuntime
 
 FIXTURES = Path(__file__).parent / "fixtures/ytdlp/video_metadata"
@@ -100,6 +102,8 @@ class ChannelListingSource:
 
     kind = "channel.fake"
     target_type = TargetType.CHANNEL
+    lane = Lane.YOUTUBE
+    cost = SourceCost.STANDARD
 
     def __init__(self) -> None:
         self.received: list[str] = []

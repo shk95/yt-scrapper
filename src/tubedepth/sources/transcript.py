@@ -11,10 +11,12 @@ from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
+from ..egress.control import Lane
 from ..egress.transport import Egress
 from ..errors import NotFoundError
 from ..identifiers import TargetType
 from ..schemas import Transcript, TranscriptSegment
+from .registry import SourceCost
 from .ytdlp_runtime import YtdlpRuntime
 
 # json3 specifically: it is the only format YouTube offers that carries the
@@ -110,6 +112,8 @@ class TranscriptSource:
 
     kind = "video.transcript"
     target_type = TargetType.VIDEO
+    lane = Lane.YOUTUBE
+    cost = SourceCost.STANDARD
 
     def __init__(self, *, language: str = "en") -> None:
         self._language = language

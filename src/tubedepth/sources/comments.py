@@ -11,9 +11,11 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 from typing import Any
 
+from ..egress.control import Lane
 from ..egress.transport import Egress
 from ..identifiers import TargetType
 from ..schemas import Comment, CommentHarvest
+from .registry import SourceCost
 from .ytdlp_runtime import YtdlpRuntime
 
 DEFAULT_LIMIT = 200
@@ -70,6 +72,8 @@ class CommentsSource:
 
     kind = "video.comments"
     target_type = TargetType.VIDEO
+    lane = Lane.YOUTUBE
+    cost = SourceCost.EXPENSIVE
 
     def __init__(self, *, sort: str = "top", limit: int = DEFAULT_LIMIT) -> None:
         self._sort = sort

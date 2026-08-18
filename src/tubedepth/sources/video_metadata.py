@@ -6,9 +6,11 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from ..egress.control import Lane
 from ..egress.transport import Egress
 from ..identifiers import TargetType
 from ..schemas import CaptionTrackReference, Chapter, ReplaySegment, VideoMetadata
+from .registry import SourceCost
 from .ytdlp_runtime import YtdlpRuntime
 
 
@@ -79,6 +81,8 @@ class VideoMetadataSource:
 
     kind = "video.metadata"
     target_type = TargetType.VIDEO
+    lane = Lane.YOUTUBE
+    cost = SourceCost.STANDARD
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> VideoMetadata:
         return normalize(runtime.extract(target, egress=egress))

@@ -13,8 +13,10 @@ Dislike and SponsorBlock each have their own budget and their own 429.
 
 from __future__ import annotations
 
+import threading
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 
@@ -43,6 +45,12 @@ QUARANTINE_CEILING_SECONDS = 3_600.0
 # stops paying for last week.
 RECOVERY_SUCCESSES = 20
 
+# Concurrency and rate are different limits, and both matter. A window of four
+# with no spacing is four requests in the same millisecond, which is the shape
+# that gets an address flagged even when the count is modest.
+DEFAULT_MINIMUM_INTERVAL_SECONDS = 0.0
+MAXIMUM_INTERVAL_SECONDS = 60.0
+
 
 @dataclass(slots=True)
 class LaneState:
@@ -50,6 +58,9 @@ class LaneState:
     quarantined_until: float = 0.0
     quarantine_streak: int = 0
     recovery_successes: int = 0
+    in_flight: int = 0
+    minimum_interval: float = DEFAULT_MINIMUM_INTERVAL_SECONDS
+    next_earliest_start: float = 0.0
 
 
 @dataclass(slots=True)
@@ -58,21 +69,81 @@ class RateController:
     # clock jumps after the Windows host sleeps, and a jump would release every
     # quarantine at once.
     clock: Callable[[], float] = time.monotonic
+    minimum_interval_seconds: float = DEFAULT_MINIMUM_INTERVAL_SECONDS
+    # The ceiling additive increase may never pass. Without it a route that
+    # keeps succeeding grows without bound and finds the real limit the hard way.
+    window_ceiling: float = 6.0
     _states: dict[tuple[str, Lane], LaneState] = field(default_factory=dict)
+    # Shared across worker threads. Without the lock, two threads both read an
+    # in-flight count of zero against a window of one and both proceed — the
+    # exact over-sending this class exists to prevent, visible only under load.
+    _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def _state(self, egress: str, lane: Lane) -> LaneState:
-        return self._states.setdefault((egress, lane), LaneState())
+        state = self._states.get((egress, lane))
+        if state is None:
+            state = LaneState(minimum_interval=self.minimum_interval_seconds)
+            self._states[(egress, lane)] = state
+        return state
 
     def window(self, egress: str, lane: Lane) -> float:
         return self._state(egress, lane).window
 
     def is_available(self, egress: str, lane: Lane) -> bool:
-        return self.clock() >= self._state(egress, lane).quarantined_until
+        with self._lock:
+            return self.clock() >= self._state(egress, lane).quarantined_until
+
+    def acquire(self, egress: str, lane: Lane) -> bool:
+        """Take a slot if the window, the quarantine and the spacing all allow it.
+
+        Refusing is the normal case rather than an error: the caller waits and
+        asks again, or asks a different egress.
+        """
+        with self._lock:
+            now = self.clock()
+            state = self._state(egress, lane)
+            if now < state.quarantined_until:
+                return False
+            if state.in_flight >= max(1, int(state.window)):
+                return False
+            if now < state.next_earliest_start:
+                return False
+            state.in_flight += 1
+            # Claimed before the request starts, so concurrent callers cannot
+            # all clear the spacing gate on the same tick.
+            state.next_earliest_start = now + state.minimum_interval
+            return True
+
+    def release(self, egress: str, lane: Lane, verdict: Verdict) -> None:
+        with self._lock:
+            state = self._state(egress, lane)
+            state.in_flight = max(0, state.in_flight - 1)
+            self._apply(state, verdict, self.clock())
+
+    @contextmanager
+    def permit(self, egress: str, lane: Lane) -> Iterator[None]:
+        """Hold a slot for the duration of a request.
+
+        The verdict defaults to a failure that does not widen the window: an
+        exception escaping the body is not evidence the route can take more.
+        """
+        verdict = Verdict.THROTTLED
+        try:
+            yield
+            verdict = Verdict.OK
+        finally:
+            self.release(egress, lane, verdict)
 
     def record(self, egress: str, lane: Lane, verdict: Verdict) -> None:
-        state = self._state(egress, lane)
+        with self._lock:
+            self._apply(self._state(egress, lane), verdict, self.clock())
+
+    def _apply(self, state: LaneState, verdict: Verdict, now: float) -> None:
         if verdict is Verdict.OK:
-            state.window += 1.0 / state.window
+            state.window = min(self.window_ceiling, state.window + 1.0 / state.window)
+            state.minimum_interval = max(
+                self.minimum_interval_seconds, state.minimum_interval * 0.95
+            )
             state.recovery_successes += 1
             if state.recovery_successes >= RECOVERY_SUCCESSES:
                 state.quarantine_streak = 0
@@ -81,6 +152,14 @@ class RateController:
             # that admits nothing can never earn the success that would let
             # it recover.
             state.window = max(1.0, state.window / 2.0)
+            state.minimum_interval = min(
+                MAXIMUM_INTERVAL_SECONDS, max(1.0, state.minimum_interval * 2.0)
+            )
+            # Push the gate out too. Widening the interval without moving the
+            # next allowed start applies the new spacing one request late —
+            # which is one request too many, immediately after being told to
+            # slow down.
+            state.next_earliest_start = now + state.minimum_interval
         elif verdict is Verdict.BLOCKED:
             # Back into slow start, not back to the window it had: the address
             # was just told it was going too fast.
