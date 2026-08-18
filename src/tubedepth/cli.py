@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import gzip
 import json
 import os
 from pathlib import Path
@@ -11,7 +12,10 @@ import typer
 
 from . import __version__
 from .collection import CollectionService
+from .egress.transport import DirectEgress
 from .errors import TubedepthError
+from .fixture_capture import redact_for_fixture
+from .identifiers import normalize_video_identifier
 from .payload_store import PayloadStore
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime
 
@@ -28,6 +32,7 @@ def _payload_store(data_directory: Path) -> PayloadStore:
 
 @application.command()
 def collect(
+    kind: Annotated[str, typer.Argument(help="What to collect; see `tubedepth sources`")],
     target: Annotated[str, typer.Argument(help="A video URL or bare video id")],
     data_directory: Annotated[
         Path,
@@ -35,17 +40,58 @@ def collect(
     ] = Path("var"),
     show: Annotated[bool, typer.Option("--show/--no-show", help="Print the payload")] = False,
 ) -> None:
-    """Collect one video's metadata and store it."""
+    """Collect one kind of data for one video and store it."""
     payloads = _payload_store(data_directory)
-    service = CollectionService(runtime=LibraryYtdlpRuntime(), payloads=payloads)
+    service = CollectionService(payloads=payloads)
 
-    typer.echo(f"→ collecting {target}")
-    stored = service.collect_video_metadata(target)
-    typer.echo(f"✓ stored {stored.byte_count} bytes at {stored.path}")
+    typer.echo(f"→ collecting {kind} for {target}")
+    collected = service.collect(kind, target)
+    typer.echo(f"✓ stored {collected.payload.byte_count} bytes at {collected.payload.path}")
     if show:
-        typer.echo(
-            json.dumps(json.loads(payloads.read(stored.digest)), indent=2, ensure_ascii=False)
-        )
+        body = json.loads(payloads.read(collected.payload.digest))
+        typer.echo(json.dumps(body, indent=2, ensure_ascii=False))
+
+
+@application.command()
+def sources() -> None:
+    """List what this build can collect.
+
+    Read from the registry, so a newly added source appears here without this
+    command being touched.
+    """
+    for kind in CollectionService(payloads=_payload_store(Path("var"))).kinds():
+        typer.echo(kind)
+
+
+@application.command(name="capture-fixture")
+def capture_fixture(
+    target: Annotated[str, typer.Argument(help="A video URL or bare video id")],
+    name: Annotated[str, typer.Option("--name", help="Filename stem, dated by convention")],
+    directory: Annotated[Path, typer.Option("--into", help="Fixture directory")] = Path(
+        "tests/fixtures/ytdlp/video_metadata"
+    ),
+) -> None:
+    """Record a real yt-dlp dump as a committable fixture.
+
+    Reaches the network on purpose, and is run by a person rather than by CI.
+    The redaction is the point: see fixture_capture for what is stripped and
+    why the two rules differ.
+    """
+    video_id = normalize_video_identifier(target)
+    typer.echo(f"→ extracting {video_id}")
+    dump = LibraryYtdlpRuntime().extract(video_id, egress=DirectEgress())
+
+    directory.mkdir(parents=True, exist_ok=True)
+    path = directory / f"{name}.json.gz"
+    payload = json.dumps(redact_for_fixture(dump), ensure_ascii=False, indent=1, sort_keys=True)
+    path.write_bytes(gzip.compress(payload.encode()))
+
+    typer.echo(f"✓ wrote {path} ({path.stat().st_size / 1024:.0f} KB gzipped)")
+    typer.echo(
+        f"  keys {len(dump)}  chapters {len(dump.get('chapters') or [])}"
+        f"  heatmap {len(dump.get('heatmap') or [])}"
+        f"  subtitle languages {len(dump.get('subtitles') or {})}"
+    )
 
 
 @application.command()

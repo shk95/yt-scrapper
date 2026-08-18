@@ -1,23 +1,51 @@
-"""Collecting one kind of data and putting it where it can be read again."""
+"""Collecting one kind of data and putting it where it can be read again.
+
+Dispatch goes through the registry rather than a method per kind. That is the
+difference between adding a source costing one module and it costing an edit
+here, an edit in the CLI, and an edit in the worker — and it is what the
+job queue will read when a claimed job names its kind.
+"""
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
+from .egress.transport import DirectEgress, Egress
 from .identifiers import normalize_video_identifier
 from .payload_store import PayloadStore, StoredPayload
-from .sources.video_metadata import normalize
-from .sources.ytdlp_runtime import YtdlpRuntime
+from .sources import SourceRegistry, default_registry
+from .sources.ytdlp_runtime import LibraryYtdlpRuntime, YtdlpRuntime
+
+
+@dataclass(frozen=True, slots=True)
+class Collected:
+    kind: str
+    target: str
+    payload: StoredPayload
 
 
 class CollectionService:
-    def __init__(self, *, runtime: YtdlpRuntime, payloads: PayloadStore) -> None:
-        self._runtime = runtime
+    def __init__(
+        self,
+        *,
+        payloads: PayloadStore,
+        runtime: YtdlpRuntime | None = None,
+        egress: Egress | None = None,
+        registry: SourceRegistry | None = None,
+    ) -> None:
         self._payloads = payloads
+        self._runtime = runtime or LibraryYtdlpRuntime()
+        self._egress = egress or DirectEgress()
+        # Injected rather than imported, so a test can hand over a registry
+        # holding one fake source and exercise the whole pipeline offline.
+        self._registry = registry or default_registry()
 
-    def collect_video_metadata(self, target: str) -> StoredPayload:
+    def kinds(self) -> list[str]:
+        return self._registry.kinds()
+
+    def collect(self, kind: str, target: str) -> Collected:
+        source = self._registry.get(kind)
         video_id = normalize_video_identifier(target)
-        dump = self._runtime.extract(video_id)
-        metadata = normalize(dump)
-        return self._payloads.put(
-            "video.metadata",
-            metadata.model_dump_json(indent=1).encode(),
-        )
+        result = source.collect(video_id, self._egress, self._runtime)
+        stored = self._payloads.put(kind, result.model_dump_json(indent=1).encode())
+        return Collected(kind=kind, target=video_id, payload=stored)

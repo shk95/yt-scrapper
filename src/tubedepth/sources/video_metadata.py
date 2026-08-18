@@ -6,7 +6,9 @@ from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from typing import Any
 
+from ..egress.transport import Egress
 from ..schemas import Chapter, ReplaySegment, VideoMetadata
+from .ytdlp_runtime import YtdlpRuntime
 
 
 def _most_replayed(heatmap: Sequence[Mapping[str, Any]] | None) -> list[ReplaySegment]:
@@ -50,3 +52,12 @@ def normalize(dump: Mapping[str, Any]) -> VideoMetadata:
         chapters=_chapters(dump.get("chapters")),
         most_replayed=_most_replayed(dump.get("heatmap")),
     )
+
+
+class VideoMetadataSource:
+    """Chapters, the most-replayed graph, tags, and the exact upload instant."""
+
+    kind = "video.metadata"
+
+    def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> VideoMetadata:
+        return normalize(runtime.extract(target, egress=egress))

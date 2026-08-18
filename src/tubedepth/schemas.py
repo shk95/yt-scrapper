@@ -43,3 +43,19 @@ class VideoMetadata(BaseModel):
     published_at: datetime | None = None
     chapters: list[Chapter] = []
     most_replayed: list[ReplaySegment] = []
+
+
+class TranscriptSegment(BaseModel):
+    start_seconds: float
+    duration_seconds: float
+    text: str
+
+
+class Transcript(BaseModel):
+    language: str
+    name: str | None = None
+    is_automatic: bool = False
+    segments: list[TranscriptSegment] = []
+    # Built once here because it is the shape most callers actually want, and
+    # because everyone joining the segments themselves joins them differently.
+    full_text: str = ""

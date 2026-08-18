@@ -13,34 +13,33 @@ from typing import Any, Protocol, runtime_checkable
 
 from yt_dlp import YoutubeDL
 
+from ..egress.transport import Egress
 from ..errors import UpstreamError
 
 
 @runtime_checkable
 class YtdlpRuntime(Protocol):
-    def extract(self, target: str) -> Mapping[str, Any]: ...
+    def extract(self, target: str, *, egress: Egress) -> Mapping[str, Any]: ...
 
 
 class LibraryYtdlpRuntime:
     """Calls yt-dlp in process. Reaches the network."""
 
-    def __init__(self, *, proxy: str | None = None) -> None:
-        self._options: dict[str, Any] = {
-            "quiet": True,
-            "no_warnings": True,
-            "skip_download": True,
-            # Politeness is a default, not an afterthought: this is a private
-            # tool whose whole strategy is being unremarkable in the logs.
-            "sleep_requests": 0.75,
-            "retries": 3,
-        }
-        if proxy is not None:
-            self._options["proxy"] = proxy
+    BASE_OPTIONS: dict[str, Any] = {
+        "quiet": True,
+        "no_warnings": True,
+        "skip_download": True,
+        # Politeness is a default, not an afterthought: this is a private tool
+        # whose whole strategy is being unremarkable in the logs.
+        "sleep_requests": 0.75,
+        "retries": 3,
+    }
 
-    def extract(self, target: str) -> Mapping[str, Any]:
+    def extract(self, target: str, *, egress: Egress) -> Mapping[str, Any]:
         # yt-dlp types its params as a TypedDict, which a plain dict cannot be
         # proven to satisfy. The shape is right; the checker cannot see it.
-        with YoutubeDL(self._options) as downloader:  # type: ignore[arg-type]
+        options = self.BASE_OPTIONS | egress.ytdlp_options()
+        with YoutubeDL(options) as downloader:  # type: ignore[arg-type]
             info = downloader.extract_info(target, download=False)
             if info is None:
                 # Documented as possible and reachable in practice, so it gets a

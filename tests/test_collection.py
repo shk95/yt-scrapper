@@ -31,7 +31,7 @@ class RecordedYtdlpRuntime:
         self._dump = dump
         self.requested: list[str] = []
 
-    def extract(self, target: str) -> Mapping[str, Any]:
+    def extract(self, target: str, *, egress: object) -> Mapping[str, Any]:
         self.requested.append(target)
         return self._dump
 
@@ -47,9 +47,9 @@ def test_collecting_a_video_stores_its_normalized_metadata(
 ) -> None:
     service = CollectionService(runtime=runtime, payloads=PayloadStore(tmp_path))
 
-    stored = service.collect_video_metadata("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+    collected = service.collect("video.metadata", "https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 
-    payload = json.loads(PayloadStore(tmp_path).read(stored.digest))
+    payload = json.loads(PayloadStore(tmp_path).read(collected.payload.digest))
     assert payload["video_id"] == "dQw4w9WgXcQ"
     assert len(payload["tags"]) == 27
     assert len(payload["most_replayed"]) == 100
@@ -62,6 +62,21 @@ def test_collection_hands_the_runtime_a_normalized_identifier(
     # the same extraction, or the store fills with duplicates of one video.
     service = CollectionService(runtime=runtime, payloads=PayloadStore(tmp_path))
 
-    service.collect_video_metadata("https://youtu.be/dQw4w9WgXcQ")
+    service.collect("video.metadata", "https://youtu.be/dQw4w9WgXcQ")
 
     assert runtime.requested == ["dQw4w9WgXcQ"]
+
+
+def test_an_unknown_kind_is_refused_before_anything_is_extracted(
+    tmp_path: Path, runtime: RecordedYtdlpRuntime
+) -> None:
+    # The registry is consulted first, so a typo in a kind costs nothing and
+    # never reaches YouTube.
+    from tubedepth.errors import NotFoundError
+
+    service = CollectionService(runtime=runtime, payloads=PayloadStore(tmp_path))
+
+    with pytest.raises(NotFoundError, match="no source registered"):
+        service.collect("video.nonexistent", "dQw4w9WgXcQ")
+
+    assert runtime.requested == []

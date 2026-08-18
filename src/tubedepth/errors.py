@@ -17,5 +17,13 @@ class ValidationError(TubedepthError):
     """The request could not be understood: a malformed identifier, a bad option."""
 
 
+class NotFoundError(TubedepthError):
+    """The thing asked for does not exist here, or the video does not have it."""
+
+
 class UpstreamError(TubedepthError):
     """A backend answered, and the answer was unusable."""
+
+
+class ConfigurationError(TubedepthError):
+    """Our own misconfiguration. Never the client's fault."""
