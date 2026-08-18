@@ -12,12 +12,16 @@ import typer
 
 from . import __version__
 from .collection import CollectionService
+from .database import Database
 from .egress.transport import DirectEgress
 from .errors import TubedepthError
 from .fixture_capture import redact_for_fixture
 from .identifiers import normalize_video_identifier
+from .models import Job
+from .observability import configure_logging
 from .payload_store import PayloadStore
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime
+from .worker import Worker
 
 application = typer.Typer(
     name="tubedepth",
@@ -50,6 +54,72 @@ def collect(
     if show:
         body = json.loads(payloads.read(collected.payload.digest))
         typer.echo(json.dumps(body, indent=2, ensure_ascii=False))
+
+
+def _database(data_directory: Path) -> Database:
+    data_directory.mkdir(parents=True, exist_ok=True)
+    database = Database(data_directory / "tubedepth.db")
+    database.create_schema()
+    return database
+
+
+@application.command()
+def enqueue(
+    kind: Annotated[str, typer.Argument(help="What to collect; see `tubedepth sources`")],
+    targets: Annotated[list[str], typer.Argument(help="One or more video URLs or ids")],
+    data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
+        "var"
+    ),
+) -> None:
+    """Queue work without doing it. The worker picks it up."""
+    database = _database(data_directory)
+    with database.session() as session:
+        for target in targets:
+            job = Job(kind=kind, target=normalize_video_identifier(target))
+            session.add(job)
+            session.flush()
+            typer.echo(f"→ queued {job.identifier}  {kind}  {job.target}")
+
+
+@application.command()
+def work(
+    data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
+        "var"
+    ),
+    once: Annotated[bool, typer.Option("--once", help="Take one job and stop")] = False,
+) -> None:
+    """Drain the queue.
+
+    Every job goes through the same registry the CLI's own `collect` uses, so
+    there is one implementation of what each kind means rather than two.
+    """
+    configure_logging()
+    worker = Worker(
+        database=_database(data_directory),
+        payloads=_payload_store(data_directory),
+        name=f"cli-{os.getpid()}",
+    )
+    completed = 1 if (once and worker.run_once()) else (0 if once else worker.drain())
+    typer.echo(f"✓ {completed} job(s) completed")
+
+
+@application.command()
+def jobs(
+    data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
+        "var"
+    ),
+) -> None:
+    """Show the queue."""
+    with _database(data_directory).session() as session:
+        rows = session.query(Job).order_by(Job.created_at).all()
+        for job in rows:
+            detail = job.error_message or (
+                f"{job.payload_bytes} bytes" if job.payload_bytes else ""
+            )
+            typer.echo(
+                f"{job.identifier[:8]}  {job.state.value:<9}  "
+                f"{job.kind:<18}  {job.target:<14}  {detail}"
+            )
 
 
 @application.command()

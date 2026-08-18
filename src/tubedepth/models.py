@@ -9,7 +9,7 @@ import enum
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Enum, Integer, String
+from sqlalchemy import DateTime, Enum, Integer, String, Text
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -28,6 +28,8 @@ class Base(DeclarativeBase):
 class JobState(enum.StrEnum):
     QUEUED = "queued"
     RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
 
 
 class Job(Base):
@@ -35,6 +37,7 @@ class Job(Base):
 
     identifier: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_identifier)
     kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    target: Mapped[str] = mapped_column(String(500), nullable=False, default="")
     state: Mapped[JobState] = mapped_column(
         # native_enum=False keeps these as TEXT, so adding a member never needs
         # a migration — and the job kinds this project grows are exactly the
@@ -54,3 +57,15 @@ class Job(Base):
     lease_expires_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+
+    # The result, by reference. The payload itself is a file: a comment harvest
+    # runs to tens of megabytes and does not belong in the table the claim
+    # query depends on staying fast.
+    payload_digest: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    payload_bytes: Mapped[int | None] = mapped_column(Integer, nullable=True)
+
+    # Why it failed, on the row. A job that only says "failed" sends whoever is
+    # on call to the logs for what was already known at the moment it happened.
+    error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    error_message: Mapped[str | None] = mapped_column(Text, nullable=True)

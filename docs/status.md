@@ -11,13 +11,32 @@ Last updated: 2026-08-18.
 
 | Milestone | State |
 | --- | --- |
-| M0 — repository skeleton | done (uncommitted) |
-| M1 — domain core + egress skeleton | **next** |
-| M2–M9 | not started |
+| M0 — repository skeleton | done |
+| M1 — domain core | done, except lease reaping and cancellation |
+| M2 — first yt-dlp source | done (video.metadata) |
+| M4 — transcripts | done (video.transcript); third-party sources not started |
+| M5 — comments | done (video.comments) |
+| queue wired end to end | **done** — enqueue → work → jobs collects for real |
+| M3 — HTTP API and auth | **next** |
+| M4.5 — egress pool, M6–M9 | not started |
 
 Nothing under `src/tubedepth/` exists yet beyond the package marker. The plan
 this is being built from lives outside the repository at
 `~/.claude/plans/encapsulated-herding-dolphin.md`.
+
+The collection path works end to end against real YouTube:
+
+```
+tubedepth enqueue video.metadata dQw4w9WgXcQ nfgdJyL-Jmg
+tubedepth enqueue video.transcript dQw4w9WgXcQ
+tubedepth enqueue video.comments dQw4w9WgXcQ
+tubedepth work        # 4 jobs, 29s: 26KB + 16KB metadata, 10KB transcript, 97KB comments
+```
+
+Collected and verified by hand: 27 tags on one video and 13 on the other (the
+Data API returns these only to the owner), 11 chapters, 100 ranked
+most-replayed buckets, 61 timed caption segments, and 200 comments threaded
+into 24 top-level and 176 replies with the pinned, hearted and verified flags.
 
 M0 was verified rather than assumed, on 2026-08-18:
 
@@ -32,9 +51,10 @@ tool/checks/test with no uv on PATH               exit 69 (unverified)
   ... plus REQUIRE_NATIVE=1, as CI sets           exit 1 (failure)
 ```
 
-**Not yet done: there is no commit.** `git init` has run and the hooks are
-configured, but nothing is committed and the `dev` branch does not exist
-(it cannot, before the first commit).
+**Not yet done in the queue:** lease reaping, cancellation, retries and
+backoff. `JobRepository.claim` takes a lease and counts attempts, but nothing
+yet returns an expired one to the queue, so a worker killed mid-job strands
+its row in `running`.
 
 ---
 
@@ -113,11 +133,15 @@ drvfs WAL problem, and the pysqlite deferred-transaction lock upgrade.
 
 ## Next
 
-Make the initial commit, create `dev`, and verify the clone per
-project-scaffold `decisions/006` — following the README in order, using nothing
-you happen to know. That check always finds something.
+Verify the clone per project-scaffold `decisions/006` — follow the README in
+order, using nothing you happen to know. That check always finds something.
 
-M1 then builds the domain core with **zero network**, and the egress package
+Then either finish the queue's unfinished half (lease reaping, cancellation,
+retries) or start M3, the HTTP API over the same service layer. The API is the
+larger user-visible step; the reaping is the thing that will bite first in
+unattended use.
+
+M1 built the domain core with **zero network**, and the egress package
 skeleton lands with it — `Egress.build`, `DirectEgress`, the selector and the
 AIMD controller are all pure logic and fully testable offline. Landing the
 "every transport comes from an egress" invariant on day one is cheap;
