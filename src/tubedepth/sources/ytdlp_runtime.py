@@ -19,7 +19,13 @@ from ..errors import UpstreamError
 
 @runtime_checkable
 class YtdlpRuntime(Protocol):
-    def extract(self, target: str, *, egress: Egress) -> Mapping[str, Any]: ...
+    def extract(
+        self,
+        target: str,
+        *,
+        egress: Egress,
+        options: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]: ...
 
 
 class LibraryYtdlpRuntime:
@@ -35,11 +41,20 @@ class LibraryYtdlpRuntime:
         "retries": 3,
     }
 
-    def extract(self, target: str, *, egress: Egress) -> Mapping[str, Any]:
+    def extract(
+        self,
+        target: str,
+        *,
+        egress: Egress,
+        options: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
         # yt-dlp types its params as a TypedDict, which a plain dict cannot be
         # proven to satisfy. The shape is right; the checker cannot see it.
-        options = self.BASE_OPTIONS | egress.ytdlp_options()
-        with YoutubeDL(options) as downloader:  # type: ignore[arg-type]
+        # Order matters: the source's options come last so a source can raise
+        # a limit the base set caps, and the egress sits in the middle because
+        # no source may override which address it leaves from.
+        merged = self.BASE_OPTIONS | egress.ytdlp_options() | dict(options or {})
+        with YoutubeDL(merged) as downloader:  # type: ignore[arg-type]
             info = downloader.extract_info(target, download=False)
             if info is None:
                 # Documented as possible and reachable in practice, so it gets a

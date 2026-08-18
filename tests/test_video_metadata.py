@@ -108,3 +108,36 @@ def test_chapters_are_carried_through_in_playback_order(
     assert chapters[0].end_seconds == 15
     starts = [chapter.start_seconds for chapter in chapters]
     assert starts == sorted(starts)
+
+
+def test_the_engagement_counts_are_carried_through(recorded_dump: dict[str, Any]) -> None:
+    # The comment harvest deliberately does not report a total, because yt-dlp
+    # overwrites comment_count when getcomments is on. This is where the real
+    # number lives, and that claim is only true if this test passes.
+    metadata = normalize(recorded_dump)
+
+    assert metadata.view_count == recorded_dump["view_count"]
+    assert metadata.like_count == recorded_dump["like_count"]
+    assert metadata.comment_count == 2_400_000
+
+
+def test_the_descriptive_fields_are_carried_through(recorded_dump: dict[str, Any]) -> None:
+    metadata = normalize(recorded_dump)
+
+    assert metadata.channel == recorded_dump["channel"]
+    assert metadata.duration_seconds == recorded_dump["duration"]
+    assert metadata.description
+    assert metadata.categories == ["Music"]
+
+
+def test_a_video_reports_which_caption_languages_exist_without_their_urls(
+    recorded_dump: dict[str, Any],
+) -> None:
+    # Listing the tracks is useful; storing their URLs is not. They are signed
+    # and short-lived, so a stored one is a guaranteed 403 later.
+    metadata = normalize(recorded_dump)
+
+    manual = [track for track in metadata.caption_tracks if not track.is_automatic]
+    assert {track.language for track in manual} == {"de-DE", "en", "es-419", "ja", "pt-BR"}
+    assert len(metadata.caption_tracks) > 100
+    assert not any("url" in track.model_dump() for track in metadata.caption_tracks)

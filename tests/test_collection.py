@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from tubedepth.collection import CollectionService
+from tubedepth.egress.transport import Egress
 from tubedepth.payload_store import PayloadStore
 
 FIXTURES = Path(__file__).parent / "fixtures/ytdlp/video_metadata"
@@ -30,9 +31,17 @@ class RecordedYtdlpRuntime:
     def __init__(self, dump: Mapping[str, Any]) -> None:
         self._dump = dump
         self.requested: list[str] = []
+        self.options: list[dict[str, Any]] = []
 
-    def extract(self, target: str, *, egress: object) -> Mapping[str, Any]:
+    def extract(
+        self,
+        target: str,
+        *,
+        egress: Egress,
+        options: Mapping[str, Any] | None = None,
+    ) -> Mapping[str, Any]:
         self.requested.append(target)
+        self.options.append(dict(options or {}))
         return self._dump
 
 

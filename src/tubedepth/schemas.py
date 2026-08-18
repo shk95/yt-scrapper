@@ -31,10 +31,33 @@ class ReplaySegment(BaseModel):
     score: float = Field(ge=0.0, le=1.0)
 
 
+class CaptionTrackReference(BaseModel):
+    """That a track exists, not how to fetch it.
+
+    The URL is deliberately absent. Caption URLs are signed and short-lived, so
+    a stored one is a guaranteed 403 later; the transcript source resolves a
+    fresh one inside the same job that uses it.
+    """
+
+    language: str
+    name: str | None = None
+    is_automatic: bool
+
+
 class VideoMetadata(BaseModel):
     video_id: str
     title: str
+    description: str = ""
+    channel: str | None = None
     channel_id: str | None = None
+    duration_seconds: int | None = None
+    categories: list[str] = []
+    view_count: int | None = None
+    like_count: int | None = None
+    # The video's own comment count. CommentHarvest deliberately does not carry
+    # one, because yt-dlp overwrites it when harvesting; this is the real number.
+    comment_count: int | None = None
+    caption_tracks: list[CaptionTrackReference] = []
     # snippet.tags is returned by the official Data API only to the video's
     # owner, so for everyone else this field exists nowhere else.
     tags: list[str] = []
@@ -59,3 +82,39 @@ class Transcript(BaseModel):
     # Built once here because it is the shape most callers actually want, and
     # because everyone joining the segments themselves joins them differently.
     full_text: str = ""
+
+
+class Comment(BaseModel):
+    comment_id: str
+    # None, not the string "root". A sentinel that looks like an identifier is
+    # a bug waiting for someone to compare against it.
+    parent_id: str | None = None
+    text: str
+    like_count: int | None = None
+    author: str | None = None
+    author_id: str | None = None
+    author_is_uploader: bool = False
+    author_is_verified: bool = False
+    is_pinned: bool = False
+    # yt-dlp calls this `is_favorited`. What YouTube shows is a heart from the
+    # channel, and "favorited" reads like something the viewer did.
+    is_hearted_by_uploader: bool = False
+    published_at: datetime | None = None
+    published_text: str | None = None
+
+
+class CommentHarvest(BaseModel):
+    sort: str
+    retrieved_count: int = 0
+    # There is deliberately no "reported_total". With getcomments on, yt-dlp
+    # overwrites comment_count with the number it retrieved, so carrying it
+    # would present our own count as YouTube's. The video's real count is on
+    # VideoMetadata, where nothing overwrites it.
+    # Whether the harvest ran out of comments or ran into its limit. The
+    # difference is the difference between data and a misleading number, and
+    # only the harvester knows which happened.
+    is_truncated: bool = False
+    # Flat, threaded by parent_id, rather than nested. A fifty-thousand-comment
+    # nested document is pathological to parse and to diff, and any caller that
+    # wants a tree builds one in five lines.
+    comments: list[Comment] = []
