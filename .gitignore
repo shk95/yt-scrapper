@@ -1,0 +1,93 @@
+# Stack-agnostic ignores. Append your language's own build and dependency
+# directories below.
+
+# OS junk — macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# OS junk — Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+Desktop.ini
+$RECYCLE.BIN/
+*.lnk
+
+# OS junk — Linux
+*~
+.directory
+.Trash-*
+.nfs*
+
+# Editors
+*.swp
+*.swo
+*.iml
+*.ipr
+*.iws
+.idea/
+#.vscode/   # uncomment if launch configs should not be shared
+
+# ---------------------------------------------------------------------------
+# Credentials and machine-local configuration.
+#
+# These entries belong here before the first commit rather than after the first
+# mistake: .gitignore only protects files that were never committed, and a
+# secret that reaches history stays there after the file is deleted.
+# ---------------------------------------------------------------------------
+
+# Signing and key material
+*.jks
+*.keystore
+*.p12
+*.pem
+*.key
+*.mobileprovision
+*.cer
+
+# Environment and local overrides
+.env
+.env.*
+!.env.example
+*.local
+
+# Agent tooling — shared settings are committed, machine-local ones are not
+.claude/settings.local.json
+.claude/.cc-writes/
+
+# ---------------------------------------------------------------------------
+# Python
+# ---------------------------------------------------------------------------
+__pycache__/
+*.py[cod]
+.venv/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# ---------------------------------------------------------------------------
+# Runtime state.
+#
+# var/ holds the SQLite database, the artifact blob store, and — the reason
+# this entry is not merely tidiness — the egress configurations. A ProtonVPN
+# WireGuard config contains a PrivateKey, so a single careless `git add -A`
+# would publish a credential. gitleaks in pre-commit is the backstop, not the
+# defence; this line is the defence.
+# ---------------------------------------------------------------------------
+var/
+*.conf
+*.cookies.txt

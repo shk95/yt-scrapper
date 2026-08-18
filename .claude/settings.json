@@ -1,0 +1,54 @@
+{
+  "$comment": [
+    "Committed, so every clone gets it. Pre-approves the commands a session",
+    "runs constantly, so work is not interrupted by permission prompts.",
+    "",
+    "The line drawn: anything that cannot lose committed work or reach outside",
+    "the machine. Deliberately absent, so they stay a conscious choice —",
+    "git push, git reset --hard, git rebase, gh release, gh repo, and rm.",
+    "",
+    "Also absent on purpose: anything that starts a wireproxy process or reads",
+    "~/.config/tubedepth/wireguard. Those touch VPN private keys and network",
+    "egress, and an agent should have to ask."
+  ],
+  "permissions": {
+    "allow": [
+      "Bash(tool/doctor.sh)",
+      "Bash(tool/worktree.sh:*)",
+      "Bash(tool/checks/:*)",
+      "Bash(just:*)",
+
+      "Bash(uv run pytest:*)",
+      "Bash(uv run ruff:*)",
+      "Bash(uv run basedpyright:*)",
+      "Bash(uv sync:*)",
+      "Bash(uv lock:*)",
+      "Bash(uv tree:*)",
+
+      "Bash(git status:*)",
+      "Bash(git diff:*)",
+      "Bash(git log:*)",
+      "Bash(git show:*)",
+      "Bash(git branch:*)",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git checkout:*)",
+      "Bash(git switch:*)",
+      "Bash(git fetch:*)",
+      "Bash(git worktree:*)",
+      "Bash(git config core.hooksPath:*)",
+
+      "Bash(gh issue list:*)",
+      "Bash(gh issue view:*)",
+      "Bash(gh issue create:*)",
+      "Bash(gh pr list:*)",
+      "Bash(gh pr view:*)",
+      "Bash(gh pr diff:*)",
+      "Bash(gh run list:*)",
+      "Bash(gh run view:*)",
+      "Bash(gh run watch:*)",
+
+      "Bash(gitleaks:*)"
+    ]
+  }
+}

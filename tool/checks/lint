@@ -1,0 +1,17 @@
+#!/bin/sh
+# Static analysis: ruff for the lint rules, basedpyright for types.
+#
+# Both matter for different reasons. ruff catches the mechanical things cheaply.
+# basedpyright is what makes the source registry safe: every source declares
+# ClassVars the dispatcher relies on, and a source that forgets one is a runtime
+# AttributeError inside a worker at 3 a.m. rather than a red check here.
+#
+# `standard` rather than `strict`, matching nvim-starter — strict flags the
+# untyped third-party surface (yt-dlp has no stubs) far more than it flags us.
+
+set -e
+. tool/checks/prerequisite
+require_command uv
+
+uv run ruff check .
+uv run basedpyright

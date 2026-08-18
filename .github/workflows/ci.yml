@@ -1,0 +1,66 @@
+name: CI
+
+# Runs the same three scripts the git hooks run.
+#
+# Hooks are per-clone configuration and easy to forget, so CI must repeat every
+# check they perform rather than trusting that they ran. See
+# project-scaffold decisions/002-hooks-are-opt-in-so-ci-must-backstop.md
+#
+# REQUIRE_NATIVE=1 turns tool/checks/prerequisite's "unverified on this host"
+# exit 69 back into a failure, so the merge gate can never accept a change that
+# was silently unchecked.
+
+on:
+  push:
+    branches: [master, dev]
+  pull_request:
+    branches: [master, dev]
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  REQUIRE_NATIVE: 1
+
+jobs:
+  verify:
+    name: Format, lint, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - name: Format
+        run: tool/checks/format
+
+      - name: Lint
+        run: tool/checks/lint
+
+      # The suite is offline by construction: tests/conftest.py refuses to open
+      # a socket for any test not marked `live`, and `live` is deselected by
+      # pyproject's addopts. A GitHub runner is a datacenter address, so a
+      # network-dependent suite here would be red for reasons that have nothing
+      # to do with the diff.
+      - name: Test
+        run: tool/checks/test
+
+  required:
+    name: Required checks
+    runs-on: ubuntu-latest
+    needs: [verify]
+    if: always()
+    steps:
+      # A stable job name for branch protection to require, so adding or
+      # renaming a check above never means editing the protection rule.
+      - name: Gate
+        run: |
+          if [ "${{ needs.verify.result }}" != "success" ]; then
+            echo "verify did not succeed: ${{ needs.verify.result }}" >&2
+            exit 1
+          fi
+          echo "all required checks passed"

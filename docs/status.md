@@ -1,0 +1,124 @@
+# Status and handover notes
+
+Rewritten freely as the project moves. Anything that must survive a rewrite —
+an error and its fix — belongs in [`troubleshooting.md`](troubleshooting.md).
+
+Last updated: 2026-08-18.
+
+---
+
+## Where things stand
+
+| Milestone | State |
+| --- | --- |
+| M0 — repository skeleton | done (uncommitted) |
+| M1 — domain core + egress skeleton | **next** |
+| M2–M9 | not started |
+
+Nothing under `src/tubedepth/` exists yet beyond the package marker. The plan
+this is being built from lives outside the repository at
+`~/.claude/plans/encapsulated-herding-dolphin.md`.
+
+M0 was verified rather than assumed, on 2026-08-18:
+
+```
+tool/doctor.sh                                    ✓ ready (sqlite 3.46.1, hooks on)
+tool/doctor.sh, core.hooksPath unset              exit 1, names the fix command
+.githooks/commit-msg  "bad message"               exit 1
+.githooks/commit-msg  "feat(egress): ..."         exit 0
+.githooks/commit-msg  84-char subject             exit 1
+tool/checks/{format,lint,test}                    all pass, 3 tests
+tool/checks/test with no uv on PATH               exit 69 (unverified)
+  ... plus REQUIRE_NATIVE=1, as CI sets           exit 1 (failure)
+```
+
+**Not yet done: there is no commit.** `git init` has run and the hooks are
+configured, but nothing is committed and the `dev` branch does not exist
+(it cannot, before the first commit).
+
+---
+
+## This machine
+
+Prefer `tool/doctor.sh` over reading this section — the script reports what is
+actually here; this table reports what was here when someone last edited it.
+
+WSL2, Ubuntu 26.04, 16 CPU / 15 GiB, kernel 6.18.33.2. Python 3.14.4, uv 0.12.1,
+Go 1.26.5, SQLite 3.46.1, `wireproxy` available via nixpkgs at 1.1.3.
+**No Docker, no podman, no passwordless sudo.** `systemctl --user` works.
+Direct egress is a residential KT line in KR.
+
+---
+
+## Decisions that are expensive to reverse
+
+**`yt-dlp` is pinned with no upper bound.** Every other dependency is capped
+(`pydantic>=2.9,<3`). yt-dlp breaks *forward* — when YouTube changes, an old
+version stops working — so a cap converts the standard fix (`just update-ytdlp`)
+into "edit pyproject.toml first". Reproducibility comes from `uv.lock`, which
+pins the exact version; the cap was never what provided it. Undo this only if a
+yt-dlp release ever breaks *us* in a way an upgrade cannot fix.
+
+**The queue is SQLite, not a broker.** Celery/arq/dramatiq all need Redis or
+RabbitMQ, which on a host with no container runtime becomes an undocumented
+prerequisite for every clone. The structural argument, though, is that the queue
+table *is* the API's read model: `GET /v1/jobs/{id}` reads the row the worker
+wrote, so the dual-write inconsistency a broker introduces cannot exist. All SQL
+about state transitions lives in `JobRepository.claim()` so that a move to
+Postgres is one method. Undo when a second machine needs to run workers.
+
+**Comment harvests run yt-dlp as a subprocess; everything else uses it as a
+library.** The difference is cancellation: a blocking call inside a thread
+cannot be interrupted, so a cancelled six-minute harvest would keep burning
+quota after the client gave up. A subprocess takes SIGTERM, and it keeps a 50 MB
+comment payload out of the API process's heap. The cost is ~0.5 s of interpreter
+startup, which is free next to the harvest. Undo if yt-dlp ever grows a real
+abort hook.
+
+**Egress rate control is keyed on `lane`, not on `backend`.** What rate-limits
+us is a *service*, not our internal taxonomy: yt-dlp, InnerTube and caption
+`json3` GETs all draw on the same per-IP Google tolerance, while RYD and
+SponsorBlock each have their own budget and their own 429. Routing eligibility
+is still keyed on backend. Collapsing the two axes would let RYD's documented
+100/min throttle SponsorBlock, and would leak caption fetches out of the YouTube
+budget so the measurement stops being true.
+
+**stdlib `logging` in the worker, sources and services — a deliberate departure
+from the house style.** No sibling repository uses a logging library; output is
+`typer.echo` with the `→ ✓ ✗ ·` vocabulary. That breaks for a process running
+for days under systemd: `typer.echo` from a background asyncio task has no
+timestamp, no level and no ordering, and "which of the 400 harvests overnight hit
+the bot check" is then unanswerable. Interactive CLI output is unchanged. Undo if
+the worker ever stops being long-lived.
+
+---
+
+## Bugs worth remembering
+
+_(none yet)_
+
+---
+
+## Traps that will recur
+
+Everything that has already cost time lives in
+[`troubleshooting.md`](troubleshooting.md). **This file holds state and
+decisions; that one holds findings**, so updating the state does not delete them.
+
+Already seeded there, from measurements taken while planning: the RYD browser
+User-Agent requirement, RYD's documented daily cap, YouTube's bot check, the
+drvfs WAL problem, and the pysqlite deferred-transaction lock upgrade.
+
+---
+
+## Next
+
+Make the initial commit, create `dev`, and verify the clone per
+project-scaffold `decisions/006` — following the README in order, using nothing
+you happen to know. That check always finds something.
+
+M1 then builds the domain core with **zero network**, and the egress package
+skeleton lands with it — `Egress.build`, `DirectEgress`, the selector and the
+AIMD controller are all pure logic and fully testable offline. Landing the
+"every transport comes from an egress" invariant on day one is cheap;
+retrofitting it after five sources exist is a rewrite.

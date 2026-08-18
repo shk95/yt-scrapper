@@ -1,0 +1,40 @@
+#!/bin/sh
+#
+# Enforces Conventional Commits, so `git log --oneline` stays readable and
+# changelog tooling can group commits by type later.
+#
+# Entirely stack-agnostic; copy as-is.
+
+subject=$(grep -v '^#' "$1" | sed '/^[[:space:]]*$/d' | head -1)
+
+# Git writes these itself; they are not ours to reformat.
+case "$subject" in
+  "Merge "*|"Revert "*|fixup!*|squash!*) exit 0 ;;
+esac
+
+pattern='^(build|chore|ci|docs|feat|fix|perf|refactor|revert|style|test)(\([a-z0-9._/-]+\))?!?: .+$'
+
+if ! printf '%s' "$subject" | grep -Eq "$pattern"; then
+  cat >&2 <<EOF
+
+✗ Commit message is not a Conventional Commit.
+
+  Got:      $subject
+  Expected: <type>(<optional scope>): <description>
+
+  Types:    build chore ci docs feat fix perf refactor revert style test
+  Examples: feat(auth): add passwordless sign-in
+            fix(db): stop save from rewinding the revision
+            feat(api)!: make list endpoints paginated
+
+  Bypass once with: git commit --no-verify
+
+EOF
+  exit 1
+fi
+
+# Long subjects get truncated by every tool that displays them.
+if [ ${#subject} -gt 72 ]; then
+  printf '\n✗ Subject is %s characters; keep it under 72.\n\n  %s\n\n' "${#subject}" "$subject" >&2
+  exit 1
+fi

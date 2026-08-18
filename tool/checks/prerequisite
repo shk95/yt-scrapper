@@ -1,0 +1,29 @@
+# Sourced by the Unix-like checks. Not executable on its own.
+#
+# A host that has no Nix cannot evaluate this domain at all, and until now each
+# check simply ran `nix` and let the shell's "command not found" surface as a
+# failure. That reports a check this host could never run as a check that ran
+# and found a problem, which is the opposite of what
+# docs/definition-of-done.md asks for, and it left native Windows clones unable
+# to push a change to a Unix-like payload they had every right to edit.
+#
+# Exit status 69 is the repository's unverified state; see
+# docs/architecture.md. REQUIRE_NATIVE=1 turns it back into a failure, and CI
+# sets that so the merge gate never accepts an unchecked change.
+
+require_command() {
+  require_missing=
+  for require_name in "$@"; do
+    command -v "$require_name" >/dev/null 2>&1 \
+      || require_missing="$require_missing $require_name"
+  done
+  [ -n "$require_missing" ] || return 0
+
+  if [ "${REQUIRE_NATIVE:-0}" = 1 ]; then
+    printf '\033[31m✗ required tooling is missing:%s\033[0m\n' "$require_missing" >&2
+    exit 1
+  fi
+
+  printf '· unverified: this host has no%s\n' "$require_missing" >&2
+  exit 69
+}

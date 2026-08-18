@@ -1,0 +1,46 @@
+#!/bin/sh
+#
+# Keeps a failing test suite from reaching the remote, where it becomes
+# everyone else's problem.
+#
+# Delegates to tool/checks/test, which the project supplies. Skipped when that
+# does not exist.
+#
+# Bypass with `git push --no-verify` when pushing work in progress on purpose.
+
+set -e
+
+script="tool/checks/test"
+[ -x "$script" ] || exit 0
+
+# git feeds the refs being pushed on stdin, one per line:
+#
+#   <local ref> <local sha> <remote ref> <remote sha>
+#
+# and a deletion carries an all-zero local sha. Deleting a remote branch
+# cannot break anything the suite would catch, so testing it is pure delay —
+# and on a machine where the suite cannot run at all, it makes tidying up a
+# merged branch impossible without --no-verify, which is a habit worth not
+# teaching.
+#
+# Anything unexpected on stdin, including nothing at all, falls through to
+# running the tests. The safe default is to test.
+saw_ref=0
+pushing_content=0
+while read -r _ local_sha _ _; do
+  saw_ref=1
+  case "$local_sha" in
+    *[!0]*) pushing_content=1 ;;
+  esac
+done
+
+if [ "$saw_ref" -eq 1 ] && [ "$pushing_content" -eq 0 ]; then
+  printf '· deletions only, skipping the tests\n'
+  exit 0
+fi
+
+printf '→ test\n'
+"$script" || {
+  printf '\033[31m✗ Tests failed. Push blocked.\033[0m\n' >&2
+  exit 1
+}

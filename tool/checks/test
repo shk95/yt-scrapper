@@ -1,0 +1,23 @@
+#!/bin/sh
+# The test suite, as the pre-push hook and CI both run it.
+#
+# Two flags here are load-bearing and neither is an optimisation.
+#
+# `--frozen` refuses to re-resolve. Without it uv will happily install a newer
+# dependency than uv.lock records, and the suite then passes against a set of
+# versions nobody committed. The lock file is as much under test as the code —
+# especially here, where yt-dlp is deliberately uncapped in pyproject.toml.
+#
+# `-m "not live"` is applied by pyproject.toml's addopts. The suite is offline
+# by construction: tests/conftest.py refuses to open a socket for any test not
+# marked `live`, so a source that grows a hidden request fails by name instead
+# of making the suite mysteriously slow and occasionally red. The live checks
+# exist and matter — they are `just contract`, run by a person on a residential
+# connection that YouTube does not challenge.
+
+set -e
+. tool/checks/prerequisite
+require_command uv
+
+uv sync --extra dev --frozen
+uv run pytest

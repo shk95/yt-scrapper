@@ -1,0 +1,15 @@
+#!/bin/sh
+# Formatting, checked rather than applied.
+#
+# There is no formatter precedent in the sibling repositories to copy — the Nix
+# overlay delegates to `nix fmt`, and note-store has no formatter at all — so
+# this is a choice this project makes: ruff's formatter, because ruff is already
+# the linter here and a second tool would have to earn its place. Not black.
+#
+# Fix what this reports with: uv run ruff format .
+
+set -e
+. tool/checks/prerequisite
+require_command uv
+
+uv run ruff format --check .

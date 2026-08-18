@@ -1,0 +1,42 @@
+#!/bin/sh
+#
+# Formatting, static analysis and a secret scan, cheapest first.
+#
+# The checks themselves are not defined here — this hook delegates to
+# tool/checks/format and tool/checks/lint, which the project supplies for its
+# own stack. A check that does not exist is skipped, so this hook works in a
+# repository that has neither.
+#
+# Bypass with `git commit --no-verify`.
+
+set -e
+
+fail() {
+  printf '\033[31m✗ %s\033[0m\n' "$1" >&2
+  exit 1
+}
+
+run_check() {
+  script="tool/checks/$1"
+  [ -x "$script" ] || return 0
+  printf '→ %s\n' "$1"
+  "$script" || fail "$2"
+}
+
+run_check format "Formatting is off. See tool/checks/format for the fix command."
+run_check lint   "Static analysis found problems."
+
+# The check that cannot be skipped, mirrored in CI — see
+# decisions/002-hooks-are-opt-in-so-ci-must-backstop.md. A credential that
+# reaches history stays there after the file is deleted, so the cheap moment to
+# catch one is before the commit exists.
+if command -v gitleaks >/dev/null 2>&1; then
+  printf '→ gitleaks\n'
+  if gitleaks git --help >/dev/null 2>&1; then
+    gitleaks git --staged --redact --no-banner || fail "Possible secret in staged changes."
+  else
+    gitleaks protect --staged --redact --no-banner || fail "Possible secret in staged changes."
+  fi
+else
+  printf '· gitleaks not installed, skipping the secret scan\n'
+fi

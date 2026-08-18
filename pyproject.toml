@@ -1,0 +1,71 @@
+[build-system]
+requires = ["hatchling>=1.25"]
+build-backend = "hatchling.build"
+
+[project]
+name = "tubedepth"
+version = "0.1.0"
+description = "An asynchronous job API that harvests the YouTube video, channel and discovery data the official Data API does not expose"
+readme = "README.md"
+requires-python = ">=3.12"
+license = { file = "LICENSE" }
+dependencies = [
+  "fastapi>=0.115,<1",
+  "uvicorn[standard]>=0.34,<1",
+  "pydantic>=2.9,<3",
+  "SQLAlchemy>=2.0,<3",
+  "alembic>=1.13,<2",
+  "httpx>=0.28,<1",
+  "typer>=0.12,<1",
+  # Deliberately uncapped, unlike everything above it.
+  #
+  # Every YouTube breakage this project will ever have is fixed by upgrading
+  # yt-dlp. An upper cap turns that fix from `uv lock --upgrade-package yt-dlp`
+  # into "edit pyproject.toml first, then run the command", which is exactly the
+  # friction you do not want at the moment extraction has stopped working.
+  # The lock file still pins an exact version, so builds stay reproducible.
+  "yt-dlp>=2026.7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8,<9",
+  "pytest-asyncio>=0.24,<2",
+  "pytest-cov>=5,<7",
+  "respx>=0.21,<1",
+  "ruff>=0.6,<1",
+  "basedpyright>=1.18,<2",
+]
+
+[project.scripts]
+tubedepth = "tubedepth.cli:main"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/tubedepth"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM"]
+
+[tool.basedpyright]
+typeCheckingMode = "standard"
+venvPath = "."
+venv = ".venv"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# `-m "not live"` is load-bearing, not a preference. Every source in this
+# project talks to YouTube, and a suite that actually does so is red on any
+# datacenter address for reasons unrelated to the change under test. A check
+# that is red for unrelated reasons is one people learn to ignore.
+addopts = "-q -m 'not live'"
+asyncio_mode = "auto"
+markers = [
+  "live: reaches YouTube or a third-party service; never runs in CI. Use `just contract`.",
+]
+
+[tool.coverage.run]
+source = ["tubedepth"]
