@@ -15,3 +15,7 @@ class TubedepthError(Exception):
 
 class ValidationError(TubedepthError):
     """The request could not be understood: a malformed identifier, a bad option."""
+
+
+class UpstreamError(TubedepthError):
+    """A backend answered, and the answer was unusable."""
