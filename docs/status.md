@@ -176,24 +176,54 @@ Direct egress is a residential KT line in KR.
 
 ## Decisions that are expensive to reverse
 
-### Caption selection is manual-first across languages, not per language
+### Caption selection ranks language first, Korean first of all
 
-`video.transcript` asks for Korean then English, and the order it resolves them
-in is not the order it was given. A track a person wrote wins over a machine one
-*in either language*, because the alternative — honouring language order first —
-returns a Korean machine translation of an English machine transcription for
-every English video with real captions on it — two lossy steps where the
-uploader's own text was sitting right there.
+`video.transcript` prefers Korean, then English, and **language outranks
+provenance**. The first requested language the video has any track for wins;
+only then does the best track *within* that language get picked — a manual one,
+else the original transcription (yt-dlp's `-orig` key), else the translation
+into that language.
 
-Within the automatic tracks the `-orig` key wins: yt-dlp marks the language the
-transcription was actually made in, and the other 156 are that transcription
-translated. So a Korean video yields `Korean (Original)` and an English one
-yields English, which is what asking for both languages should mean.
+The consequence, stated plainly because it is the part that looks wrong in a
+log: an English video whose uploader wrote captions by hand returns the Korean
+machine translation of the machine transcription instead. Both lossy steps are
+real. It is still the right answer here — a faithful transcript in a language
+the reader cannot read is worth nothing — and it is a decision, not a fallout.
+The opposite rule (manual-first across languages) was written first and
+overruled.
 
-The consequence to accept: asking for two languages does not fetch two
-transcripts. One job produces one track, and the payload's `language` and
-`is_automatic` say which one it got. Per-language fan-out would be a second
-kind, not a parameter — the fingerprint is over kind and target only.
+Reversing it is one loop: rank the tiers outside the languages rather than
+inside. `test_korean_is_taken_ahead_of_a_manual_english_track` pins the current
+direction and fails the moment that loop is inverted.
+
+The `-orig` tier is worth keeping under either order. Plain `ko` on an English
+video is translated; `ko-orig` on a Korean video is the transcription itself,
+and preferring the bare key takes a needless round trip through the translator
+on every Korean video.
+
+### The ranking is a preference, and the fetch is allowed to refuse it
+
+**YouTube throttles the translation endpoint far harder than the track being
+translated.** Measured back to back on this address: `tlang=ko` on dQw4w9WgXcQ
+answered 429 four times out of four, while the English track it derives from
+answered 200 four times out of four in the same loop, seconds apart. A handful
+of translation fetches exhausts it; plain tracks keep working.
+
+Korean-first therefore puts the *fragile* candidate first on every English
+video, which is most of them. So `TranscriptSource.collect` walks the ranked
+candidates and drops to the next on any `UpstreamError` rather than failing the
+job. Without it the Korean preference reads as "transcripts are broken" the
+moment the translation budget runs out, and the budget is small.
+
+What this costs: the language you get back is not always the language ranked
+highest, so `language`, `name` and `is_automatic` in the payload are load
+bearing — a client that assumes Korean because it asked for Korean is wrong.
+The last failure is re-raised when every candidate refuses, so a genuinely
+throttled address still fails the job rather than returning nothing quietly.
+
+Asking for two languages does not fetch two transcripts. One job yields one
+track. Per language fan-out would be a second kind, not a parameter — the
+fingerprint covers kind and target only.
 
 **`yt-dlp` is pinned with no upper bound.** Every other dependency is capped
 (`pydantic>=2.9,<3`). yt-dlp breaks *forward* — when YouTube changes, an old

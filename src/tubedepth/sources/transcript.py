@@ -16,7 +16,7 @@ from pydantic import BaseModel
 
 from ..egress.control import Lane
 from ..egress.transport import Egress
-from ..errors import NotFoundError
+from ..errors import NotFoundError, UpstreamError
 from ..identifiers import TargetType
 from ..schemas import Transcript, TranscriptSegment
 from .registry import SourceCost
@@ -65,40 +65,54 @@ def _track(bucket: Mapping[str, Any], language: str, *, is_automatic: bool) -> C
     )
 
 
-def select_caption_track(dump: Mapping[str, Any], *, languages: Sequence[str]) -> CaptionTrack:
-    """Pick the track to fetch, best first.
+def caption_track_candidates(
+    dump: Mapping[str, Any], *, languages: Sequence[str]
+) -> list[CaptionTrack]:
+    """Every track worth trying, best first.
 
-    Three tiers, and the order is the whole content of this function:
+    The requested languages are ranked, and the first one the video has *any*
+    track for wins outright. Korean leading the list means a caller gets Korean
+    whenever Korean exists — including when it is a machine translation of a
+    machine transcription and the uploader's own English captions were sitting
+    right there. That is the deliberate trade: whoever asked for Korean wants
+    to read Korean, and a faithful transcript in a language they cannot read is
+    worth nothing.
 
-    1. A track a person wrote, in the first preferred language that has one.
-       This wins across languages, not just within one: an English transcript
-       written by the uploader is better than a Korean machine translation of
-       a machine transcription, even for a caller who asked for Korean first.
-    2. The automatic track in the video's *own* language, if that language was
-       asked for. yt-dlp marks it with an `-orig` key; every other automatic
-       language is that transcription run through a translator, so preferring
-       it by language order alone would quietly pick the two-step-lossy one.
-    3. Any automatic track, in preferred order.
+    Within one language the ranking is provenance, best first:
+
+    1. A track a person wrote.
+    2. The automatic track in the language the transcription actually ran in —
+       yt-dlp marks it with an `-orig` key.
+    3. The automatic track translated into this language from that one.
+
+    Two and three only differ for a video whose own language is not the one
+    being asked for, which is exactly when it matters: `ko` on an English video
+    is translated, `ko-orig` on a Korean one is not.
+
+    A list rather than one track because the ranking is a preference and the
+    fetch can still be refused — see `TranscriptSource.collect`.
     """
     manual = dump.get("subtitles") or {}
     automatic = dump.get("automatic_captions") or {}
 
+    candidates: list[CaptionTrack] = []
     for language in languages:
-        track = _track(manual, language, is_automatic=False)
-        if track is not None:
-            return track
+        for track in (
+            _track(manual, language, is_automatic=False),
+            _track(automatic, language + ORIGINAL_SUFFIX, is_automatic=True),
+            _track(automatic, language, is_automatic=True),
+        ):
+            if track is not None:
+                candidates.append(track)
+    return candidates
 
-    for language in languages:
-        track = _track(automatic, language + ORIGINAL_SUFFIX, is_automatic=True)
-        if track is not None:
-            return track
 
-    for language in languages:
-        track = _track(automatic, language, is_automatic=True)
-        if track is not None:
-            return track
-
-    raise NotFoundError(f"no caption track in any requested language: {', '.join(languages)}")
+def select_caption_track(dump: Mapping[str, Any], *, languages: Sequence[str]) -> CaptionTrack:
+    """The single best track. See `caption_track_candidates` for the ranking."""
+    candidates = caption_track_candidates(dump, languages=languages)
+    if not candidates:
+        raise NotFoundError(f"no caption track in any requested language: {', '.join(languages)}")
+    return candidates[0]
 
 
 def parse_json3(
@@ -159,11 +173,33 @@ class TranscriptSource:
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> Transcript:
         dump = runtime.extract(target, egress=egress)
-        track = select_caption_track(dump, languages=self._languages)
-        body = egress.fetch(track.url)
-        return parse_json3(
-            json.loads(body),
-            language=track.language,
-            name=track.name,
-            is_automatic=track.is_automatic,
-        )
+        candidates = caption_track_candidates(dump, languages=self._languages)
+        if not candidates:
+            raise NotFoundError(
+                f"no caption track in any requested language: {', '.join(self._languages)}"
+            )
+
+        # Walk the ranking rather than committing to its head. YouTube throttles
+        # the translation endpoint (`tlang=`) far harder than it throttles the
+        # track being translated: measured back to back on one address, the
+        # Korean translation of dQw4w9WgXcQ answered 429 every time while the
+        # English track it derives from answered 200 every time. Since Korean
+        # ranks first, the preferred candidate is the fragile one on exactly
+        # those videos, and giving up there would read as "transcripts are
+        # broken" rather than "this one track is rationed".
+        last_error: UpstreamError | None = None
+        for track in candidates:
+            try:
+                body = egress.fetch(track.url)
+            except UpstreamError as error:
+                last_error = error
+                continue
+            return parse_json3(
+                json.loads(body),
+                language=track.language,
+                name=track.name,
+                is_automatic=track.is_automatic,
+            )
+
+        assert last_error is not None
+        raise last_error

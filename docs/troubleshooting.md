@@ -115,3 +115,18 @@ Not a failure of extraction. The video has no Korean or English track of any
 kind — not manual, not automatic, not translated — which is common for music and
 ambience uploads with captions disabled. The job fails terminally and is not
 retried, because retrying cannot change the answer.
+
+## `api/timedtext?...&tlang=ko answered 429 on egress direct`
+
+The `tlang=` parameter marks an auto-translated caption track, and YouTube
+rations that endpoint far more tightly than the track it translates from.
+Measured back to back on one address: four requests for the Korean translation
+of dQw4w9WgXcQ, four 429s; four requests for the English track it derives from,
+four 200s, interleaved seconds apart.
+
+Nothing is wrong with the address — a 429 here does not mean the line is
+blocked, and quarantining it would be an overreaction. `video.transcript`
+already handles this by dropping to the next ranked candidate, so the visible
+symptom is a transcript that came back in English when Korean was asked for.
+Check `language` and `is_automatic` in the payload before assuming a parser
+problem. The budget refills; it is not a permanent state.
