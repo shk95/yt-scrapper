@@ -9,6 +9,7 @@ about each new kind.
 from __future__ import annotations
 
 from collections.abc import Mapping
+from datetime import timedelta
 from enum import StrEnum
 from typing import Any, Protocol, runtime_checkable
 
@@ -55,6 +56,19 @@ class DataSource(Protocol):
     # and SponsorBlock each have their own.
     lane: Lane
     cost: SourceCost
+    # Bumped when this source's normalization changes shape. It is part of the
+    # cache fingerprint, so changing a normalizer invalidates its own cached
+    # answers rather than leaving them fresh-looking and a version behind.
+    schema_version: str
+    # The model `collect` returns, so a cached payload can be parsed back from
+    # disk — a cache that cannot reproduce the parsed value forces every
+    # consumer of one to refetch. Implementations must annotate this as
+    # `type[BaseModel]` rather than letting it infer: a mutable protocol member
+    # is invariant, so an inferred `type[VideoMetadata]` does not satisfy it.
+    payload_model: type[BaseModel]
+    # How long an answer stays good. A property of the data: captions barely
+    # change, view counts change constantly.
+    default_freshness: timedelta
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> BaseModel: ...
 
@@ -86,6 +100,7 @@ class SourceRegistry:
                 "target": self.get(kind).target_type.value,
                 "lane": self.get(kind).lane.value,
                 "cost": self.get(kind).cost.value,
+                "freshness_seconds": int(self.get(kind).default_freshness.total_seconds()),
             }
             for kind in self.kinds()
         }

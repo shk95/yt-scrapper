@@ -8,8 +8,10 @@ time instead.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
+from pydantic import BaseModel
 
 from ..egress.control import Lane
 from ..egress.transport import Egress
@@ -73,6 +75,10 @@ class CommentsSource:
     kind = "video.comments"
     target_type = TargetType.VIDEO
     lane = Lane.YOUTUBE
+    schema_version = "1"
+    payload_model: type[BaseModel] = CommentHarvest
+    # the most expensive thing here; a day-old harvest is still useful
+    default_freshness = timedelta(hours=24)
     cost = SourceCost.EXPENSIVE
 
     def __init__(self, *, sort: str = "top", limit: int = DEFAULT_LIMIT) -> None:

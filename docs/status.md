@@ -19,7 +19,10 @@ Last updated: 2026-08-18.
 | queue wired end to end | **done** — enqueue → work → jobs collects for real |
 | M6 — discovery | done (channel.videos, search.videos, playlist.items) |
 | worker concurrency + AIMD wired | done |
-| M3 — HTTP API and auth | **next** |
+| caching + dedup + retention | done |
+| M4 — dislikes, SponsorBlock | **next** |
+| M7 — InnerTube trio | after that |
+| M3 — HTTP API and auth | after that |
 | M4.5 — egress pool | deferred; see "decisions" below |
 
 Nothing under `src/tubedepth/` exists yet beyond the package marker. The plan
@@ -76,6 +79,23 @@ concurrent extractions the bottleneck stops being us. That is the number the
 plan wanted measured instead of guessed, and `TUBEDEPTH_WINDOW_CEILING` is how
 an operator asks for a different one.
 
+**Caching, measured 2026-08-18.** The same channel sweep, twice:
+
+| sweep | wall clock | YouTube requests |
+| --- | --- | --- |
+| cold (101 jobs) | 168.7 s | ~300 |
+| warm (101 jobs) | **1.3 s** | **0** |
+
+Throughput against YouTube is capped by YouTube, so not asking twice was the
+only large multiplier left, and it is a 129× one on a repeat sweep.
+
+**Storage is bounded by age, with a 50 GiB backstop.** The ceiling is not a
+target and nothing tries to fill it; reaching it means the retention age is too
+generous for what is being collected, so `tubedepth prune` reports it and exits
+non-zero rather than silently evicting. What `--max-age-days` buys is a bounded
+window of history: how a video's counts moved over the last month is a free
+by-product of caching, and older than that is not kept.
+
 **Still not done in the queue:** cancellation. `DELETE`-style stopping of a
 running job does not exist, so a comment harvest started by mistake runs to
 completion.
@@ -131,6 +151,25 @@ here is a residential KT connection that currently works. The pool's real case
 is Return YouTube Dislike's documented 10,000/day, and that source does not
 exist yet. Revisit when collection actually starts getting blocked, or when
 the third-party sources land.
+
+**Retention protects nothing on the grounds of being the last of its kind.**
+An earlier design kept the newest observation of each question regardless of
+age, so a stale answer would beat none. It would not: the cache filters on
+`fresh_until`, so a month-old artifact is never served. Protecting it bought no
+cache hits and cost unbounded growth — the store would have grown with the
+number of distinct things ever collected rather than with what is current.
+
+**Stored datetimes are aware UTC on both sides of the database.** SQLite has no
+timezone, so a value written as aware reads back naive, and a naive datetime
+does not raise on comparison — it silently compares wrong. `UtcDateTime` puts
+the offset back on load and refuses to store a naive value, which is the only
+place that can be fixed once rather than at every call site.
+
+**The worker collects through `CollectionService` rather than its own copy.**
+It had a near-identical `_collect`, which meant the CLI consulted the cache and
+the queue did not — and the queue is the side running a hundred jobs
+unattended. Unifying them also revealed that the worker had been skipping
+target normalization entirely.
 
 **Egress rate control is keyed on `lane`, not on `backend`.** What rate-limits
 us is a *service*, not our internal taxonomy: yt-dlp, InnerTube and caption

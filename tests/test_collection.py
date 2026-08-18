@@ -9,6 +9,7 @@ from __future__ import annotations
 import gzip
 import json
 from collections.abc import Mapping
+from datetime import timedelta
 from pathlib import Path
 from typing import Any
 
@@ -16,6 +17,7 @@ import pytest
 from pydantic import BaseModel
 
 from tubedepth.collection import CollectionService
+from tubedepth.database import Database
 from tubedepth.egress.control import Lane
 from tubedepth.egress.transport import Egress
 from tubedepth.identifiers import TargetType
@@ -97,6 +99,10 @@ def test_an_unknown_kind_is_refused_before_anything_is_extracted(
     assert runtime.requested == []
 
 
+class FakeListing(BaseModel):
+    target: str
+
+
 class ChannelListingSource:
     """A source whose target is a channel, not a video."""
 
@@ -104,6 +110,9 @@ class ChannelListingSource:
     target_type = TargetType.CHANNEL
     lane = Lane.YOUTUBE
     cost = SourceCost.STANDARD
+    schema_version = "1"
+    payload_model: type[BaseModel] = FakeListing
+    default_freshness = timedelta(hours=6)
 
     def __init__(self) -> None:
         self.received: list[str] = []
@@ -111,10 +120,6 @@ class ChannelListingSource:
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> FakeListing:
         self.received.append(target)
         return FakeListing(target=target)
-
-
-class FakeListing(BaseModel):
-    target: str
 
 
 def test_a_channel_target_is_normalized_as_a_channel_and_not_as_a_video(
@@ -131,3 +136,71 @@ def test_a_channel_target_is_normalized_as_a_channel_and_not_as_a_video(
     service.collect("channel.fake", "https://www.youtube.com/@RickAstleyYT")
 
     assert source.received == ["@RickAstleyYT"]
+
+
+class CountingSource:
+    kind = "video.counted"
+    target_type = TargetType.VIDEO
+    lane = Lane.YOUTUBE
+    cost = SourceCost.STANDARD
+    schema_version = "1"
+    payload_model: type[BaseModel] = FakeListing
+    default_freshness = timedelta(hours=6)
+
+    def __init__(self) -> None:
+        self.calls = 0
+
+    def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> FakeListing:
+        self.calls += 1
+        return FakeListing(target=target)
+
+
+def cached_service(tmp_path: Path, source: object) -> tuple[CollectionService, Database]:
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    registry = SourceRegistry()
+    registry.register(source)  # type: ignore[arg-type]
+    service = CollectionService(
+        payloads=PayloadStore(tmp_path / "payloads"),
+        registry=registry,
+        database=database,
+        runtime=None,
+    )
+    return service, database
+
+
+def test_collecting_the_same_thing_twice_only_fetches_once(tmp_path: Path) -> None:
+    # The whole point. Throughput against YouTube is capped by YouTube, so not
+    # asking twice is the only large multiplier left.
+    source = CountingSource()
+    service, _ = cached_service(tmp_path, source)
+
+    first = service.collect("video.counted", "dQw4w9WgXcQ")
+    second = service.collect("video.counted", "dQw4w9WgXcQ")
+
+    assert source.calls == 1
+    assert second.payload.digest == first.payload.digest
+    assert second.from_cache is True
+    assert first.from_cache is False
+
+
+def test_a_forced_refresh_fetches_even_when_the_cache_is_fresh(tmp_path: Path) -> None:
+    # Counts move, and sometimes the current number is the point. Without this
+    # the cache is a ceiling on freshness rather than a saving.
+    source = CountingSource()
+    service, _ = cached_service(tmp_path, source)
+    service.collect("video.counted", "dQw4w9WgXcQ")
+
+    service.collect("video.counted", "dQw4w9WgXcQ", refresh=True)
+
+    assert source.calls == 2
+
+
+def test_two_different_videos_do_not_share_a_cache_entry(tmp_path: Path) -> None:
+    source = CountingSource()
+    service, _ = cached_service(tmp_path, source)
+
+    service.collect("video.counted", "dQw4w9WgXcQ")
+    service.collect("video.counted", "kJQP7kiw5Fk")
+
+    assert source.calls == 2

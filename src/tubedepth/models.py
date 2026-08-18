@@ -9,7 +9,7 @@ import enum
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Enum, Integer, String, Text
+from sqlalchemy import DateTime, Enum, Index, Integer, String, Text, TypeDecorator
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -19,6 +19,32 @@ def new_identifier() -> str:
 
 def utcnow() -> datetime:
     return datetime.now(UTC)
+
+
+class UtcDateTime(TypeDecorator[datetime]):
+    """A datetime that is aware UTC on both sides of the database.
+
+    SQLite has no datetime type and no timezone, so a value written as aware
+    UTC reads back naive. Everything here treats stored instants as aware —
+    the public contract says so — and a naive one does not raise on comparison,
+    it silently compares wrong. Putting the offset back on load is the only
+    place that can be fixed once rather than at every call site.
+    """
+
+    impl = DateTime
+    cache_ok = True
+
+    def process_bind_param(self, value: datetime | None, dialect: object) -> datetime | None:
+        if value is None:
+            return None
+        if value.tzinfo is None:
+            raise ValueError(f"refusing to store a naive datetime: {value!r}")
+        return value.astimezone(UTC)
+
+    def process_result_value(self, value: datetime | None, dialect: object) -> datetime | None:
+        if value is None:
+            return None
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
 
 
 class Base(DeclarativeBase):
@@ -54,17 +80,11 @@ class Job(Base):
     # Bounded so a job that kills its worker every time cannot be retried
     # forever. Expensive kinds get fewer, set when the job is queued.
     max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
-    scheduled_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow
-    )
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, default=utcnow
-    )
+    scheduled_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utcnow)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utcnow)
     claimed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(
-        DateTime(timezone=True), nullable=True
-    )
-    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
 
     # The result, by reference. The payload itself is a file: a comment harvest
     # runs to tens of megabytes and does not belong in the table the claim
@@ -76,3 +96,32 @@ class Job(Base):
     # on call to the logs for what was already known at the moment it happened.
     error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class Artifact(Base):
+    """One observation: what was collected, when, and where the bytes are.
+
+    Rows are the index; the payload itself is a file. A comment harvest runs
+    to tens of megabytes and does not belong in the table the claim query
+    depends on staying fast.
+
+    Deliberately no unique constraint on `fingerprint`. Observations accumulate,
+    so how a video's view and like counts moved is a by-product of caching
+    rather than a separate feature. The cost is disk, which retention bounds.
+    """
+
+    __tablename__ = "artifacts"
+    __table_args__ = (Index("ix_artifact_lookup", "fingerprint", "fresh_until"),)
+
+    identifier: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_identifier)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    target: Mapped[str] = mapped_column(String(500), nullable=False)
+    fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    digest: Mapped[str] = mapped_column(String(64), nullable=False)
+    byte_count: Mapped[int] = mapped_column(Integer, nullable=False)
+
+    fetched_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utcnow)
+    # Materialized rather than computed, so "is this still good" is an indexed
+    # comparison instead of a per-row calculation.
+    fresh_until: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)

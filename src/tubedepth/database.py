@@ -32,6 +32,18 @@ class Database:
         self._path = path
         self._engine = create_engine(f"sqlite+pysqlite:///{path}")
 
+        @event.listens_for(self._engine, "connect")
+        def _configure(dbapi_connection: object, record: object) -> None:
+            cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+            # WAL so the API can read job state while a worker writes, and a
+            # busy timeout so a second writer waits its turn instead of raising
+            # on the first collision. Both only started mattering when the
+            # worker gained real concurrency.
+            cursor.execute("PRAGMA journal_mode=WAL")
+            cursor.execute("PRAGMA busy_timeout=5000")
+            cursor.execute("PRAGMA foreign_keys=ON")
+            cursor.close()
+
         @event.listens_for(self._engine, "begin")
         def _begin_immediate(connection: Connection) -> None:
             connection.exec_driver_sql("BEGIN IMMEDIATE")

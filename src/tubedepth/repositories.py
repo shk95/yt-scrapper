@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
-from .models import Job, JobState, utcnow
+from .models import Artifact, Job, JobState, utcnow
 
 
 class JobRepository:
@@ -106,3 +106,48 @@ class JobRepository:
             else:
                 job.state = JobState.QUEUED
         return len(expired)
+
+
+class ArtifactRepository:
+    def __init__(self, session: Session, *, clock: Callable[[], datetime] = utcnow) -> None:
+        self._session = session
+        self._clock = clock
+
+    def record(
+        self,
+        *,
+        kind: str,
+        target: str,
+        fingerprint: str,
+        digest: str,
+        byte_count: int,
+        freshness: timedelta,
+    ) -> Artifact:
+        now = self._clock()
+        artifact = Artifact(
+            kind=kind,
+            target=target,
+            fingerprint=fingerprint,
+            digest=digest,
+            byte_count=byte_count,
+            fetched_at=now,
+            fresh_until=now + freshness,
+        )
+        self._session.add(artifact)
+        return artifact
+
+    def fresh(self, fingerprint: str) -> Artifact | None:
+        """The newest still-good answer to this question, if there is one."""
+        return self._session.scalars(
+            select(Artifact)
+            .where(Artifact.fingerprint == fingerprint, Artifact.fresh_until > self._clock())
+            .order_by(Artifact.fetched_at.desc())
+            .limit(1)
+        ).first()
+
+    def count_for(self, fingerprint: str) -> int:
+        return len(
+            self._session.scalars(
+                select(Artifact.identifier).where(Artifact.fingerprint == fingerprint)
+            ).all()
+        )

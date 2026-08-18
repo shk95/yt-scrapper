@@ -9,7 +9,10 @@ from __future__ import annotations
 import json
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
+
+from pydantic import BaseModel
 
 from ..egress.control import Lane
 from ..egress.transport import Egress
@@ -113,6 +116,10 @@ class TranscriptSource:
     kind = "video.transcript"
     target_type = TargetType.VIDEO
     lane = Lane.YOUTUBE
+    schema_version = "1"
+    payload_model: type[BaseModel] = Transcript
+    # captions change only on re-upload
+    default_freshness = timedelta(days=30)
     cost = SourceCost.STANDARD
 
     def __init__(self, *, language: str = "en") -> None:

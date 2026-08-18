@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import threading
 import time
+from datetime import timedelta
 from pathlib import Path
 
 from pydantic import BaseModel
@@ -36,6 +37,9 @@ class EchoSource:
     target_type = TargetType.VIDEO
     lane = Lane.YOUTUBE
     cost = SourceCost.STANDARD
+    schema_version = "1"
+    payload_model: type[BaseModel] = EchoPayload
+    default_freshness = timedelta(hours=6)
 
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -57,6 +61,9 @@ class FailingSource:
     target_type = TargetType.VIDEO
     lane = Lane.YOUTUBE
     cost = SourceCost.STANDARD
+    schema_version = "1"
+    payload_model: type[BaseModel] = EchoPayload
+    default_freshness = timedelta(hours=6)
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
         raise NotFoundError(f"nothing came back for: {target}")
@@ -138,7 +145,7 @@ def test_the_worker_drains_every_queued_job(tmp_path: Path) -> None:
     source = EchoSource()
     database, worker, _ = build(tmp_path, source)
     for index in range(5):
-        enqueue(database, "video.echo", f"video{index:07d}")
+        enqueue(database, "video.echo", f"video{index:06d}")
 
     drained = worker.drain()
 
@@ -156,6 +163,9 @@ class ListingSource:
     target_type = TargetType.CHANNEL
     lane = Lane.YOUTUBE
     cost = SourceCost.STANDARD
+    schema_version = "1"
+    payload_model: type[BaseModel] = VideoListing
+    default_freshness = timedelta(hours=6)
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> VideoListing:
         return VideoListing(
@@ -212,6 +222,9 @@ class SlowSource:
     kind = "video.slow"
     target_type = TargetType.VIDEO
     lane = Lane.YOUTUBE
+    schema_version = "1"
+    payload_model: type[BaseModel] = EchoPayload
+    default_freshness = timedelta(hours=6)
 
     def __init__(self, seconds: float = 0.3, cost: SourceCost = SourceCost.STANDARD) -> None:
         self.cost = cost
@@ -236,7 +249,7 @@ def test_a_concurrent_worker_runs_several_jobs_at_once(tmp_path: Path) -> None:
     source = SlowSource(seconds=0.2)
     database, _, payloads = build(tmp_path, source)
     for index in range(6):
-        enqueue(database, "video.slow", f"video{index:07d}")
+        enqueue(database, "video.slow", f"video{index:06d}")
     worker = Worker(
         database=database,
         registry=_registry(source),
@@ -268,7 +281,7 @@ def test_the_rate_controller_caps_how_many_run_at_once(tmp_path: Path) -> None:
     source = SlowSource(seconds=0.2)
     database, _, payloads = build(tmp_path, source)
     for index in range(6):
-        enqueue(database, "video.slow", f"video{index:07d}")
+        enqueue(database, "video.slow", f"video{index:06d}")
     controller = RateController(window_ceiling=2)
     worker = Worker(
         database=database,
@@ -336,6 +349,9 @@ class FlakySource:
     target_type = TargetType.VIDEO
     lane = Lane.YOUTUBE
     cost = SourceCost.STANDARD
+    schema_version = "1"
+    payload_model: type[BaseModel] = EchoPayload
+    default_freshness = timedelta(hours=6)
 
     def __init__(self, failures: int) -> None:
         self._remaining = failures
@@ -354,6 +370,9 @@ class UnretryableSource:
     target_type = TargetType.VIDEO
     lane = Lane.YOUTUBE
     cost = SourceCost.STANDARD
+    schema_version = "1"
+    payload_model: type[BaseModel] = EchoPayload
+    default_freshness = timedelta(hours=6)
 
     def __init__(self) -> None:
         self.attempts = 0
@@ -444,3 +463,63 @@ def _clear_backoff(database) -> None:  # type: ignore[no-untyped-def]
     with database.session() as session:
         for job in session.query(Job).filter(Job.state == JobState.QUEUED).all():
             job.scheduled_at = utcnow()
+
+
+def test_the_worker_reuses_a_cached_answer_rather_than_refetching(tmp_path: Path) -> None:
+    """The queue must go through the same cache the CLI does.
+
+    Two collection paths mean one of them caches and the other does not, and
+    the one that does not is the one running a hundred jobs unattended.
+    """
+    source = EchoSource()
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    registry = _registry(source)
+    payloads = PayloadStore(tmp_path / "payloads")
+    worker = Worker(
+        database=database, registry=registry, payloads=payloads, name="worker-1", concurrency=1
+    )
+    enqueue(database, "video.echo", "dQw4w9WgXcQ")
+    enqueue(database, "video.echo", "dQw4w9WgXcQ")
+
+    worker.drain()
+
+    assert source.calls == ["dQw4w9WgXcQ"], "the second job refetched an answer already held"
+
+
+def test_a_cached_listing_still_queues_the_videos_it_holds(tmp_path: Path) -> None:
+    """Re-sweeping a channel must re-check it, cheaply — not skip it.
+
+    Suppressing fan-out on a cache hit looks like a saving and is actually a
+    silent no-op: the second sweep of a channel does nothing at all. The
+    follow-up jobs are what should be cheap, because each one consults the
+    cache itself.
+    """
+    listing = ListingSource()
+    echo = EchoSource()
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    worker = Worker(
+        database=database,
+        registry=_registry(listing, echo),
+        payloads=PayloadStore(tmp_path / "payloads"),
+        name="worker-1",
+        concurrency=1,
+    )
+
+    with database.session() as session:
+        session.add(Job(kind="channel.fake", target="@someone", follow_up_kind="video.echo"))
+    worker.drain()
+    first_pass = len(echo.calls)
+
+    with database.session() as session:
+        session.add(Job(kind="channel.fake", target="@someone", follow_up_kind="video.echo"))
+    worker.drain()
+
+    assert first_pass == 3
+    # The listing came from cache the second time, and still produced its
+    # follow-ups — which then cost nothing themselves.
+    with database.session() as session:
+        queued_videos = session.query(Job).filter(Job.kind == "video.echo").count()
+    assert queued_videos == 6, "a cached listing produced no work at all"
+    assert len(echo.calls) == 3, "the follow-ups refetched instead of hitting the cache"

@@ -35,6 +35,24 @@ class PayloadStore:
         path.write_bytes(gzip.compress(payload))
         return StoredPayload(digest=digest, path=path, byte_count=len(payload))
 
+    def path_for(self, kind: str, digest: str) -> Path | None:
+        """Where a payload lives, or None if the bytes are gone.
+
+        Retention deletes files, so an index entry can outlive its payload. A
+        cache that does not check would serve a FileNotFoundError rather than
+        a miss.
+        """
+        path = self._path_for(kind, digest)
+        return path if path.exists() else None
+
+    def delete(self, kind: str, digest: str) -> bool:
+        """Remove a payload. Returns whether there was one to remove."""
+        path = self._path_for(kind, digest)
+        if not path.exists():
+            return False
+        path.unlink()
+        return True
+
     def read(self, digest: str) -> bytes:
         matches = list(self._root.glob(f"*/{digest[:2]}/{digest}.json.gz"))
         if not matches:

@@ -7,6 +7,8 @@ changing. These tests are what stop that claim quietly becoming false.
 
 from __future__ import annotations
 
+from datetime import timedelta
+
 import pytest
 from pydantic import BaseModel
 
@@ -34,6 +36,9 @@ class FakeSource:
     target_type = TargetType.VIDEO
     lane = Lane.YOUTUBE
     cost = SourceCost.STANDARD
+    schema_version = "1"
+    payload_model: type[BaseModel] = FakePayload
+    default_freshness = timedelta(hours=6)
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> FakePayload:
         return FakePayload(target=target)

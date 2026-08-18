@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import UTC, date, datetime
+from datetime import UTC, date, datetime, timedelta
 from typing import Any
+
+from pydantic import BaseModel
 
 from ..egress.control import Lane
 from ..egress.transport import Egress
@@ -98,6 +100,10 @@ class VideoMetadataSource:
     kind = "video.metadata"
     target_type = TargetType.VIDEO
     lane = Lane.YOUTUBE
+    schema_version = "1"
+    payload_model: type[BaseModel] = VideoMetadata
+    # counts move hourly; chapters, tags and the upload date never do
+    default_freshness = timedelta(hours=6)
     cost = SourceCost.STANDARD
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> VideoMetadata:

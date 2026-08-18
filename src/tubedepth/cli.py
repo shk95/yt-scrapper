@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+from datetime import timedelta
 from pathlib import Path
 from typing import Annotated
 
@@ -21,6 +22,7 @@ from .identifiers import normalize_target, normalize_video_identifier
 from .models import Job
 from .observability import configure_logging
 from .payload_store import PayloadStore
+from .retention import RetentionPolicy, RetentionService
 from .sources import default_registry
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime
 from .worker import Worker
@@ -162,6 +164,46 @@ def jobs(
                 f"{job.identifier[:8]}  {job.state.value:<9}  "
                 f"{job.kind:<18}  {job.target:<14}  {detail}"
             )
+
+
+@application.command()
+def prune(
+    data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
+        "var"
+    ),
+    maximum_age_days: Annotated[
+        int, typer.Option("--max-age-days", envvar="TUBEDEPTH_MAX_AGE_DAYS")
+    ] = 30,
+    maximum_gigabytes: Annotated[float, typer.Option("--max-gb", envvar="TUBEDEPTH_MAX_GB")] = 50.0,
+) -> None:
+    """Remove artifacts past their retention age.
+
+    The size limit is a backstop rather than a target: nothing here tries to
+    fill it, and reaching it means the age policy is not keeping up, so it is
+    reported rather than quietly absorbed by evicting whatever is nearest.
+    """
+    configure_logging()
+    outcome = RetentionService(
+        database=_database(data_directory),
+        payloads=_payload_store(data_directory),
+        policy=RetentionPolicy(
+            maximum_age=timedelta(days=maximum_age_days),
+            maximum_bytes=int(maximum_gigabytes * 1024**3),
+        ),
+    ).prune()
+
+    typer.echo(
+        f"✓ removed {outcome.artifacts_removed} artifact(s), "
+        f"freeing {outcome.bytes_removed / 1024**2:.1f} MiB"
+    )
+    typer.echo(f"  store is now {outcome.total_bytes / 1024**2:.1f} MiB")
+    if outcome.over_ceiling:
+        typer.echo(
+            f"✗ over the {maximum_gigabytes:.0f} GiB ceiling — "
+            "the retention age is too generous for what is being collected",
+            err=True,
+        )
+        raise SystemExit(1)
 
 
 @application.command()

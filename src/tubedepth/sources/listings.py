@@ -11,8 +11,10 @@ id has to be typed by hand, which stops volume well before throughput does.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Any
+
+from pydantic import BaseModel
 
 from ..egress.control import Lane
 from ..egress.transport import Egress
@@ -72,6 +74,10 @@ class _ListingSource:
     lane = Lane.YOUTUBE
     # One flat request regardless of how many videos come back, which is what
     # extract_flat buys.
+    schema_version = "1"
+    payload_model: type[BaseModel] = VideoListing
+    # New uploads and reordering; cheap enough to refresh often.
+    default_freshness = timedelta(hours=6)
     cost = SourceCost.CHEAP
 
     def __init__(self, *, limit: int = DEFAULT_LIMIT) -> None:

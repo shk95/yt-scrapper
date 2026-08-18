@@ -26,10 +26,11 @@ from datetime import timedelta
 
 from pydantic import BaseModel
 
+from .collection import CollectionService
 from .database import Database
 from .egress.control import RateController, Verdict
 from .egress.transport import DirectEgress, Egress
-from .errors import RateLimitedError, TubedepthError
+from .errors import RateLimitedError, TubedepthError, UpstreamError
 from .models import Job, JobState, utcnow
 from .payload_store import PayloadStore
 from .repositories import JobRepository
@@ -43,6 +44,7 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_LEASE = timedelta(minutes=15)
 DEFAULT_CONCURRENCY = 4
+PERMIT_WAIT_SECONDS = 30.0
 
 # What share of the workers each cost may hold at once. Cheap jobs are capped
 # at everything because they finish in under a second; expensive ones are held
@@ -79,6 +81,13 @@ class Worker:
         self._lease = lease
         self._lock = threading.Lock()
         self._in_flight_by_cost: dict[SourceCost, int] = {}
+        self._collection = CollectionService(
+            payloads=payloads,
+            database=database,
+            runtime=self._runtime,
+            egress=self._egress,
+            registry=self._registry,
+        )
 
     # -- one job ---------------------------------------------------------
 
@@ -184,7 +193,7 @@ class Worker:
     def _execute(self, identifier: str, kind: str, target: str, follow_up: str | None) -> None:
         try:
             source = self._registry.get(kind)
-        except TubedepthError as error:  # noqa: BLE001 - reported on the row below
+        except TubedepthError as error:
             # A job naming a kind this build does not have. Fails on the row
             # rather than escaping into the pump loop and stopping the worker.
             logger.warning("job %s names an unknown kind: %s", identifier, error)
@@ -193,20 +202,39 @@ class Worker:
 
         try:
             if not self._wait_for_permit(source.lane):
-                # Nothing available and the route is quarantined. Put it back
-                # rather than failing it: the job is fine, the route is not.
+                # The route is quarantined or too busy. Put the job back rather
+                # than failing it: the job is fine, the route is not.
                 self._requeue(identifier)
                 return
+
+            # Everything from here to the release is inside try/finally. A
+            # permit released only on the paths we anticipated leaks on the
+            # ones we did not — and a leaked permit is indistinguishable from
+            # a busy route, so the next job waits out the whole lease before
+            # anyone finds out. That is how this method hung the first time.
+            verdict = Verdict.THROTTLED
             try:
                 result, digest, byte_count = self._collect(kind, target)
+                verdict = Verdict.OK
             except TubedepthError as error:
                 verdict = (
                     Verdict.BLOCKED if isinstance(error, RateLimitedError) else Verdict.THROTTLED
                 )
-                self._controller.release(self._egress.name, source.lane, verdict)
                 self._fail_or_retry(identifier, kind, error)
                 return
-            self._controller.release(self._egress.name, source.lane, Verdict.OK)
+            except Exception:
+                # Not a domain error, so nothing above knows what to do with
+                # it. The job is failed rather than left running, and the
+                # traceback is logged rather than swallowed.
+                logger.exception("job %s (%s) raised an unexpected error", identifier, kind)
+                self._settle(
+                    identifier,
+                    JobState.FAILED,
+                    error=UpstreamError(f"unexpected failure collecting {kind} for {target}"),
+                )
+                return
+            finally:
+                self._controller.release(self._egress.name, source.lane, verdict)
         finally:
             self._leave(source.cost)
 
@@ -219,7 +247,11 @@ class Worker:
 
     def _wait_for_permit(self, lane: object) -> bool:
         """Block until the controller allows one more request on this lane."""
-        deadline = self._lease.total_seconds()
+        # Bounded well below the lease: waiting a quarter of an hour for a
+        # permit is indistinguishable from being stuck, and requeueing the
+        # job costs nothing because the backoff and the attempt count both
+        # survive.
+        deadline = PERMIT_WAIT_SECONDS
         waited = 0.0
         while waited < deadline:
             if self._controller.acquire(self._egress.name, lane):  # type: ignore[arg-type]
@@ -236,11 +268,17 @@ class Worker:
 
     # -- persistence -----------------------------------------------------
 
-    def _collect(self, kind: str, target: str) -> tuple[BaseModel, str, int]:
-        source = self._registry.get(kind)
-        result = source.collect(target, self._egress, self._runtime)
-        stored = self._payloads.put(kind, result.model_dump_json(indent=1).encode())
-        return result, stored.digest, stored.byte_count
+    def _collect(self, kind: str, target: str) -> tuple[BaseModel | None, str, int]:
+        """Delegate to the one collection path.
+
+        The worker used to have its own copy of this, which meant the CLI
+        consulted the cache and the queue did not — and the queue is the side
+        running a hundred jobs unattended.
+        """
+        collected = self._collection.collect(kind, target)
+        if collected.from_cache:
+            logger.info("job for %s %s served from cache", kind, target)
+        return collected.result, collected.payload.digest, collected.payload.byte_count
 
     def _queue_follow_up(self, listing: VideoListing, kind: str) -> int:
         """Turn a listing into work.
