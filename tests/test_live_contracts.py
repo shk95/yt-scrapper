@@ -63,19 +63,18 @@ def test_live_a_real_transcript_still_parses_into_timed_segments(tmp_path: Path)
 def test_live_a_korean_video_yields_its_own_transcription_not_a_translation(
     tmp_path: Path,
 ) -> None:
-    """The case the Korean-first ordering exists for.
+    """A Korean video with no written captions must resolve to its own ASR.
 
-    A Korean video with no manual captions must resolve to `ko` marked
-    `kind=asr` with no `tlang` — the transcription itself. The translated
-    variant is drawn from a small per-address budget that a sweep exhausts in
-    three or four requests, so a change that quietly started fetching it would
-    turn a limitless path into a rationed one, and the only visible symptom
-    would be transcripts arriving in English.
+    That track is `lang=ko&kind=asr` with no `tlang` — the transcription
+    itself. The translated variants are drawn from a small per-address budget
+    that a sweep spends in three or four requests, so a change that started
+    reaching for one would turn a limitless path into a rationed one, and the
+    only visible symptom would be transcripts arriving in another language.
     """
     dump = LibraryYtdlpRuntime().extract("9bZkp7q19f0", egress=DirectEgress())
     assert not dump.get("subtitles"), "this video gained manual captions; pick another"
 
-    track = select_caption_track(dump, languages=("ko", "en"))
+    track = select_caption_track(dump)
 
     assert track.language == "ko"
     assert "tlang=" not in track.url, "took a translation where the original exists"

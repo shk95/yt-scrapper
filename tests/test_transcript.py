@@ -59,48 +59,131 @@ def recorded_dump() -> dict[str, Any]:
         return json.load(handle)
 
 
-def test_selection_returns_the_json3_track_for_the_requested_language(
-    recorded_dump: dict[str, Any],
-) -> None:
-    # json3 specifically: it is the only format that carries per-segment
-    # timings as data rather than as text that has to be re-parsed.
-    track = select_caption_track(recorded_dump, languages=("ja",))
+def test_the_videos_own_manual_captions_are_taken(recorded_dump: dict[str, Any]) -> None:
+    """This video is English and its uploader wrote English captions."""
+    assert recorded_dump["language"] == "en"
 
-    assert track.language == "ja"
-    assert track.format == "json3"
-    assert track.url
+    track = select_caption_track(recorded_dump)
 
-
-def test_a_manual_track_is_preferred_over_an_automatic_one(
-    recorded_dump: dict[str, Any],
-) -> None:
-    # This video has both for English. The manual one is written by a person;
-    # the automatic one is a transcription and will disagree with it.
-    assert "en" in recorded_dump["subtitles"]
-    assert "en" in recorded_dump["automatic_captions"]
-
-    track = select_caption_track(recorded_dump, languages=("en",))
-
+    assert track.language == "en"
     assert track.is_automatic is False
 
 
-def test_an_automatic_track_is_used_when_no_manual_one_exists(
+def test_the_videos_own_asr_is_taken_when_nobody_wrote_captions(
     recorded_dump: dict[str, Any],
 ) -> None:
-    assert "ko" not in recorded_dump["subtitles"]
+    dump = dict(recorded_dump, subtitles={})
+
+    track = select_caption_track(dump)
+
+    assert track.language == "en"
+    assert track.is_automatic is True
+    assert track.name == "English (Original)"
+
+
+def test_a_track_in_another_language_is_never_taken(
+    recorded_dump: dict[str, Any],
+) -> None:
+    """An English video has 157 automatic languages and five manual ones.
+
+    None of them is this video's language, so none of them is an answer: the
+    Japanese subtitles are a translation someone uploaded and the Korean
+    automatic track is a translation of a transcription. Under this policy the
+    transcript is the video's own words or it is nothing.
+    """
+    assert "ja" in recorded_dump["subtitles"]
     assert "ko" in recorded_dump["automatic_captions"]
 
-    track = select_caption_track(recorded_dump, languages=("ko",))
+    candidates = caption_track_candidates(recorded_dump)
 
-    assert track.is_automatic is True
-    assert track.language == "ko"
+    assert {track.language for track in candidates} == {"en"}
 
 
-def test_a_language_the_video_does_not_have_is_reported_as_not_found(
+def test_a_translated_track_is_never_a_candidate() -> None:
+    """`tlang=` marks the rationed path, and this policy has no reason to use it.
+
+    Fixture URLs are redacted, so the discriminating URL has to be built here.
+    """
+    dump = {
+        "language": "ko",
+        "subtitles": {},
+        "automatic_captions": {
+            "ko": [{"ext": "json3", "url": "https://example.invalid/a?lang=ko", "name": "Korean"}],
+            "en": [
+                {
+                    "ext": "json3",
+                    "url": "https://example.invalid/b?lang=ko&tlang=en",
+                    "name": "English",
+                }
+            ],
+        },
+    }
+
+    candidates = caption_track_candidates(dump)
+
+    assert candidates
+    assert all("tlang=" not in track.url for track in candidates)
+
+
+def test_a_regional_track_counts_as_the_videos_language() -> None:
+    """yt-dlp reports `pt` while YouTube lists the track as `pt-BR`."""
+    dump = {
+        "language": "pt",
+        "subtitles": {
+            "pt-BR": [{"ext": "json3", "url": "https://example.invalid/pt", "name": "Portuguese"}]
+        },
+        "automatic_captions": {},
+    }
+
+    track = select_caption_track(dump)
+
+    assert track.language == "pt-BR"
+    assert track.is_automatic is False
+
+
+def test_the_orig_marker_stands_in_when_yt_dlp_reports_no_language(
     recorded_dump: dict[str, Any],
 ) -> None:
-    with pytest.raises(NotFoundError, match="no caption track"):
-        select_caption_track(recorded_dump, languages=("zz",))
+    """`en-orig` says which language the transcription ran in, which is the
+    same question `language` answers — so either one settles it."""
+    dump = dict(recorded_dump, language=None, subtitles={})
+
+    track = select_caption_track(dump)
+
+    assert track.language == "en"
+    assert track.is_automatic is True
+
+
+def test_a_video_with_no_language_at_all_falls_back_to_the_configured_order() -> None:
+    """Old uploads report no language and carry no automatic captions at all.
+
+    jNQXAC9IVRw (2005) is the real case: `language` is None, there is no `-orig`
+    marker, no ASR track, and two manual languages with nothing to choose
+    between them. Refusing would throw away a perfectly good transcript, so the
+    configured preference decides — and only here, where the policy genuinely
+    has no answer.
+    """
+    dump = {
+        "language": None,
+        "subtitles": {
+            "de": [{"ext": "json3", "url": "https://example.invalid/de", "name": "German"}],
+            "en": [{"ext": "json3", "url": "https://example.invalid/en", "name": "English"}],
+        },
+        "automatic_captions": {},
+    }
+
+    track = select_caption_track(dump, fallback_languages=("ko", "en"))
+
+    assert track.language == "en"
+
+
+def test_a_video_with_no_track_in_its_own_language_is_reported_as_not_found(
+    recorded_dump: dict[str, Any],
+) -> None:
+    dump = dict(recorded_dump, language="is", subtitles={}, automatic_captions={})
+
+    with pytest.raises(NotFoundError, match="is"):
+        select_caption_track(dump)
 
 
 @pytest.fixture
@@ -157,144 +240,44 @@ def test_events_carrying_no_text_are_dropped(recorded_json3: dict[str, Any]) -> 
     assert len(parse_json3(payload).segments) == 61
 
 
-def test_korean_is_taken_ahead_of_a_manual_english_track(
-    recorded_dump: dict[str, Any],
-) -> None:
-    """Language order decides first, and Korean is first.
-
-    This video has English captions a person wrote and no Korean ones, so the
-    Korean track that wins here is a machine translation of a machine
-    transcription. That is the accepted cost of ranking language above
-    provenance: a caller who asked for Korean gets Korean whenever there is
-    any Korean to get.
-    """
-    assert "en" in recorded_dump["subtitles"]
-    assert "ko" not in recorded_dump["subtitles"]
-    assert "ko" in recorded_dump["automatic_captions"]
-
-    track = select_caption_track(recorded_dump, languages=("ko", "en"))
-
-    assert track.language == "ko"
-    assert track.is_automatic is True
-
-
-def test_a_manual_korean_track_beats_an_automatic_one(
-    recorded_dump: dict[str, Any],
-) -> None:
-    """Provenance still decides *within* a language."""
-    written_by_hand = {"ext": "json3", "url": "https://example.invalid/ko", "name": "Korean"}
-    dump = dict(recorded_dump, subtitles={"ko": [written_by_hand]})
-
-    track = select_caption_track(dump, languages=("ko", "en"))
-
-    assert track.language == "ko"
-    assert track.is_automatic is False
-
-
-def test_english_is_used_only_when_the_video_has_no_korean_track_at_all(
-    recorded_dump: dict[str, Any],
-) -> None:
-    english_only = {
-        "subtitles": recorded_dump["subtitles"],
-        "automatic_captions": {
-            key: value
-            for key, value in recorded_dump["automatic_captions"].items()
-            if not key.startswith("ko")
-        },
-    }
-
-    track = select_caption_track(english_only, languages=("ko", "en"))
-
-    assert track.language == "en"
-    assert track.is_automatic is False
-
-
-def test_the_original_transcription_beats_a_translation_into_the_same_language(
-    recorded_dump: dict[str, Any],
-) -> None:
-    """`-orig` is yt-dlp's marker for the language the ASR actually ran in.
-
-    The plain `en` key on this video is that transcription round-tripped
-    through the translator; `en-orig` is the transcription itself.
-    """
-    stripped = dict(recorded_dump, subtitles={})
-
-    track = select_caption_track(stripped, languages=("en",))
-
-    assert track.language == "en"
-    assert track.name == "English (Original)"
-
-
-def test_a_translation_is_used_when_the_original_language_was_not_asked_for(
-    recorded_dump: dict[str, Any],
-) -> None:
-    stripped = dict(recorded_dump)
-    stripped["subtitles"] = {}
-
-    track = select_caption_track(stripped, languages=("ko",))
-
-    assert track.language == "ko"
-    assert track.is_automatic is True
-
-
-def test_no_track_in_any_preferred_language_names_all_of_them(
-    recorded_dump: dict[str, Any],
-) -> None:
-    with pytest.raises(NotFoundError) as caught:
-        select_caption_track({"subtitles": {}, "automatic_captions": {}}, languages=("ko", "en"))
-
-    assert "ko" in str(caught.value)
-    assert "en" in str(caught.value)
-
-
-def test_the_ranked_candidates_put_every_korean_track_ahead_of_english(
-    recorded_dump: dict[str, Any],
-) -> None:
-    candidates = caption_track_candidates(recorded_dump, languages=("ko", "en"))
-
-    ranked = [(track.language, track.is_automatic) for track in candidates]
-    assert ranked[0] == ("ko", True)
-    assert ("en", False) in ranked
-    assert ranked.index(("en", False)) > 0
-
-
 def test_a_refused_first_choice_falls_back_to_the_next_candidate() -> None:
-    """YouTube throttles `tlang=` far harder than it throttles the track itself.
+    """The manual track and the transcription are both the video's own words.
 
-    Measured back to back on one address: the Korean translation of
-    dQw4w9WgXcQ's captions answered 429 four times out of four while the
-    English track it is translated from answered 200 four times out of four.
-    Korean ranks first, so on an English video the preferred candidate is the
-    fragile one, and stopping there would read as "transcripts are broken"
-    rather than "this one track is rationed".
-
-    Fixture URLs are redacted, so this builds its own dump — the two tracks
-    have to be told apart by URL for the test to mean anything.
+    So a refusal on the better one is worth stepping past rather than failing:
+    the caller gets English from the ASR instead of English from the uploader,
+    which `is_automatic` reports honestly.
     """
     dump = {
+        "language": "en",
         "subtitles": {
-            "en": [{"ext": "json3", "url": "https://example.invalid/en", "name": "English"}]
+            "en": [{"ext": "json3", "url": "https://example.invalid/manual", "name": "English"}]
         },
         "automatic_captions": {
-            "ko": [{"ext": "json3", "url": "https://example.invalid/ko?tlang=ko", "name": "Korean"}]
+            "en-orig": [
+                {
+                    "ext": "json3",
+                    "url": "https://example.invalid/asr",
+                    "name": "English (Original)",
+                }
+            ]
         },
     }
     attempted: list[str] = []
 
-    class ThrottledEgress(FakeEgress):
+    class RefusingManualEgress(FakeEgress):
         def fetch(self, url: str, *, headers: object = None) -> bytes:
             attempted.append(url)
-            if "tlang=" in url:
+            if url.endswith("manual"):
                 raise RateLimitedError(f"{url} answered 429 on egress fake")
             return CAPTION_BODY
 
-    transcript = TranscriptSource(languages=("ko", "en")).collect(
-        "dQw4w9WgXcQ", ThrottledEgress(), StubRuntime(dump)
+    transcript = TranscriptSource().collect(
+        "dQw4w9WgXcQ", RefusingManualEgress(), StubRuntime(dump)
     )
 
-    assert attempted[0].endswith("tlang=ko"), "the Korean translation was not tried first"
+    assert attempted[0].endswith("manual"), "the written captions were not tried first"
     assert transcript.language == "en"
-    assert transcript.is_automatic is False
+    assert transcript.is_automatic is True
     assert transcript.segments
 
 
@@ -305,7 +288,5 @@ def test_the_last_failure_is_raised_when_no_candidate_can_be_fetched(
         def fetch(self, url: str, *, headers: object = None) -> bytes:
             raise RateLimitedError("answered 429 on egress fake")
 
-    source = TranscriptSource(languages=("ko", "en"))
-
     with pytest.raises(RateLimitedError):
-        source.collect("dQw4w9WgXcQ", RefusingEgress(), StubRuntime(recorded_dump))
+        TranscriptSource().collect("dQw4w9WgXcQ", RefusingEgress(), StubRuntime(recorded_dump))

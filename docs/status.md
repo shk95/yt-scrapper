@@ -176,103 +176,54 @@ Direct egress is a residential KT line in KR.
 
 ## Decisions that are expensive to reverse
 
-### Caption selection ranks language first, Korean first of all
+### A transcript is the video's own words, or it is nothing
 
-`video.transcript` prefers Korean, then English, and **language outranks
-provenance**. The first requested language the video has any track for wins;
-only then does the best track *within* that language get picked — a manual one,
-else the original transcription (yt-dlp's `-orig` key), else the translation
-into that language.
+`video.transcript` takes the video's own language and no other:
 
-The consequence, stated plainly because it is the part that looks wrong in a
-log: an English video whose uploader wrote captions by hand returns the Korean
-machine translation of the machine transcription instead. Both lossy steps are
-real. It is still the right answer here — a faithful transcript in a language
-the reader cannot read is worth nothing — and it is a decision, not a fallout.
-The opposite rule (manual-first across languages) was written first and
-overruled.
+1. Captions a person wrote in that language.
+2. Otherwise YouTube's transcription of it — the ASR track, marked `-orig`
+   whenever translations of it also exist.
 
-Reversing it is one loop: rank the tiers outside the languages rather than
-inside. `test_korean_is_taken_ahead_of_a_manual_english_track` pins the current
-direction and fails the moment that loop is inverted.
+**Translated tracks are filtered out entirely**, in `_track`, so no future tier
+can reach one by accident. Two reasons, and the second is what settles it: a
+translation is two lossy steps from the audio, *and* it is drawn from a budget
+so small that a sweep spends it in three or four requests. A policy that used
+them would return the intended language for the first few videos of a run and
+some other language for the rest, with no error anywhere. That makes a
+transcript's language a fact about how recently the worker ran rather than a
+fact about the video.
 
-The `-orig` tier is worth keeping under either order. Plain `ko` on an English
-video is translated; `ko-orig` on a Korean video is the transcription itself,
-and preferring the bare key takes a needless round trip through the translator
-on every Korean video.
+The video's language comes from `dump["language"]`, and from the `-orig`
+automatic-caption key when yt-dlp reports none. Both are absent together on old
+uploads — jNQXAC9IVRw (2005) has no language, no ASR, and two manual tracks with
+nothing to distinguish them. That is a real state, not a parse failure, and it
+is the *only* place the configured `FALLBACK_LANGUAGES` (`ko`, `en`) applies.
+Refusing there would discard captions sitting in plain sight.
 
-### The ranking is a preference, and the fetch is allowed to refuse it
+Regional tags are matched on the primary subtag, so a video reporting `pt`
+takes its `pt-BR` track. Comparing whole tags would treat those as different
+languages and fall through to nothing.
 
-**Auto-translated caption tracks (`tlang=`) draw on a separate, small,
-per-address budget.** Measured, in this order, on the direct line:
+Two earlier policies were tried and are recorded here because the reasoning
+that killed each is the reasoning that keeps this one. Manual-first *across*
+languages ignored the caller's stated priority. Korean-first-always honoured it
+by putting every English video on the rationed translation path and quietly
+degrading to English mid-sweep. Both were replaced from measurement, not taste.
 
-| Observation | Result |
-| --- | --- |
-| Plain manual track, 6 in a row | 200 × 6 |
-| Translated track, 3 in a row (rested ~30 min) | 200 × 3 |
-| Translated track, next request | **429 on the 2nd** |
-| Plain + ASR track immediately after that 429 | 200, 200 |
-| Full metadata extraction immediately after | succeeded in 1.2 s |
-| Translated track **of a different video**, first ever request | **429** |
-| Korean ASR on a Korean video, 10 in a row | 200 × 10 |
-| Korean ASR on three other Korean videos, first request each | 200, 200, 200 |
-| Time from exhausted to serving again, polled each minute | **6 min** |
+Measured across the cases after the change: an English video with written
+captions yields those; two Korean videos yield `Korean (Original)`; an English
+video with none yields `English (Original)`; jNQXAC9IVRw yields its English
+track through the fallback. No request carries `tlang=` any more.
 
-Three things follow, and only the first was guessed correctly at first:
+`TranscriptSource.collect` still walks the candidates and steps past an
+`UpstreamError`, because the written track and the transcription are both the
+video's own words and returning the lesser one beats failing. `is_automatic`
+reports which arrived. The last failure is re-raised when every candidate
+refuses, so a genuinely blocked address still fails the job.
 
-1. The budget is **separate**. A 429 on a translation does not mean the address
-   is in trouble: plain tracks, ASR tracks and yt-dlp extraction all kept
-   working in the same second. Treating it as a lane-wide throttle would be a
-   large overreaction to a small, local refusal.
-2. The budget is **per address, not per video**. A fresh video's first
-   translation request is refused while another video's is exhausted. So a bulk
-   sweep does not get a few translations per video — it gets a few in total,
-   then none for a while.
-3. It **refills slowly**: once spent, 429 at +1 through +5 minutes and served
-   again at +6. After a longer rest it allowed three in a row, then 429 on the
-   next. That behaves like a token bucket holding three or four with a refill
-   near one per five minutes, which is an inference from those two runs rather
-   than a documented number.
-
-**None of this touches a video's own ASR track.** `ko` on a Korean video is
-`lang=ko&kind=asr` with no `tlang` — the transcription itself, not a translation
-of one — and it answered 200 ten times in a row on one video and first-try on
-three others, including while the translation budget was exhausted on the same
-address in the same minute. The roles invert with the video's language: on an
-English video Korean is the translated candidate, and on a Korean video it is
-English that is translated (`lang=ko&tlang=en`).
-
-That makes Korean-first cheapest exactly where it is wanted most. A sweep of
-Korean content asks only for original ASR tracks and meets no limit at all; only
-a sweep of *English* content asks for translations, and that is the case that
-degrades to English after the first few.
-
-An earlier version of this section said translations are "throttled far
-harder", from one loop where they answered 429 four times out of four. That
-loop ran on a budget the same session had already spent. The endpoint is not
-permanently stingy; it is separately and cheaply exhaustible. The distinction
-matters because the first story argues for avoiding translations and the second
-argues for spreading them across addresses.
-
-So `TranscriptSource.collect` walks the ranked candidates and drops to the next
-on any `UpstreamError` instead of failing the job, and the job then reports
-success — which is right, because nothing about the address is wrong.
-
-What this costs, and it is the honest limit of Korean-first at scale: **on
-English videos a Korean-preferring sweep degrades to English after the first
-few, silently.** Each such job also spends one refused request before falling
-back. `language`, `name` and `is_automatic` in the payload are therefore load
-bearing — a client that assumes Korean because it asked for Korean is wrong.
-The last failure is re-raised when every candidate refuses, so a genuinely
-blocked address still fails the job rather than quietly returning nothing.
-
-This is also the first measured argument for the egress pool that has nothing
-to do with RYD: the translation budget is per address, so exits multiply it
-where they cannot multiply YouTube extraction.
-
-Asking for two languages does not fetch two transcripts. One job yields one
-track. Per language fan-out would be a second kind, not a parameter — the
-fingerprint covers kind and target only.
+Asking for a transcript does not fetch several. One job yields one track. Per
+language fan-out would be a second kind, not a parameter — the fingerprint
+covers kind and target only.
 
 **`yt-dlp` is pinned with no upper bound.** Every other dependency is capped
 (`pydantic>=2.9,<3`). yt-dlp breaks *forward* — when YouTube changes, an old

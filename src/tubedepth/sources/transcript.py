@@ -30,8 +30,11 @@ CAPTION_FORMAT = "json3"
 # transcription was actually made in; the other 156 are translations of it.
 ORIGINAL_SUFFIX = "-orig"
 
-# Korean first, English second, and a manual track in either beats both.
-DEFAULT_LANGUAGES = ("ko", "en")
+# Used only when the video itself says nothing about what language it is in.
+FALLBACK_LANGUAGES = ("ko", "en")
+
+# The query parameter marking an auto-translated track rather than a transcription.
+TRANSLATION_MARKER = "tlang="
 
 
 @dataclass(frozen=True, slots=True)
@@ -50,14 +53,20 @@ def _json3_track(tracks: Sequence[Mapping[str, Any]] | None) -> Mapping[str, Any
     return None
 
 
-def _track(bucket: Mapping[str, Any], language: str, *, is_automatic: bool) -> CaptionTrack | None:
-    found = _json3_track(bucket.get(language))
+def _track(bucket: Mapping[str, Any], key: str, *, is_automatic: bool) -> CaptionTrack | None:
+    found = _json3_track(bucket.get(key))
     if found is None:
         return None
+    if TRANSLATION_MARKER in found["url"]:
+        # A `tlang=` track is this video's words run through a translator, which
+        # this policy never wants, and it draws on a small per-address budget
+        # that a sweep exhausts in three or four requests. Filtered here rather
+        # than at the call site so no future tier can reach it by accident.
+        return None
     return CaptionTrack(
-        # `language` rather than the key: an `-orig` key is yt-dlp's marker for
-        # the source language, not a language tag anyone should see.
-        language=language.removesuffix(ORIGINAL_SUFFIX),
+        # The key without yt-dlp's marker: `-orig` says which language the
+        # transcription ran in, and is not a language tag anyone should see.
+        language=key.removesuffix(ORIGINAL_SUFFIX),
         name=found.get("name"),
         is_automatic=is_automatic,
         format=CAPTION_FORMAT,
@@ -65,54 +74,110 @@ def _track(bucket: Mapping[str, Any], language: str, *, is_automatic: bool) -> C
     )
 
 
+def video_language(dump: Mapping[str, Any]) -> str | None:
+    """The language the video is actually in, or None if nothing says.
+
+    Two independent signals, and they answer the same question. `language` is
+    what yt-dlp reports. The `-orig` key in the automatic captions is what
+    YouTube's own transcriber ran in — present whenever there is ASR at all,
+    which covers videos yt-dlp leaves as None.
+
+    Both are absent together on old uploads: jNQXAC9IVRw (2005) reports no
+    language, has no ASR and carries two manual tracks with nothing to
+    distinguish them. That is a real state, not a parsing failure, so it
+    returns None and the caller decides.
+    """
+    reported = dump.get("language")
+    if isinstance(reported, str) and reported:
+        return reported
+    for key in dump.get("automatic_captions") or {}:
+        if key.endswith(ORIGINAL_SUFFIX):
+            return key.removesuffix(ORIGINAL_SUFFIX)
+    return None
+
+
+def _matching_keys(bucket: Mapping[str, Any], language: str) -> list[str]:
+    """Keys for `language`, exact first, then regional variants of it.
+
+    yt-dlp reports `pt` while YouTube lists the track as `pt-BR`, and reports
+    `en` for a video whose manual track is `en-US`. Comparing the primary
+    subtag is what keeps those from looking like different languages.
+    """
+    primary = language.partition("-")[0]
+    exact = [key for key in bucket if key == language]
+    regional = [
+        key
+        for key in bucket
+        if key not in exact
+        and not key.endswith(ORIGINAL_SUFFIX)
+        and key.partition("-")[0] == primary
+    ]
+    return exact + sorted(regional)
+
+
 def caption_track_candidates(
-    dump: Mapping[str, Any], *, languages: Sequence[str]
+    dump: Mapping[str, Any], *, fallback_languages: Sequence[str] = FALLBACK_LANGUAGES
 ) -> list[CaptionTrack]:
     """Every track worth trying, best first.
 
-    The requested languages are ranked, and the first one the video has *any*
-    track for wins outright. Korean leading the list means a caller gets Korean
-    whenever Korean exists — including when it is a machine translation of a
-    machine transcription and the uploader's own English captions were sitting
-    right there. That is the deliberate trade: whoever asked for Korean wants
-    to read Korean, and a faithful transcript in a language they cannot read is
-    worth nothing.
+    The policy is the video's own language and nothing else:
 
-    Within one language the ranking is provenance, best first:
+    1. Captions a person wrote in that language.
+    2. The transcription of it — YouTube's ASR, marked `-orig` when a
+       translation of it also exists.
 
-    1. A track a person wrote.
-    2. The automatic track in the language the transcription actually ran in —
-       yt-dlp marks it with an `-orig` key.
-    3. The automatic track translated into this language from that one.
+    Translations never appear at either tier. They are two lossy steps from the
+    audio, and they are drawn from a budget so small that a sweep spends it in
+    three or four requests, after which every video would silently arrive in
+    some other language. Refusing them keeps a transcript's language a fact
+    about the video rather than a fact about how recently we ran.
 
-    Two and three only differ for a video whose own language is not the one
-    being asked for, which is exactly when it matters: `ko` on an English video
-    is translated, `ko-orig` on a Korean one is not.
+    `fallback_languages` applies only when the video's language cannot be
+    determined at all. That is rare and real — see `video_language` — and the
+    alternative is discarding captions that are sitting right there.
 
-    A list rather than one track because the ranking is a preference and the
-    fetch can still be refused — see `TranscriptSource.collect`.
+    A list rather than one track because the ranking is a preference and a
+    fetch can still be refused; see `TranscriptSource.collect`.
     """
     manual = dump.get("subtitles") or {}
     automatic = dump.get("automatic_captions") or {}
 
+    language = video_language(dump)
+    languages = [language] if language is not None else list(fallback_languages)
+
     candidates: list[CaptionTrack] = []
-    for language in languages:
-        for track in (
-            _track(manual, language, is_automatic=False),
-            _track(automatic, language + ORIGINAL_SUFFIX, is_automatic=True),
-            _track(automatic, language, is_automatic=True),
+    for candidate_language in languages:
+        for key in _matching_keys(manual, candidate_language):
+            track = _track(manual, key, is_automatic=False)
+            if track is not None:
+                candidates.append(track)
+        for key in (
+            candidate_language + ORIGINAL_SUFFIX,
+            *_matching_keys(automatic, candidate_language),
         ):
+            track = _track(automatic, key, is_automatic=True)
             if track is not None:
                 candidates.append(track)
     return candidates
 
 
-def select_caption_track(dump: Mapping[str, Any], *, languages: Sequence[str]) -> CaptionTrack:
+def select_caption_track(
+    dump: Mapping[str, Any], *, fallback_languages: Sequence[str] = FALLBACK_LANGUAGES
+) -> CaptionTrack:
     """The single best track. See `caption_track_candidates` for the ranking."""
-    candidates = caption_track_candidates(dump, languages=languages)
+    candidates = caption_track_candidates(dump, fallback_languages=fallback_languages)
     if not candidates:
-        raise NotFoundError(f"no caption track in any requested language: {', '.join(languages)}")
+        raise NotFoundError(_no_track_message(dump, fallback_languages))
     return candidates[0]
+
+
+def _no_track_message(dump: Mapping[str, Any], fallback_languages: Sequence[str]) -> str:
+    language = video_language(dump)
+    if language is not None:
+        return f"no caption track in the video's own language: {language}"
+    return (
+        f"the video reports no language and has no caption track in {', '.join(fallback_languages)}"
+    )
 
 
 def parse_json3(
@@ -168,25 +233,18 @@ class TranscriptSource:
     default_freshness = timedelta(days=30)
     cost = SourceCost.STANDARD
 
-    def __init__(self, *, languages: Sequence[str] = DEFAULT_LANGUAGES) -> None:
-        self._languages = tuple(languages)
+    def __init__(self, *, fallback_languages: Sequence[str] = FALLBACK_LANGUAGES) -> None:
+        self._fallback_languages = tuple(fallback_languages)
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> Transcript:
         dump = runtime.extract(target, egress=egress)
-        candidates = caption_track_candidates(dump, languages=self._languages)
+        candidates = caption_track_candidates(dump, fallback_languages=self._fallback_languages)
         if not candidates:
-            raise NotFoundError(
-                f"no caption track in any requested language: {', '.join(self._languages)}"
-            )
+            raise NotFoundError(_no_track_message(dump, self._fallback_languages))
 
-        # Walk the ranking rather than committing to its head. YouTube throttles
-        # the translation endpoint (`tlang=`) far harder than it throttles the
-        # track being translated: measured back to back on one address, the
-        # Korean translation of dQw4w9WgXcQ answered 429 every time while the
-        # English track it derives from answered 200 every time. Since Korean
-        # ranks first, the preferred candidate is the fragile one on exactly
-        # those videos, and giving up there would read as "transcripts are
-        # broken" rather than "this one track is rationed".
+        # Walk the ranking rather than committing to its head: a manual track
+        # can be refused while the transcription of the same video is served,
+        # and returning the video's words in the wrong tier beats failing.
         last_error: UpstreamError | None = None
         for track in candidates:
             try:

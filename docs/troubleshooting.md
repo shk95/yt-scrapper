@@ -109,12 +109,17 @@ added. A column that is required and has no default cannot be filled in for
 existing rows; that case refuses by name instead, and the fix is to migrate the
 file by hand or delete it if it holds nothing worth keeping.
 
-## `no caption track in any requested language: ko, en`
+## `no caption track in the video's own language: <tag>`
 
-Not a failure of extraction. The video has no Korean or English track of any
-kind — not manual, not automatic, not translated — which is common for music and
-ambience uploads with captions disabled. The job fails terminally and is not
-retried, because retrying cannot change the answer.
+Not a failure of extraction. The video has neither written captions nor a
+transcription in the language it is actually in, which is common for music and
+ambience uploads with captions turned off. Translations of some other language's
+track are deliberately not an answer here. The job fails terminally and is not
+retried, because retrying cannot change it.
+
+The variant `the video reports no language and has no caption track in ko, en`
+means both language signals were absent — old uploads with no ASR — and the
+configured fallback found nothing either.
 
 ## `api/timedtext?...&tlang=ko answered 429 on egress direct`
 
@@ -136,6 +141,7 @@ symptom under a bulk Korean-first sweep **of English videos** is that the first
 few come back in Korean and the rest come back in English. Check `language` and
 `is_automatic` in the payload before looking for a parser problem.
 
-Korean videos never reach this. Their Korean track is `lang=ko&kind=asr` with no
-`tlang` — the transcription itself — and it served 200 ten times in a row while
-this same address was refusing translations.
+**This should no longer be reachable through `video.transcript`**, which now
+filters `tlang=` tracks out of the candidates entirely. Seeing it means
+something else fetched a caption URL — check what, because that path is
+rationed and the caller probably does not know it.
