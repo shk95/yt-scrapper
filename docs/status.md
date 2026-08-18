@@ -20,8 +20,8 @@ Last updated: 2026-08-18.
 | M6 — discovery | done (channel.videos, search.videos, playlist.items) |
 | worker concurrency + AIMD wired | done |
 | caching + dedup + retention | done |
-| M4 — dislikes, SponsorBlock | **next** |
-| M7 — InnerTube trio | after that |
+| M4 — dislikes, SponsorBlock | done |
+| M7 — InnerTube trio | **next** |
 | M3 — HTTP API and auth | after that |
 | M4.5 — egress pool | deferred; see "decisions" below |
 
@@ -95,6 +95,18 @@ generous for what is being collected, so `tubedepth prune` reports it and exits
 non-zero rather than silently evicting. What `--max-age-days` buys is a bounded
 window of history: how a video's counts moved over the last month is a free
 by-product of caching, and older than that is not kept.
+
+**Third-party sources are on their own lanes, and that is the point.**
+Neither `video.dislikes` nor `video.sponsor_segments` touches YouTube, so their
+cost comes out of somebody else's budget and the per-address YouTube tolerance
+— which is what actually caps this project — is untouched by them. Return
+YouTube Dislike documents 100 requests a minute and 10,000 a day; SponsorBlock
+publishes no figure.
+
+Dislike numbers are labelled estimates in the model itself (`is_estimate`,
+`source`), not only in the documentation. They are reconstructed from an
+archive plus extension telemetry, and a field called `dislikes` sitting beside
+a real `likes` invites exactly the wrong reading.
 
 **Still not done in the queue:** cancellation. `DELETE`-style stopping of a
 running job does not exist, so a comment harvest started by mistake runs to
