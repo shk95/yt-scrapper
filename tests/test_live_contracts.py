@@ -39,7 +39,11 @@ def test_live_a_real_extraction_still_yields_tags_and_a_hundred_heatmap_buckets(
     assert payload["video_id"] == "dQw4w9WgXcQ"
     assert payload["tags"], "tags disappeared — the Data API withholds these, so we are the source"
     assert len(payload["most_replayed"]) == 100
-    assert payload["published_at"].startswith("2009-10-25")
+    # The date, not the instant: YouTube stopped returning `timestamp` for at
+    # least some videos on 2026-08-18, and the coarse date is what survived.
+    # Asserting the instant here would make this test fail for a reason that
+    # is upstream's rather than ours.
+    assert payload["published_date"] == "2009-10-25"
 
 
 def test_live_a_real_transcript_still_parses_into_timed_segments(tmp_path: Path) -> None:

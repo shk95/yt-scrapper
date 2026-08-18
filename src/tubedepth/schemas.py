@@ -7,7 +7,7 @@ implementation rather than what a viewer sees.
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 
 from pydantic import BaseModel, Field
 
@@ -61,9 +61,12 @@ class VideoMetadata(BaseModel):
     # snippet.tags is returned by the official Data API only to the video's
     # owner, so for everyone else this field exists nowhere else.
     tags: list[str] = []
-    # The exact upload instant, always offset-aware. yt-dlp also carries a
-    # coarse upload_date; the instant is the part worth having.
+    # The exact upload instant, always offset-aware — the part the official
+    # Data API cannot give. Genuinely sometimes absent: YouTube stopped
+    # returning it for at least some videos on 2026-08-18, which is why the
+    # coarse date below is kept rather than derived and discarded.
     published_at: datetime | None = None
+    published_date: date | None = None
     chapters: list[Chapter] = []
     most_replayed: list[ReplaySegment] = []
 

@@ -36,6 +36,23 @@ project uses. Everything here runs through `uv run`, which uses the version
 This also matters for fixtures: they are recorded against the locked version,
 so invoking the `PATH` binary produces output that may not match.
 
+### `published_at` is null for a video that plainly has an upload date
+
+yt-dlp stopped returning `timestamp` for at least some videos on 2026-08-18 —
+three consecutive live extractions of `dQw4w9WgXcQ` came back with
+`timestamp=None` while `upload_date='20091025'` stayed. The exact instant is
+the field the official Data API cannot give, so it is worth having, but it is
+genuinely sometimes absent.
+
+`published_date` carries the coarse date and is populated from `upload_date`
+whenever it is there. Do not "fix" this by deriving the instant from the date;
+midnight UTC is not when the video went up, and a fabricated instant is worse
+than an absent one.
+
+Fixtures recorded before that date still carry `timestamp`, and the parser
+handles both shapes on purpose — a parser that only handled the newer one
+would break on every recording and on every video YouTube still answers fully.
+
 ---
 
 ## SQLite

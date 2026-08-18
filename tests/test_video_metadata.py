@@ -141,3 +141,36 @@ def test_a_video_reports_which_caption_languages_exist_without_their_urls(
     assert {track.language for track in manual} == {"de-DE", "en", "es-419", "ja", "pt-BR"}
     assert len(metadata.caption_tracks) > 100
     assert not any("url" in track.model_dump() for track in metadata.caption_tracks)
+
+
+def test_the_upload_date_survives_when_the_exact_instant_does_not() -> None:
+    """YouTube stopped returning `timestamp` for at least some videos.
+
+    Observed live on 2026-08-18: three consecutive extractions of a video
+    whose recorded dump carries timestamp=1256453853 came back with
+    timestamp=None and upload_date='20091025'. The instant is the field worth
+    having and it is genuinely sometimes absent, so dropping the coarse date
+    on the floor loses the publication date entirely rather than losing
+    precision.
+    """
+    dump = {"id": "dQw4w9WgXcQ", "title": "x", "upload_date": "20091025"}
+
+    metadata = normalize(dump)
+
+    assert metadata.published_at is None
+    assert metadata.published_date is not None
+    assert metadata.published_date.isoformat() == "2009-10-25"
+
+
+def test_the_exact_instant_is_still_preferred_when_it_is_there(
+    recorded_dump: dict[str, Any],
+) -> None:
+    # The recorded dump predates the change, which is why it is kept: a parser
+    # that stopped handling the older shape would break on every fixture and
+    # on every video YouTube still answers fully for.
+    assert recorded_dump["timestamp"]
+
+    metadata = normalize(recorded_dump)
+
+    assert metadata.published_at is not None
+    assert metadata.published_date is not None

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping, Sequence
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from typing import Any
 
 from ..egress.control import Lane
@@ -55,6 +55,21 @@ def _caption_tracks(dump: Mapping[str, Any]) -> list[CaptionTrackReference]:
     return tracks
 
 
+def _published_date(upload_date: str | None) -> date | None:
+    """Parse yt-dlp's YYYYMMDD upload date.
+
+    Kept even when the exact instant is present, because the instant is the
+    field that disappears: on 2026-08-18 live extractions stopped carrying it
+    while this stayed.
+    """
+    if not upload_date:
+        return None
+    try:
+        return datetime.strptime(upload_date, "%Y%m%d").date()
+    except ValueError:
+        return None
+
+
 def normalize(dump: Mapping[str, Any]) -> VideoMetadata:
     """Turn one yt-dlp dump into the public contract."""
     return VideoMetadata(
@@ -71,6 +86,7 @@ def normalize(dump: Mapping[str, Any]) -> VideoMetadata:
         caption_tracks=_caption_tracks(dump),
         tags=list(dump.get("tags") or []),
         published_at=_published_at(dump.get("timestamp")),
+        published_date=_published_date(dump.get("upload_date")),
         chapters=_chapters(dump.get("chapters")),
         most_replayed=_most_replayed(dump.get("heatmap")),
     )
