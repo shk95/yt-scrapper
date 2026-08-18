@@ -186,3 +186,48 @@ class SponsorSegments(BaseModel):
     # which is true of most videos. It does not mean the lookup failed.
     segments: list[SponsorSegment] = []
     source: str = "sponsorblock"
+
+
+class RelatedVideo(BaseModel):
+    video_id: str
+    title: str | None = None
+    channel: str | None = None
+    view_count_text: str | None = None
+    duration_text: str | None = None
+
+
+class RelatedVideos(BaseModel):
+    video_id: str
+    items: list[RelatedVideo] = []
+    # Which renderer the parse actually matched. An implementation detail in
+    # the public contract on purpose: it is the cheapest possible canary, it is
+    # assertable in a test, and it turns "YouTube changed something" from a
+    # silent shape change into a visible field change.
+    renderer_shape: str | None = None
+
+
+class CommunityPost(BaseModel):
+    post_id: str | None = None
+    text: str | None = None
+    published_text: str | None = None
+    vote_count_text: str | None = None
+
+
+class CommunityPosts(BaseModel):
+    channel_id: str
+    posts: list[CommunityPost] = []
+
+
+class ChannelAbout(BaseModel):
+    channel_id: str
+    name: str | None = None
+    description: str | None = None
+    # Rounded, and named so. YouTube publishes "4.53M subscribers" and nothing
+    # more precise exists anywhere — the Data API rounds too. There is
+    # deliberately no `subscriber_count`: it would be a lie the type system
+    # cannot catch.
+    subscriber_count_approximate: int | None = None
+    subscriber_count_text: str | None = None
+    country: str | None = None
+    joined_text: str | None = None
+    links: list[str] = []

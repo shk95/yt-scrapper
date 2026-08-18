@@ -11,6 +11,11 @@ from functools import cache
 
 from .comments import CommentsSource
 from .dislikes import DislikesSource
+from .innertube_sources import (
+    ChannelAboutSource,
+    CommunityPostsSource,
+    RelatedVideosSource,
+)
 from .listings import ChannelVideosSource, PlaylistItemsSource, SearchVideosSource
 from .registry import DataSource, SourceRegistry
 from .sponsorblock import SponsorBlockSource
@@ -31,4 +36,7 @@ def default_registry() -> SourceRegistry:
     registry.register(PlaylistItemsSource())
     registry.register(DislikesSource())
     registry.register(SponsorBlockSource())
+    registry.register(RelatedVideosSource())
+    registry.register(CommunityPostsSource())
+    registry.register(ChannelAboutSource())
     return registry

@@ -54,3 +54,14 @@ class RateLimitedError(UpstreamError):
     """
 
     retryable: ClassVar[bool] = True
+
+
+class ExtractionError(TubedepthError):
+    """A backend answered and the response no longer contains what the parser needs.
+
+    Kept distinct from every other upstream failure, and never retried. It is
+    not a network problem and it is not transient: retrying spends requests
+    against an address that answered perfectly well, and the only thing that
+    fixes it is a code change. Keeping it its own type is what lets the worker
+    refuse to retry it and lets an operator see it for what it is.
+    """

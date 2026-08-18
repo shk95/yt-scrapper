@@ -21,8 +21,8 @@ Last updated: 2026-08-18.
 | worker concurrency + AIMD wired | done |
 | caching + dedup + retention | done |
 | M4 — dislikes, SponsorBlock | done |
-| M7 — InnerTube trio | **next** |
-| M3 — HTTP API and auth | after that |
+| M7 — InnerTube trio | done |
+| M3 — HTTP API and auth | **next** |
 | M4.5 — egress pool | deferred; see "decisions" below |
 
 Nothing under `src/tubedepth/` exists yet beyond the package marker. The plan
@@ -107,6 +107,30 @@ Dislike numbers are labelled estimates in the model itself (`is_estimate`,
 `source`), not only in the documentation. They are reconstructed from an
 archive plus extension telemetry, and a field called `dislikes` sitting beside
 a real `likes` invites exactly the wrong reading.
+
+**The InnerTube surfaces are the fragile half, and the tests are shaped
+around that.** Nothing reads a fixed path: YouTube reshuffles the containers
+around a renderer far more often than it renames the renderer, and a
+fixed-path reader returns nothing for that — indistinguishable from a video
+with no related videos. Parsers search by renderer name, keep the previous
+name in the accepted list so a rollback does not break them in the other
+direction, and record which renderer actually matched on the payload as a
+canary.
+
+An empty result is accepted only when the response says it is empty. A channel
+with no community posts says so with a message renderer; without that marker,
+an empty parse raises `ExtractionError` naming what YouTube actually sent.
+That is precisely the failure yt-dlp has — it returns an empty list for a
+community tab it can no longer read — and an unquestioned empty list is how a
+broken scraper stays deployed for weeks.
+
+**What the fixture suite proves, and what it does not.** It proves the parsers
+have not regressed against responses recorded on a known date. It proves
+nothing about what YouTube is sending now; only `just contract` does that. The
+mutation tests are the load-bearing ones: a suite that only ever sees a
+passing fixture cannot tell you it would catch a rename, so each parser has a
+test that renames its renderer in a copy of the recording and asserts the
+parser raises rather than returning nothing.
 
 **Still not done in the queue:** cancellation. `DELETE`-style stopping of a
 running job does not exist, so a comment harvest started by mistake runs to

@@ -121,3 +121,27 @@ def test_the_same_author_gets_the_same_pseudonym_across_comments() -> None:
 
     assert comments[0]["author_id"] == comments[2]["author_id"]
     assert comments[0]["author_id"] != comments[1]["author_id"]
+
+
+def test_an_innertube_response_has_its_signed_media_urls_replaced() -> None:
+    """Found by the hygiene guard, not by foresight.
+
+    An InnerTube response embeds signed googlevideo URLs of its own, arriving
+    by a different route than the yt-dlp dump they are stripped from. Two
+    committed fixtures carried them before the guard failed the build.
+    """
+    from tubedepth.fixture_capture import redact_innertube_response
+
+    payload = {
+        "contents": {
+            "player": {"url": "https://rr3---sn-x.googlevideo.com/videoplayback?sig=secret"},
+            "title": "kept",
+        },
+        "trackingParams": "should-not-survive",
+    }
+
+    redacted = redact_innertube_response(payload)
+
+    assert "googlevideo" not in json.dumps(redacted)
+    assert "trackingParams" not in redacted
+    assert redacted["contents"]["title"] == "kept"

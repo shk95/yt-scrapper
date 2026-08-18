@@ -20,6 +20,21 @@ from typing import Any
 
 REDACTED_CAPTION_URL = "https://redacted.invalid/timedtext"
 REDACTED_AVATAR_URL = "https://redacted.invalid/avatar"
+REDACTED_MEDIA_URL = "https://redacted.invalid/media"
+
+# Tracking blobs. Most of the bytes in an InnerTube response, and they carry
+# session identity.
+INNERTUBE_NOISE = frozenset(
+    {
+        "trackingParams",
+        "clickTrackingParams",
+        "responseContext",
+        "visitorData",
+        "sessionIndex",
+        "loggingDirectives",
+        "serializedShareEntity",
+    }
+)
 
 # Fields on a comment that identify a person rather than describe a comment.
 AUTHOR_IDENTITY_KEYS = ("author", "author_id", "author_url", "author_thumbnail")
@@ -77,3 +92,30 @@ def _anonymize_comment_authors(redacted: dict[str, Any]) -> None:
             comment["author_url"] = f"https://redacted.invalid/@author{index}"
         if "author_thumbnail" in comment:
             comment["author_thumbnail"] = REDACTED_AVATAR_URL
+
+
+SIGNED_MEDIA_HOSTS = ("googlevideo.com", "/videoplayback")
+
+
+def redact_innertube_response(payload: Any) -> Any:
+    """Make an InnerTube response committable.
+
+    Two problems, and the second is the one that bites. The tracking blobs are
+    most of the bytes and carry session identity. And the response embeds
+    signed googlevideo URLs — the same short-lived, credential-shaped things
+    that are stripped from a yt-dlp dump, arriving by a different route.
+
+    Written after the repository hygiene guard caught exactly that in a
+    committed fixture, which is what the guard is for.
+    """
+    if isinstance(payload, Mapping):
+        return {
+            key: redact_innertube_response(value)
+            for key, value in payload.items()
+            if key not in INNERTUBE_NOISE
+        }
+    if isinstance(payload, list):
+        return [redact_innertube_response(entry) for entry in payload]
+    if isinstance(payload, str) and any(host in payload for host in SIGNED_MEDIA_HOSTS):
+        return REDACTED_MEDIA_URL
+    return payload
