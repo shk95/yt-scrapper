@@ -203,23 +203,52 @@ on every Korean video.
 
 ### The ranking is a preference, and the fetch is allowed to refuse it
 
-**YouTube throttles the translation endpoint far harder than the track being
-translated.** Measured back to back on this address: `tlang=ko` on dQw4w9WgXcQ
-answered 429 four times out of four, while the English track it derives from
-answered 200 four times out of four in the same loop, seconds apart. A handful
-of translation fetches exhausts it; plain tracks keep working.
+**Auto-translated caption tracks (`tlang=`) draw on a separate, small,
+per-address budget.** Measured, in this order, on the direct line:
 
-Korean-first therefore puts the *fragile* candidate first on every English
-video, which is most of them. So `TranscriptSource.collect` walks the ranked
-candidates and drops to the next on any `UpstreamError` rather than failing the
-job. Without it the Korean preference reads as "transcripts are broken" the
-moment the translation budget runs out, and the budget is small.
+| Observation | Result |
+| --- | --- |
+| Plain manual track, 6 in a row | 200 × 6 |
+| Translated track, 3 in a row (rested ~30 min) | 200 × 3 |
+| Translated track, next request | **429 on the 2nd** |
+| Plain + ASR track immediately after that 429 | 200, 200 |
+| Full metadata extraction immediately after | succeeded in 1.2 s |
+| Translated track **of a different video**, first ever request | **429** |
 
-What this costs: the language you get back is not always the language ranked
-highest, so `language`, `name` and `is_automatic` in the payload are load
+Three things follow, and only the first was guessed correctly at first:
+
+1. The budget is **separate**. A 429 on a translation does not mean the address
+   is in trouble: plain tracks, ASR tracks and yt-dlp extraction all kept
+   working in the same second. Treating it as a lane-wide throttle would be a
+   large overreaction to a small, local refusal.
+2. The budget is **per address, not per video**. A fresh video's first
+   translation request is refused while another video's is exhausted. So a bulk
+   sweep does not get a few translations per video — it gets a few in total,
+   then none for a while.
+3. It **refills on the order of half an hour**, not seconds.
+
+An earlier version of this section said translations are "throttled far
+harder", from one loop where they answered 429 four times out of four. That
+loop ran on a budget the same session had already spent. The endpoint is not
+permanently stingy; it is separately and cheaply exhaustible. The distinction
+matters because the first story argues for avoiding translations and the second
+argues for spreading them across addresses.
+
+So `TranscriptSource.collect` walks the ranked candidates and drops to the next
+on any `UpstreamError` instead of failing the job, and the job then reports
+success — which is right, because nothing about the address is wrong.
+
+What this costs, and it is the honest limit of Korean-first at scale: **on
+English videos a Korean-preferring sweep degrades to English after the first
+few, silently.** Each such job also spends one refused request before falling
+back. `language`, `name` and `is_automatic` in the payload are therefore load
 bearing — a client that assumes Korean because it asked for Korean is wrong.
 The last failure is re-raised when every candidate refuses, so a genuinely
-throttled address still fails the job rather than returning nothing quietly.
+blocked address still fails the job rather than quietly returning nothing.
+
+This is also the first measured argument for the egress pool that has nothing
+to do with RYD: the translation budget is per address, so exits multiply it
+where they cannot multiply YouTube extraction.
 
 Asking for two languages does not fetch two transcripts. One job yields one
 track. Per language fan-out would be a second kind, not a parameter — the

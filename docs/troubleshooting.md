@@ -118,15 +118,19 @@ retried, because retrying cannot change the answer.
 
 ## `api/timedtext?...&tlang=ko answered 429 on egress direct`
 
-The `tlang=` parameter marks an auto-translated caption track, and YouTube
-rations that endpoint far more tightly than the track it translates from.
-Measured back to back on one address: four requests for the Korean translation
-of dQw4w9WgXcQ, four 429s; four requests for the English track it derives from,
-four 200s, interleaved seconds apart.
+The `tlang=` parameter marks an auto-translated caption track, and those draw on
+a budget separate from everything else YouTube gives this address — a few
+requests, then 429 for roughly half an hour.
 
-Nothing is wrong with the address — a 429 here does not mean the line is
-blocked, and quarantining it would be an overreaction. `video.transcript`
-already handles this by dropping to the next ranked candidate, so the visible
-symptom is a transcript that came back in English when Korean was asked for.
-Check `language` and `is_automatic` in the payload before assuming a parser
-problem. The budget refills; it is not a permanent state.
+**Nothing is wrong with the address.** Measured in the same second as one of
+these 429s: the plain caption track answered 200, the ASR track answered 200,
+and a full metadata extraction of another video succeeded in 1.2 s. Do not
+quarantine the egress over this; the rate controller never sees it, because
+`video.transcript` falls through to the next ranked candidate and the job
+succeeds.
+
+The budget is **per address, not per video** — a different video's first
+translation request is refused while this one is exhausted. So the visible
+symptom under a bulk Korean-first sweep is that the first few videos come back
+in Korean and the rest come back in English. Check `language` and
+`is_automatic` in the payload before looking for a parser problem.
