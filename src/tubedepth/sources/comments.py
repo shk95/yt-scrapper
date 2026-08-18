@@ -12,6 +12,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..egress.transport import Egress
+from ..identifiers import TargetType
 from ..schemas import Comment, CommentHarvest
 from .ytdlp_runtime import YtdlpRuntime
 
@@ -68,6 +69,7 @@ class CommentsSource:
     """
 
     kind = "video.comments"
+    target_type = TargetType.VIDEO
 
     def __init__(self, *, sort: str = "top", limit: int = DEFAULT_LIMIT) -> None:
         self._sort = sort

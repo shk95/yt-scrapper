@@ -12,6 +12,7 @@ from pydantic import BaseModel
 
 from tubedepth.egress.transport import Egress
 from tubedepth.errors import ConfigurationError, NotFoundError
+from tubedepth.identifiers import TargetType
 from tubedepth.sources.registry import SourceRegistry
 from tubedepth.sources.ytdlp_runtime import YtdlpRuntime
 
@@ -29,6 +30,7 @@ class FakeSource:
     """
 
     kind = "video.fake"
+    target_type = TargetType.VIDEO
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> FakePayload:
         return FakePayload(target=target)

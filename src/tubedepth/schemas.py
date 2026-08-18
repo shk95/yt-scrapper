@@ -118,3 +118,32 @@ class CommentHarvest(BaseModel):
     # nested document is pathological to parse and to diff, and any caller that
     # wants a tree builds one in five lines.
     comments: list[Comment] = []
+
+
+class ListedVideo(BaseModel):
+    """A video as it appears in a listing.
+
+    Deliberately thinner than VideoMetadata: a flat listing carries only what
+    YouTube puts in the grid. Duration and view count are the two fields worth
+    having here anyway, because they are what anyone filters on before
+    spending a request per video to collect the rest.
+    """
+
+    video_id: str
+    title: str | None = None
+    duration_seconds: int | None = None
+    view_count: int | None = None
+    channel: str | None = None
+    channel_id: str | None = None
+    published_at: datetime | None = None
+
+
+class VideoListing(BaseModel):
+    source_kind: str
+    listing_id: str | None = None
+    title: str | None = None
+    videos: list[ListedVideo] = []
+    # Deleted and private entries, which yt-dlp leaves as placeholders. Counted
+    # rather than dropped silently: "twelve of fourteen" is a different fact
+    # from "twelve", and only this layer can tell the difference.
+    skipped_count: int = 0

@@ -16,10 +16,11 @@ from .database import Database
 from .egress.transport import DirectEgress
 from .errors import TubedepthError
 from .fixture_capture import redact_for_fixture
-from .identifiers import normalize_video_identifier
+from .identifiers import normalize_target, normalize_video_identifier
 from .models import Job
 from .observability import configure_logging
 from .payload_store import PayloadStore
+from .sources import default_registry
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime
 from .worker import Worker
 
@@ -66,19 +67,39 @@ def _database(data_directory: Path) -> Database:
 @application.command()
 def enqueue(
     kind: Annotated[str, typer.Argument(help="What to collect; see `tubedepth sources`")],
-    targets: Annotated[list[str], typer.Argument(help="One or more video URLs or ids")],
+    targets: Annotated[list[str], typer.Argument(help="Videos, channels, playlists or a query")],
     data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
         "var"
     ),
+    then: Annotated[
+        str | None,
+        typer.Option("--then", help="For a listing kind: what to collect per video found"),
+    ] = None,
 ) -> None:
-    """Queue work without doing it. The worker picks it up."""
+    """Queue work without doing it. The worker picks it up.
+
+    With `--then`, one queued channel becomes a job per video it holds. That is
+    the difference between enumerating and collecting at any volume.
+    """
+    registry = default_registry()
+    source = registry.get(kind)
+    if then is not None:
+        # Fail on a typo now rather than after a hundred jobs exist that can
+        # only ever fail.
+        registry.get(then)
+
     database = _database(data_directory)
     with database.session() as session:
         for target in targets:
-            job = Job(kind=kind, target=normalize_video_identifier(target))
+            job = Job(
+                kind=kind,
+                target=normalize_target(source.target_type, target),
+                follow_up_kind=then,
+            )
             session.add(job)
             session.flush()
-            typer.echo(f"→ queued {job.identifier}  {kind}  {job.target}")
+            suffix = f" → {then}" if then else ""
+            typer.echo(f"→ queued {job.identifier[:8]}  {kind}  {job.target}{suffix}")
 
 
 @application.command()

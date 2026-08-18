@@ -15,6 +15,7 @@ from pydantic import BaseModel
 
 from ..egress.transport import Egress
 from ..errors import ConfigurationError, NotFoundError
+from ..identifiers import TargetType
 from .ytdlp_runtime import YtdlpRuntime
 
 
@@ -29,6 +30,11 @@ class DataSource(Protocol):
     """
 
     kind: str
+    # Which normalizer applies to this source's target. A property of the
+    # source rather than of the caller: a channel handle run through the video
+    # normalizer is rejected as malformed, and a video id run through the
+    # channel one is accepted and then fails inside the extractor minutes later.
+    target_type: TargetType
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> BaseModel: ...
 
@@ -54,4 +60,7 @@ class SourceRegistry:
 
     def describe(self) -> Mapping[str, Any]:
         """What a `GET /v1/sources` route and the CLI help both read."""
-        return {kind: {"kind": kind} for kind in self.kinds()}
+        return {
+            kind: {"kind": kind, "target": self.get(kind).target_type.value}
+            for kind in self.kinds()
+        }

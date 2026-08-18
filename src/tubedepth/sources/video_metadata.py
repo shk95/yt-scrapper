@@ -7,6 +7,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 from ..egress.transport import Egress
+from ..identifiers import TargetType
 from ..schemas import CaptionTrackReference, Chapter, ReplaySegment, VideoMetadata
 from .ytdlp_runtime import YtdlpRuntime
 
@@ -77,6 +78,7 @@ class VideoMetadataSource:
     """Chapters, the most-replayed graph, tags, and the exact upload instant."""
 
     kind = "video.metadata"
+    target_type = TargetType.VIDEO
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> VideoMetadata:
         return normalize(runtime.extract(target, egress=egress))

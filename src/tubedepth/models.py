@@ -38,6 +38,10 @@ class Job(Base):
     identifier: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_identifier)
     kind: Mapped[str] = mapped_column(String(64), nullable=False)
     target: Mapped[str] = mapped_column(String(500), nullable=False, default="")
+    # What to collect for each video a listing job finds. Null means enumerate
+    # and stop, which is a legitimate thing to want: checking what a channel
+    # holds should not cost a hundred extractions.
+    follow_up_kind: Mapped[str | None] = mapped_column(String(64), nullable=True)
     state: Mapped[JobState] = mapped_column(
         # native_enum=False keeps these as TEXT, so adding a member never needs
         # a migration — and the job kinds this project grows are exactly the

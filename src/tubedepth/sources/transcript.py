@@ -13,6 +13,7 @@ from typing import Any
 
 from ..egress.transport import Egress
 from ..errors import NotFoundError
+from ..identifiers import TargetType
 from ..schemas import Transcript, TranscriptSegment
 from .ytdlp_runtime import YtdlpRuntime
 
@@ -108,6 +109,7 @@ class TranscriptSource:
     """
 
     kind = "video.transcript"
+    target_type = TargetType.VIDEO
 
     def __init__(self, *, language: str = "en") -> None:
         self._language = language

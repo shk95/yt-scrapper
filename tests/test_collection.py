@@ -13,10 +13,14 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from pydantic import BaseModel
 
 from tubedepth.collection import CollectionService
 from tubedepth.egress.transport import Egress
+from tubedepth.identifiers import TargetType
 from tubedepth.payload_store import PayloadStore
+from tubedepth.sources import SourceRegistry
+from tubedepth.sources.ytdlp_runtime import YtdlpRuntime
 
 FIXTURES = Path(__file__).parent / "fixtures/ytdlp/video_metadata"
 
@@ -89,3 +93,37 @@ def test_an_unknown_kind_is_refused_before_anything_is_extracted(
         service.collect("video.nonexistent", "dQw4w9WgXcQ")
 
     assert runtime.requested == []
+
+
+class ChannelListingSource:
+    """A source whose target is a channel, not a video."""
+
+    kind = "channel.fake"
+    target_type = TargetType.CHANNEL
+
+    def __init__(self) -> None:
+        self.received: list[str] = []
+
+    def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> FakeListing:
+        self.received.append(target)
+        return FakeListing(target=target)
+
+
+class FakeListing(BaseModel):
+    target: str
+
+
+def test_a_channel_target_is_normalized_as_a_channel_and_not_as_a_video(
+    tmp_path: Path, runtime: RecordedYtdlpRuntime
+) -> None:
+    # Which normalizer applies is a property of the source. Running every
+    # target through the video one rejects a channel handle as a malformed
+    # video id, before the source that understands it is ever consulted.
+    source = ChannelListingSource()
+    registry = SourceRegistry()
+    registry.register(source)
+    service = CollectionService(runtime=runtime, payloads=PayloadStore(tmp_path), registry=registry)
+
+    service.collect("channel.fake", "https://www.youtube.com/@RickAstleyYT")
+
+    assert source.received == ["@RickAstleyYT"]

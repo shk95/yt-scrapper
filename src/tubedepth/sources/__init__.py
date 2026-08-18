@@ -10,6 +10,7 @@ from __future__ import annotations
 from functools import cache
 
 from .comments import CommentsSource
+from .listings import ChannelVideosSource, PlaylistItemsSource, SearchVideosSource
 from .registry import DataSource, SourceRegistry
 from .transcript import TranscriptSource
 from .video_metadata import VideoMetadataSource
@@ -23,4 +24,7 @@ def default_registry() -> SourceRegistry:
     registry.register(VideoMetadataSource())
     registry.register(TranscriptSource())
     registry.register(CommentsSource())
+    registry.register(ChannelVideosSource())
+    registry.register(SearchVideosSource())
+    registry.register(PlaylistItemsSource())
     return registry

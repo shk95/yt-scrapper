@@ -11,7 +11,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 
 from .egress.transport import DirectEgress, Egress
-from .identifiers import normalize_video_identifier
+from .identifiers import normalize_target
 from .payload_store import PayloadStore, StoredPayload
 from .sources import SourceRegistry, default_registry
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime, YtdlpRuntime
@@ -45,7 +45,7 @@ class CollectionService:
 
     def collect(self, kind: str, target: str) -> Collected:
         source = self._registry.get(kind)
-        video_id = normalize_video_identifier(target)
-        result = source.collect(video_id, self._egress, self._runtime)
+        normalized = normalize_target(source.target_type, target)
+        result = source.collect(normalized, self._egress, self._runtime)
         stored = self._payloads.put(kind, result.model_dump_json(indent=1).encode())
-        return Collected(kind=kind, target=video_id, payload=stored)
+        return Collected(kind=kind, target=normalized, payload=stored)

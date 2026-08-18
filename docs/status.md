@@ -17,8 +17,10 @@ Last updated: 2026-08-18.
 | M4 — transcripts | done (video.transcript); third-party sources not started |
 | M5 — comments | done (video.comments) |
 | queue wired end to end | **done** — enqueue → work → jobs collects for real |
-| M3 — HTTP API and auth | **next** |
-| M4.5 — egress pool, M6–M9 | not started |
+| M6 — discovery | done (channel.videos, search.videos, playlist.items) |
+| worker concurrency | **next** — the throughput ceiling is sequential today |
+| M3 — HTTP API and auth | after that |
+| M4.5 — egress pool | deferred; see "decisions" below |
 
 Nothing under `src/tubedepth/` exists yet beyond the package marker. The plan
 this is being built from lives outside the repository at
@@ -50,6 +52,17 @@ tool/checks/{format,lint,test}                    all pass, 3 tests
 tool/checks/test with no uv on PATH               exit 69 (unverified)
   ... plus REQUIRE_NATIVE=1, as CI sets           exit 1 (failure)
 ```
+
+**Measured, 2026-08-18:** one enqueued channel with `--then video.metadata`
+produced 101 jobs and collected all of them in 2m28s — 2,456 jobs/hour, and
+that is the ceiling, because `Worker.drain` is a sequential loop. The earlier
+hand-measured figure of ~4,600/hour came from four concurrent extractions,
+which this code cannot yet do.
+
+**The AIMD rate controller in `egress/control.py` is not wired to anything.**
+It is tested and correct and nothing imports it. It gets connected when the
+worker gains concurrency, because that is the first moment there is a rate to
+control; until then it is a design that looks like a feature.
 
 **Not yet done in the queue:** lease reaping, cancellation, retries and
 backoff. `JobRepository.claim` takes a lease and counts attempts, but nothing
@@ -94,6 +107,13 @@ quota after the client gave up. A subprocess takes SIGTERM, and it keeps a 50 MB
 comment payload out of the API process's heap. The cost is ~0.5 s of interpreter
 startup, which is free next to the harvest. Undo if yt-dlp ever grows a real
 abort hook.
+
+**Proxying is deferred, not forgotten.** Proton VPN exits are datacenter
+address space, which is what YouTube's bot check targets, and the direct line
+here is a residential KT connection that currently works. The pool's real case
+is Return YouTube Dislike's documented 10,000/day, and that source does not
+exist yet. Revisit when collection actually starts getting blocked, or when
+the third-party sources land.
 
 **Egress rate control is keyed on `lane`, not on `backend`.** What rate-limits
 us is a *service*, not our internal taxonomy: yt-dlp, InnerTube and caption
