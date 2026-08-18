@@ -51,6 +51,9 @@ class Job(Base):
         default=JobState.QUEUED,
     )
     attempt_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # Bounded so a job that kills its worker every time cannot be retried
+    # forever. Expensive kinds get fewer, set when the job is queued.
+    max_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=3)
     scheduled_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, default=utcnow
     )

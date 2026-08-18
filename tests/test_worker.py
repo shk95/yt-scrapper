@@ -16,7 +16,7 @@ from pydantic import BaseModel
 from tubedepth.database import Database
 from tubedepth.egress.control import Lane, RateController
 from tubedepth.egress.transport import Egress
-from tubedepth.errors import UpstreamError
+from tubedepth.errors import NotFoundError, UpstreamError
 from tubedepth.identifiers import TargetType
 from tubedepth.models import Job, JobState
 from tubedepth.payload_store import PayloadStore
@@ -46,13 +46,20 @@ class EchoSource:
 
 
 class FailingSource:
+    """Fails in a way that waiting cannot fix.
+
+    NotFoundError rather than UpstreamError on purpose: this test is about the
+    reason reaching the row, and a retryable failure would requeue instead of
+    finishing, which is a different behaviour covered further down.
+    """
+
     kind = "video.failing"
     target_type = TargetType.VIDEO
     lane = Lane.YOUTUBE
     cost = SourceCost.STANDARD
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
-        raise UpstreamError(f"nothing came back for: {target}")
+        raise NotFoundError(f"nothing came back for: {target}")
 
 
 def build(tmp_path: Path, *sources: object) -> tuple[Database, Worker, PayloadStore]:
@@ -195,14 +202,19 @@ def test_a_listing_job_without_a_follow_up_queues_nothing(tmp_path: Path) -> Non
 
 
 class SlowSource:
-    """A source that takes long enough to hold a slot."""
+    """A source that takes long enough to hold a slot.
+
+    The cost is a constructor argument because it decides how many of these
+    may run at once: an expensive kind is capped at half the workers, so a
+    test asserting concurrency has to ask for a kind that is allowed it.
+    """
 
     kind = "video.slow"
     target_type = TargetType.VIDEO
     lane = Lane.YOUTUBE
-    cost = SourceCost.EXPENSIVE
 
-    def __init__(self, seconds: float = 0.3) -> None:
+    def __init__(self, seconds: float = 0.3, cost: SourceCost = SourceCost.STANDARD) -> None:
+        self.cost = cost
         self._seconds = seconds
         self.concurrent = 0
         self.peak = 0
@@ -234,13 +246,16 @@ def test_a_concurrent_worker_runs_several_jobs_at_once(tmp_path: Path) -> None:
         controller=RateController(window_ceiling=8),
     )
 
-    started = time.monotonic()
     completed = worker.drain()
-    elapsed = time.monotonic() - started
 
     assert completed == 6
     assert source.peak > 1, "jobs ran one at a time; the worker is still sequential"
-    assert elapsed < 6 * 0.2, f"no speed-up: {elapsed:.2f}s for six 0.2s jobs"
+    # Deliberately no wall-clock assertion. An earlier version asserted the run
+    # finished inside six job-durations and failed about one full-suite run in
+    # four: under load it measures the test machine, not the code. The peak
+    # concurrency above is direct evidence of the same claim, and the throughput
+    # figures that matter are measured against real YouTube and recorded in
+    # docs/status.md.
 
 
 def test_the_rate_controller_caps_how_many_run_at_once(tmp_path: Path) -> None:
@@ -275,7 +290,7 @@ def test_a_cheap_job_is_not_starved_by_a_queue_full_of_expensive_ones(
     # The failure this prevents is the common one in a system built for
     # throughput: eight comment harvests take every slot and a sub-second
     # dislike lookup waits minutes behind them.
-    slow = SlowSource(seconds=0.4)
+    slow = SlowSource(seconds=0.4, cost=SourceCost.EXPENSIVE)
     quick = EchoSource()
     database, _, payloads = build(tmp_path, slow, quick)
     for index in range(8):
@@ -290,7 +305,6 @@ def test_a_cheap_job_is_not_starved_by_a_queue_full_of_expensive_ones(
         concurrency=4,
         controller=RateController(window_ceiling=8),
     )
-    started = time.monotonic()
     worker.drain()
 
     with database.session() as session:
@@ -298,9 +312,10 @@ def test_a_cheap_job_is_not_starved_by_a_queue_full_of_expensive_ones(
         assert finished is not None
         assert finished.state is JobState.SUCCEEDED
     assert quick.calls == ["quickone123"]
-    # Four expensive jobs deep, a cheap one would wait ~0.8s without a reserved
-    # slot. It should not.
-    assert time.monotonic() - started < 8 * 0.4
+    # What proves the reservation is that the expensive kind never held every
+    # worker: with four threads and a half share, at most two may run at once,
+    # so a slot was always free for the cheap job.
+    assert slow.peak <= 2, f"expensive jobs took {slow.peak} of four slots"
 
 
 def _identifier_of(session, kind: str) -> str:  # type: ignore[no-untyped-def]
@@ -312,3 +327,120 @@ def _registry(*sources: object) -> SourceRegistry:
     for source in sources:
         registry.register(source)  # type: ignore[arg-type]
     return registry
+
+
+class FlakySource:
+    """Fails a fixed number of times, then succeeds."""
+
+    kind = "video.flaky"
+    target_type = TargetType.VIDEO
+    lane = Lane.YOUTUBE
+    cost = SourceCost.STANDARD
+
+    def __init__(self, failures: int) -> None:
+        self._remaining = failures
+        self.attempts = 0
+
+    def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
+        self.attempts += 1
+        if self._remaining > 0:
+            self._remaining -= 1
+            raise UpstreamError(f"connection reset for: {target}")
+        return EchoPayload(target=target)
+
+
+class UnretryableSource:
+    kind = "video.unretryable"
+    target_type = TargetType.VIDEO
+    lane = Lane.YOUTUBE
+    cost = SourceCost.STANDARD
+
+    def __init__(self) -> None:
+        self.attempts = 0
+
+    def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
+        self.attempts += 1
+        raise NotFoundError(f"no caption track for language: en ({target})")
+
+
+def test_a_retryable_failure_goes_back_to_the_queue_with_a_delay(tmp_path: Path) -> None:
+    source = FlakySource(failures=1)
+    database, worker, _ = build(tmp_path, source)
+    enqueue(database, "video.flaky", "dQw4w9WgXcQ")
+
+    worker.run_once()
+
+    with database.session() as session:
+        job = session.query(Job).one()
+        assert job.state is JobState.QUEUED
+        assert job.attempt_count == 1
+        assert job.scheduled_at > job.created_at, "a retry must wait before running again"
+
+
+def test_a_delayed_retry_is_not_claimable_until_its_delay_has_passed(
+    tmp_path: Path,
+) -> None:
+    # The backoff has to be enforced by the claim, not merely recorded. A
+    # worker that picks the job straight back up has waited zero seconds.
+    source = FlakySource(failures=1)
+    database, worker, _ = build(tmp_path, source)
+    enqueue(database, "video.flaky", "dQw4w9WgXcQ")
+
+    worker.run_once()
+
+    assert worker.run_once() is False
+    assert source.attempts == 1
+
+
+def test_an_unretryable_failure_is_not_tried_again(tmp_path: Path) -> None:
+    source = UnretryableSource()
+    database, worker, _ = build(tmp_path, source)
+    enqueue(database, "video.unretryable", "dQw4w9WgXcQ")
+
+    worker.run_once()
+
+    with database.session() as session:
+        job = session.query(Job).one()
+        assert job.state is JobState.FAILED
+    assert worker.run_once() is False
+    assert source.attempts == 1
+
+
+def test_a_job_that_exhausts_its_attempts_finally_fails(tmp_path: Path) -> None:
+    source = FlakySource(failures=99)
+    database, worker, _ = build(tmp_path, source)
+    with database.session() as session:
+        session.add(Job(kind="video.flaky", target="dQw4w9WgXcQ", max_attempts=2))
+
+    worker.run_once()
+    _clear_backoff(database)
+    worker.run_once()
+
+    with database.session() as session:
+        job = session.query(Job).one()
+        assert job.state is JobState.FAILED
+        assert job.attempt_count == 2
+        assert "connection reset" in (job.error_message or "")
+
+
+def test_a_retried_job_eventually_succeeds(tmp_path: Path) -> None:
+    source = FlakySource(failures=1)
+    database, worker, _ = build(tmp_path, source)
+    enqueue(database, "video.flaky", "dQw4w9WgXcQ")
+
+    worker.run_once()
+    _clear_backoff(database)
+    worker.run_once()
+
+    with database.session() as session:
+        assert session.query(Job).one().state is JobState.SUCCEEDED
+    assert source.attempts == 2
+
+
+def _clear_backoff(database) -> None:  # type: ignore[no-untyped-def]
+    """Bring a delayed retry forward, so the test does not wait fifteen seconds."""
+    from tubedepth.models import utcnow
+
+    with database.session() as session:
+        for job in session.query(Job).filter(Job.state == JobState.QUEUED).all():
+            job.scheduled_at = utcnow()

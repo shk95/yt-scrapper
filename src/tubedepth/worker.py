@@ -33,6 +33,7 @@ from .errors import RateLimitedError, TubedepthError
 from .models import Job, JobState, utcnow
 from .payload_store import PayloadStore
 from .repositories import JobRepository
+from .retrying import backoff_for_attempt, is_retryable
 from .schemas import VideoListing
 from .sources import SourceRegistry, default_registry
 from .sources.registry import SourceCost
@@ -89,8 +90,22 @@ class Worker:
         self._execute(*claimed)
         return True
 
+    def reap(self) -> int:
+        """Return jobs whose worker stopped reporting. Safe to call often."""
+        with self._database.session() as session:
+            return JobRepository(session).reap_expired_leases()
+
     def drain(self) -> int:
-        """Run until the queue is empty. Returns how many jobs ran."""
+        """Run until the queue is empty. Returns how many jobs ran.
+
+        Reaps first: a previous run killed mid-job left rows in `running` that
+        nothing else will ever release, and starting without collecting them
+        means the queue looks shorter than it is.
+        """
+        reaped = self.reap()
+        if reaped:
+            logger.info("returned %s job(s) whose lease had expired", reaped)
+
         if self._concurrency == 1:
             completed = 0
             while self.run_once():
@@ -118,27 +133,50 @@ class Worker:
     # -- the gates -------------------------------------------------------
 
     def _claim(self) -> tuple[str, str, str, str | None] | None:
-        with self._database.session() as session:
-            job = JobRepository(session).claim(
-                worker=self._name, lease=self._lease, kinds=self._admissible_kinds()
-            )
-            if job is None:
-                return None
-            return job.identifier, job.kind, job.target, job.follow_up_kind
+        """Take a job and reserve its cost slot, atomically.
 
-    def _admissible_kinds(self) -> list[str] | None:
-        """Which kinds this worker may take right now.
-
-        Costs already at their reserved share are excluded from the claim
-        query itself, rather than claimed and then put back — a job returned
-        to the queue has burned an attempt and lost its place.
+        Both under one lock because checking the reservation and then taking it
+        is a race: two threads can each read two expensive jobs in flight
+        against a cap of two and both proceed, which makes the reservation
+        advisory rather than enforced — and it shows up only under load, which
+        is the only time it matters. Serialising the claim costs nothing:
+        SQLite serialises writers regardless.
         """
         with self._lock:
-            allowed = {
-                cost
-                for cost, share in COST_SHARE.items()
-                if self._in_flight_by_cost.get(cost, 0) < max(1, int(self._concurrency * share))
-            }
+            kinds = self._admissible_kinds_unlocked()
+            if kinds is not None and not kinds:
+                return None
+            with self._database.session() as session:
+                job = JobRepository(session).claim(
+                    worker=self._name, lease=self._lease, kinds=kinds
+                )
+                if job is None:
+                    return None
+                claimed = (job.identifier, job.kind, job.target, job.follow_up_kind)
+                cost = self._registry.get(job.kind).cost if self._knows(job.kind) else None
+            if cost is not None:
+                self._in_flight_by_cost[cost] = self._in_flight_by_cost.get(cost, 0) + 1
+            return claimed
+
+    def _knows(self, kind: str) -> bool:
+        try:
+            self._registry.get(kind)
+        except TubedepthError:
+            return False
+        return True
+
+    def _admissible_kinds_unlocked(self) -> list[str] | None:
+        """Which kinds this worker may take right now. The caller holds the lock.
+
+        Costs already at their reserved share are excluded from the claim query
+        itself, rather than claimed and then put back — a job returned to the
+        queue has burned an attempt and lost its place.
+        """
+        allowed = {
+            cost
+            for cost, share in COST_SHARE.items()
+            if self._in_flight_by_cost.get(cost, 0) < max(1, int(self._concurrency * share))
+        }
         if len(allowed) == len(COST_SHARE):
             return None
         return [kind for kind in self._registry.kinds() if self._registry.get(kind).cost in allowed]
@@ -146,14 +184,13 @@ class Worker:
     def _execute(self, identifier: str, kind: str, target: str, follow_up: str | None) -> None:
         try:
             source = self._registry.get(kind)
-        except TubedepthError as error:
+        except TubedepthError as error:  # noqa: BLE001 - reported on the row below
             # A job naming a kind this build does not have. Fails on the row
             # rather than escaping into the pump loop and stopping the worker.
             logger.warning("job %s names an unknown kind: %s", identifier, error)
             self._settle(identifier, JobState.FAILED, error=error)
             return
 
-        self._enter(source.cost)
         try:
             if not self._wait_for_permit(source.lane):
                 # Nothing available and the route is quarantined. Put it back
@@ -167,8 +204,7 @@ class Worker:
                     Verdict.BLOCKED if isinstance(error, RateLimitedError) else Verdict.THROTTLED
                 )
                 self._controller.release(self._egress.name, source.lane, verdict)
-                logger.warning("job %s (%s) failed: %s", identifier, kind, error)
-                self._settle(identifier, JobState.FAILED, error=error)
+                self._fail_or_retry(identifier, kind, error)
                 return
             self._controller.release(self._egress.name, source.lane, Verdict.OK)
         finally:
@@ -194,10 +230,6 @@ class Worker:
             waited += 0.05
         return False
 
-    def _enter(self, cost: SourceCost) -> None:
-        with self._lock:
-            self._in_flight_by_cost[cost] = self._in_flight_by_cost.get(cost, 0) + 1
-
     def _leave(self, cost: SourceCost) -> None:
         with self._lock:
             self._in_flight_by_cost[cost] = max(0, self._in_flight_by_cost.get(cost, 0) - 1)
@@ -221,6 +253,46 @@ class Worker:
             for video in listing.videos:
                 session.add(Job(kind=kind, target=video.video_id))
         return len(listing.videos)
+
+    def _fail_or_retry(self, identifier: str, kind: str, error: TubedepthError) -> None:
+        """Give the job another go, or stop and say why.
+
+        Whether a failure is worth retrying is decided by the error class, so
+        the worker cannot get it wrong and the answer does not depend on which
+        boundary caught it.
+        """
+        with self._database.session() as session:
+            job = session.get(Job, identifier)
+            if job is None:  # pragma: no cover - the row was deleted mid-flight
+                return
+            exhausted = job.attempt_count >= job.max_attempts
+            if not is_retryable(error) or exhausted:
+                reason = "exhausted its attempts" if exhausted else "is not retryable"
+                logger.warning("job %s (%s) failed, %s: %s", identifier, kind, reason, error)
+                job.state = JobState.FAILED
+                job.finished_at = utcnow()
+                job.error_code = type(error).__name__
+                job.error_message = str(error)
+                return
+
+            delay = backoff_for_attempt(job.attempt_count)
+            job.state = JobState.QUEUED
+            job.claimed_by = None
+            job.lease_expires_at = None
+            # Enforced by the claim, which filters on scheduled_at, rather than
+            # merely recorded — a worker that picks the job straight back up
+            # has waited nothing at all.
+            job.scheduled_at = utcnow() + delay
+            job.error_code = type(error).__name__
+            job.error_message = str(error)
+            logger.info(
+                "job %s (%s) attempt %s failed, retrying in %.0fs: %s",
+                identifier,
+                kind,
+                job.attempt_count,
+                delay.total_seconds(),
+                error,
+            )
 
     def _requeue(self, identifier: str) -> None:
         with self._database.session() as session:

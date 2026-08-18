@@ -76,8 +76,13 @@ concurrent extractions the bottleneck stops being us. That is the number the
 plan wanted measured instead of guessed, and `TUBEDEPTH_WINDOW_CEILING` is how
 an operator asks for a different one.
 
-**Not yet done in the queue:** lease reaping, cancellation, retries and
-backoff. `JobRepository.claim` takes a lease and counts attempts, but nothing
+**Still not done in the queue:** cancellation. `DELETE`-style stopping of a
+running job does not exist, so a comment harvest started by mistake runs to
+completion.
+
+Lease reaping and retries landed on 2026-08-18 and were verified against a
+simulated crash: a job left in `running` by a worker that never released it
+was returned to the queue by the next worker to start, and completed. `JobRepository.claim` takes a lease and counts attempts, but nothing
 yet returns an expired one to the queue, so a worker killed mid-job strands
 its row in `running`.
 

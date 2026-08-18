@@ -8,9 +8,19 @@ offending value — they reach API clients verbatim.
 
 from __future__ import annotations
 
+from typing import ClassVar
+
 
 class TubedepthError(Exception):
-    """Base for domain errors that are safe to show a CLI user or an API client."""
+    """Base for domain errors that are safe to show a CLI user or an API client.
+
+    `retryable` lives on the class rather than at the call site because the
+    answer is a property of the failure, not of who caught it — and because
+    deciding it per call site is how the same failure ends up retried in one
+    place and not in another.
+    """
+
+    retryable: ClassVar[bool] = False
 
 
 class ValidationError(TubedepthError):
@@ -22,7 +32,13 @@ class NotFoundError(TubedepthError):
 
 
 class UpstreamError(TubedepthError):
-    """A backend answered, and the answer was unusable."""
+    """A backend answered, and the answer was unusable.
+
+    Retried: a reset connection, a 5xx and a truncated body all look like this
+    and all of them are worth one more go.
+    """
+
+    retryable: ClassVar[bool] = True
 
 
 class ConfigurationError(TubedepthError):
@@ -30,4 +46,11 @@ class ConfigurationError(TubedepthError):
 
 
 class RateLimitedError(UpstreamError):
-    """The upstream told us to slow down, or refused this address outright."""
+    """The upstream told us to slow down, or refused this address outright.
+
+    Retried, but the rate controller has already narrowed the window and
+    lengthened the interval by the time this is handled, so the retry goes out
+    slower than the request that caused it.
+    """
+
+    retryable: ClassVar[bool] = True
