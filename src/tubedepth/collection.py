@@ -74,6 +74,12 @@ class CollectionService:
             kind=kind, target=normalized, payload=stored, result=result, from_cache=False
         )
 
+    def cached(self, kind: str, target: str) -> Collected | None:
+        """A fresh answer if one is held, without collecting. Never fetches."""
+        source = self._registry.get(kind)
+        question = fingerprint(kind=kind, target=target, schema_version=source.schema_version)
+        return self._cached(question, kind, target)
+
     # -- the cache -------------------------------------------------------
 
     def _cached(self, question: str, kind: str, target: str) -> Collected | None:

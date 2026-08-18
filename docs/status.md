@@ -22,7 +22,7 @@ Last updated: 2026-08-18.
 | caching + dedup + retention | done |
 | M4 — dislikes, SponsorBlock | done |
 | M7 — InnerTube trio | done |
-| M3 — HTTP API and auth | **next** |
+| M3 — HTTP API and auth | done |
 | M4.5 — egress pool | deferred; see "decisions" below |
 
 Nothing under `src/tubedepth/` exists yet beyond the package marker. The plan
@@ -131,6 +131,24 @@ mutation tests are the load-bearing ones: a suite that only ever sees a
 passing fixture cannot tell you it would catch a rename, so each parser has a
 test that renames its renderer in a copy of the recording and asserts the
 parser raises rather than returning nothing.
+
+**The API is a thin layer over the same services the CLI uses.** Every route
+builds a request and hands it to CollectionService or the job tables; no
+business logic lives under `api/`. That is what stops the two from drifting
+into different answers for the same question.
+
+Authentication is wired on the router rather than per handler, so a route
+added later is protected by construction. A test walks the OpenAPI document
+and asserts every `/v1/` path answers 401 without a key — verified by adding
+an unprotected route and watching it fail.
+
+**Dependencies must be defined at module level, not inside the app factory.**
+Every module here uses `from __future__ import annotations`, so FastAPI
+resolves annotations from the module namespace afterwards. A dependency
+defined inside the factory is a local name resolution cannot see, and
+`Annotated[Session, Depends(session)]` degrades silently into a required query
+parameter — every route then answers 422 about an argument nobody wrote.
+Collaborators are read off `app.state` instead.
 
 **Still not done in the queue:** cancellation. `DELETE`-style stopping of a
 running job does not exist, so a comment harvest started by mistake runs to

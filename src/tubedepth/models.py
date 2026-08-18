@@ -68,6 +68,9 @@ class Job(Base):
     # and stop, which is a legitimate thing to want: checking what a channel
     # holds should not cost a hundred extractions.
     follow_up_kind: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Which key submitted this. How a runaway client gets identified rather
+    # than guessed at.
+    api_key_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
     state: Mapped[JobState] = mapped_column(
         # native_enum=False keeps these as TEXT, so adding a member never needs
         # a migration — and the job kinds this project grows are exactly the
@@ -125,3 +128,33 @@ class Artifact(Base):
     # Materialized rather than computed, so "is this still good" is an indexed
     # comparison instead of a per-row calculation.
     fresh_until: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+
+
+class ApiKey(Base):
+    """A credential, stored as a hash.
+
+    The plaintext is shown once at creation and never again: a database that
+    leaks should not leak working credentials with it, and that property is
+    only real if nothing keeps a copy.
+
+    In the database rather than a config file because revocation has to take
+    effect on the next request rather than the next restart, and because a job
+    carrying `api_key_id` is how a runaway client gets identified.
+    """
+
+    __tablename__ = "api_keys"
+
+    identifier: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_identifier)
+    label: Mapped[str] = mapped_column(String(100), nullable=False)
+    # Indexed, so verification is one lookup plus one constant-time compare
+    # rather than hashing the presented key against every row.
+    key_prefix: Mapped[str] = mapped_column(String(12), nullable=False, index=True)
+    # sha256 rather than a password hash, deliberately: these are 192 bits of
+    # CSPRNG output, not a user-chosen password. There is no dictionary to run
+    # and no work factor worth paying on every request.
+    key_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+
+    requests_per_minute: Mapped[int] = mapped_column(Integer, nullable=False, default=60)
+    created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utcnow)
+    last_used_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)

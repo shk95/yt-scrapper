@@ -26,9 +26,20 @@ uv sync --extra dev
 just check                            # format + lint + 오프라인 테스트
 
 uv run tubedepth key create --label local   # 키는 이때 한 번만 출력된다
-uv run tubedepth worker &
-uv run tubedepth serve --port 8080
+uv run tubedepth serve --port 8080 &        # API (기본 127.0.0.1)
+uv run tubedepth work --concurrency 6       # 워커는 별도 프로세스
 ```
+
+```sh
+KEY=ytd_...
+curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+     -d '{"kind":"video.metadata","target":"https://youtu.be/dQw4w9WgXcQ"}' \
+     localhost:8080/v1/jobs                  # 202 + job_id, 캐시에 있으면 200 + 결과
+curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$ID/result
+```
+
+**키별 rate limit은 프로세스 안에서만 셉니다.** API 프로세스를 두 개 띄우면 각자
+자기 몫을 갖게 됩니다 — 한 대로 운영하는 전제이고, 그게 아니면 이 값은 믿을 수 없습니다.
 
 작업 방식은 [`AGENTS.md`](AGENTS.md)에, 현재 상태는 [`docs/status.md`](docs/status.md)에 있다.
 

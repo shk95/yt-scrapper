@@ -12,6 +12,7 @@ from typing import Annotated
 import typer
 
 from . import __version__
+from .api.application import create_application
 from .collection import CollectionService
 from .database import Database
 from .egress.control import RateController
@@ -23,6 +24,7 @@ from .models import Job
 from .observability import configure_logging
 from .payload_store import PayloadStore
 from .retention import RetentionPolicy, RetentionService
+from .services.keys import ApiKeyService
 from .sources import default_registry
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime
 from .worker import Worker
@@ -204,6 +206,66 @@ def prune(
             err=True,
         )
         raise SystemExit(1)
+
+
+keys_app = typer.Typer(name="key", help="Manage API keys.", no_args_is_help=True)
+application.add_typer(keys_app, name="key")
+
+
+@keys_app.command("create")
+def key_create(
+    label: Annotated[str, typer.Option("--label", help="What this key is for")],
+    requests_per_minute: Annotated[int, typer.Option("--rpm")] = 60,
+    data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
+        "var"
+    ),
+) -> None:
+    """Mint a key. The secret is printed once and is not recoverable."""
+    minted = ApiKeyService(_database(data_directory)).mint(
+        label=label, requests_per_minute=requests_per_minute
+    )
+    typer.echo(f"✓ {minted.identifier}  {minted.label}")
+    typer.echo(f"  {minted.secret}")
+    typer.echo("  Store it now — nothing here keeps a copy.")
+
+
+@keys_app.command("revoke")
+def key_revoke(
+    identifier: Annotated[str, typer.Argument(help="The key identifier, not the secret")],
+    data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
+        "var"
+    ),
+) -> None:
+    """Revoke a key. Takes effect on the next request, not the next restart."""
+    ApiKeyService(_database(data_directory)).revoke(identifier)
+    typer.echo(f"✓ revoked {identifier}")
+
+
+@application.command()
+def serve(
+    host: Annotated[str, typer.Option("--host", envvar="TUBEDEPTH_HOST")] = "127.0.0.1",
+    port: Annotated[int, typer.Option("--port", envvar="TUBEDEPTH_PORT")] = 8080,
+    data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
+        "var"
+    ),
+) -> None:
+    """Serve the HTTP API.
+
+    Binds to localhost unless told otherwise: a default that exposes a port is
+    found by a scanner before its owner notices. The worker runs separately —
+    this process only queues and reads.
+    """
+    import uvicorn
+
+    configure_logging()
+    uvicorn.run(
+        create_application(
+            database=_database(data_directory), payloads=_payload_store(data_directory)
+        ),
+        host=host,
+        port=port,
+        log_config=None,
+    )
 
 
 @application.command()

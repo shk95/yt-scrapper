@@ -65,3 +65,19 @@ class ExtractionError(TubedepthError):
     fixes it is a code change. Keeping it its own type is what lets the worker
     refuse to retry it and lets an operator see it for what it is.
     """
+
+
+class UnauthenticatedError(TubedepthError):
+    """No API key was presented, or the one presented is unknown or revoked.
+
+    One message for all three, so the endpoint is not an oracle for which.
+    """
+
+
+class ConflictError(TubedepthError):
+    """The thing exists but is in the wrong state — a result asked for before
+    its job finished.
+
+    Distinct from NotFoundError because "wait" and "that does not exist" are
+    different instructions to a caller.
+    """
