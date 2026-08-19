@@ -332,6 +332,7 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/artifacts?target=dQw4w9WgXcQ'
     {
       "kind": "video.metadata",
       "target": "dQw4w9WgXcQ",
+      "schema_version": "1",
       "digest": "b9f4c0e2...",
       "byte_count": 26417,
       "fetched_at": "2026-08-19T09:12:44Z",
@@ -341,6 +342,11 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/artifacts?target=dQw4w9WgXcQ'
   "cursor": null
 }
 ```
+
+`schema_version`은 그 kind의 normalizer 중 어느 버전이 이 바이트를 썼는지다. 컬럼이 생기기 전에
+수집된 것은 `null`이다 — fingerprint가 버전을 품고 있지만 SHA-256이라 행에서 되돌릴 수 없다.
+**`schema_version`이 다른 두 관측은 직접 비교할 수 없다**: bump는 모양이 바뀌었다는 뜻이고, 한쪽에
+있는 필드를 다른 쪽은 애초에 수집하지 않았을 수 있다.
 
 artifact 테이블은 덮어쓰지 않고 덧붙이므로, `target`으로 거르면 영상 하나의 이력이 나온다 —
 수치가 어떻게 움직였는지. 잡 원장은 그걸 답할 수 없고, 그것을 보관하는 것이 이 테이블이다.

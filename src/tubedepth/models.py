@@ -165,6 +165,18 @@ class Artifact(Base):
     kind: Mapped[str] = mapped_column(String(64), nullable=False)
     target: Mapped[str] = mapped_column(String(500), nullable=False)
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Which version of this kind's normalizer wrote the payload. The
+    # fingerprint already contains it and is a SHA-256, so it cannot be read
+    # back out — hold an old payload and there is no way to tell what shape it
+    # is in, which is what makes a bump sever history rather than age it.
+    #
+    # Nullable permanently, and not only because SQLite refuses `ADD COLUMN
+    # ... NOT NULL` without a default. Any default would be a claim: it would
+    # make every row that predates this column assert a version nobody
+    # recorded, and `channel.about` is already at "2" — so "1" would be wrong
+    # for exactly the rows whose contents are known to be wrong. Null means
+    # "written before this was recorded", which is what the backfill selects on.
+    schema_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     digest: Mapped[str] = mapped_column(String(64), nullable=False)
     byte_count: Mapped[int] = mapped_column(Integer, nullable=False)

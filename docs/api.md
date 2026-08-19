@@ -349,6 +349,7 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/artifacts?target=dQw4w9WgXcQ'
     {
       "kind": "video.metadata",
       "target": "dQw4w9WgXcQ",
+      "schema_version": "1",
       "digest": "b9f4c0e2...",
       "byte_count": 26417,
       "fetched_at": "2026-08-19T09:12:44Z",
@@ -358,6 +359,13 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/artifacts?target=dQw4w9WgXcQ'
   "cursor": null
 }
 ```
+
+`schema_version` is which version of that kind's normalizer wrote the bytes.
+It is `null` for anything collected before the column existed — the fingerprint
+carries the version and is a SHA-256, so it cannot be recovered from the row.
+**Two observations with different `schema_version` values are not directly
+comparable**: a bump means the shape changed, and a field one of them has may
+simply not have been collected by the other.
 
 The artifact table appends rather than overwrites, so filtering by `target`
 gives one video's history — how its counts moved over time. The job ledger

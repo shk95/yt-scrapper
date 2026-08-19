@@ -162,12 +162,14 @@ class ArtifactRepository:
         digest: str,
         byte_count: int,
         freshness: timedelta,
+        schema_version: str,
     ) -> Artifact:
         now = self._clock()
         artifact = Artifact(
             kind=kind,
             target=target,
             fingerprint=fingerprint,
+            schema_version=schema_version,
             digest=digest,
             byte_count=byte_count,
             fetched_at=now,

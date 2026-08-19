@@ -21,6 +21,7 @@ from tubedepth.database import Database
 from tubedepth.egress.control import Lane
 from tubedepth.egress.transport import Egress
 from tubedepth.identifiers import TargetType
+from tubedepth.models import Artifact
 from tubedepth.payload_store import PayloadStore
 from tubedepth.sources import SourceRegistry
 from tubedepth.sources.registry import SourceCost
@@ -204,3 +205,22 @@ def test_two_different_videos_do_not_share_a_cache_entry(tmp_path: Path) -> None
     service.collect("video.counted", "kJQP7kiw5Fk")
 
     assert source.calls == 2
+
+
+def test_a_recorded_artifact_names_the_schema_version_that_wrote_it(tmp_path: Path) -> None:
+    """The fingerprint contains the version and is a SHA-256, so it cannot be read back.
+
+    Hold an old payload and there is no way to tell which shape it is in, which
+    is what makes a bump sever history rather than merely age it. Recording the
+    version beside the row is what stops that accruing — and the cost of
+    reconstructing it later only goes up, because the list of versions a kind
+    has ever had is trivial today and archaeology after a few more bumps.
+    """
+    source = CountingSource()
+    service, database = cached_service(tmp_path, source)
+
+    service.collect("video.counted", "dQw4w9WgXcQ")
+
+    with database.session() as session:
+        recorded = session.query(Artifact).one()
+    assert recorded.schema_version == source.schema_version

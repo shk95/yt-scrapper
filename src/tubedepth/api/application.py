@@ -132,6 +132,10 @@ class JobListView(BaseModel):
 class ArtifactView(BaseModel):
     kind: str
     target: str
+    # Which normalizer wrote these bytes. Null for anything collected before
+    # the column existed; the fingerprint holds the version and is a SHA-256,
+    # so it cannot be recovered from the row itself.
+    schema_version: str | None = None
     digest: str
     byte_count: int
     fetched_at: datetime
@@ -485,6 +489,7 @@ def create_application(
                 ArtifactView(
                     kind=artifact.kind,
                     target=artifact.target,
+                    schema_version=artifact.schema_version,
                     digest=artifact.digest,
                     byte_count=artifact.byte_count,
                     fetched_at=artifact.fetched_at,

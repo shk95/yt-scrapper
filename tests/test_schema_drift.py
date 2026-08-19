@@ -122,3 +122,24 @@ def test_a_required_column_with_a_known_default_is_added_with_it(tmp_path: Path)
         )
         value = next(connection.execute("SELECT webhook_attempts FROM jobs"))[0]
     assert value == 0, "existing rows were left without a value for a NOT NULL column"
+
+
+def test_the_schema_version_column_is_added_to_an_artifacts_table_that_predates_it(
+    tmp_path: Path,
+) -> None:
+    """A nullable column takes the easy branch of the repair, and must keep doing so.
+
+    The `refresh` column found the other branch the hard way: a NOT NULL column
+    needs a default rendered into the ALTER, and putting a server default on
+    the model to satisfy that makes `_add_column` emit DEFAULT twice.
+    """
+    path = tmp_path / "tubedepth.db"
+    Database(path).create_schema()
+    with sqlite3.connect(path) as connection:
+        connection.execute("ALTER TABLE artifacts DROP COLUMN schema_version")
+
+    Database(path).create_schema()
+
+    with sqlite3.connect(path) as connection:
+        columns = {row[1] for row in connection.execute("PRAGMA table_info(artifacts)")}
+    assert "schema_version" in columns

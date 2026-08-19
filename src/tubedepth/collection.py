@@ -79,7 +79,9 @@ class CollectionService:
         else:
             result = source.collect(normalized, self._egress, self._runtime)
         stored = self._payloads.put(kind, result.model_dump_json(indent=1).encode())
-        self._record(question, kind, normalized, stored, source.default_freshness)
+        self._record(
+            question, kind, normalized, stored, source.default_freshness, source.schema_version
+        )
         return Collected(
             kind=kind, target=normalized, payload=stored, result=result, from_cache=False
         )
@@ -165,6 +167,7 @@ class CollectionService:
         target: str,
         stored: StoredPayload,
         freshness: object,
+        schema_version: str,
     ) -> None:
         if self._database is None:
             return
@@ -176,4 +179,5 @@ class CollectionService:
                 digest=stored.digest,
                 byte_count=stored.byte_count,
                 freshness=freshness,  # type: ignore[arg-type]
+                schema_version=schema_version,
             )
