@@ -96,6 +96,43 @@ videos in the batch had captions turned off, and each of those failures was
 reported to the controller as throttling, doubling the lane's minimum interval
 — 1s, 2s, 4s, 8s, 16s. The tail rate was our own ceiling.
 
+**One channel end to end, measured 2026-08-20.** The first sustained run — 474
+`video.metadata` jobs fanned out from one listing, concurrency 8, alongside the
+hourly sampler:
+
+| | |
+| --- | --- |
+| jobs | 474, **0 failed** |
+| of those, actually collected | 374 (100 were cache hits the sampler already held) |
+| wall clock | 430 s |
+| collection throughput | **~3,100 jobs/h** |
+| lane at the end | window **6.0 — the ceiling** — quarantine streak 0 |
+
+Three things came out of it, and two were surprises.
+
+*Sustained load is not slower than a short sweep.* Every earlier figure here
+came from forty-job runs; this is the first one long enough to be called
+sustained, and the window sat at its ceiling throughout with the lane never
+quarantined. YouTube did not push back at all. Anywhere this file says
+behaviour under sustained load is unmeasured, it now is — for one channel, at
+this size.
+
+*That is only sayable because the lane is now recorded.* Before the same day,
+the controller's state lived in the worker's memory and "it never quarantined"
+would have been a guess. It is in `lane_health`.
+
+*The cap was not the constraint.* The Data API reports 697 videos for the
+channel; `channel.videos` returned **474** with the per-listing cap at 700, so
+it did not bind. The difference is the `/videos` tab itself, which is what
+issue #2 said would happen and deliberately kept as a separate question —
+Shorts and past streams are not in that tab at any cap. Raising the limit
+widens *how many*, never *what*.
+
+*No geo-blocks, and that is not an answer.* Zero failures carried a country
+marker. One Korean beauty channel is a narrow corpus for that question —
+region blocking concentrates in music, sport and broadcast clips — so this is
+not the measurement milestone 1 asks for, and that milestone stays open.
+
 Sweep 3 had **eight** caption-less videos out of twenty, twice the proportion,
 and did not slow down at all. That is the confirmation: the collapse was the
 verdict mapping, not the videos and not the address.
@@ -599,11 +636,14 @@ the series to stop moving with nothing anywhere reporting a problem — which is
 the exact shape of the `refresh` bug above, rebuilt on purpose.
 
 *Sizing is arithmetic, and it is written down so it can be checked.* One line
-is one forced collection per firing. Thirty videos hourly is 30 jobs/h against
-a measured ceiling near 2,150 jobs/h, or about one percent. Three hundred is
-ten percent, and this file is explicit elsewhere that behaviour under sustained
-load is unmeasured — a trend poller is precisely sustained load, so the watch
-list and the cadence are one decision and should move together.
+is one forced collection per firing. A hundred videos hourly is 100 jobs/h
+against a rate measured at **~3,100 jobs/h under sustained load** (2026-08-20,
+above), so around three percent. That measurement replaced an estimate: the
+figure quoted here before was taken from forty-job runs and was low.
+
+The watch list and the cadence are still one decision and should still move
+together — the headroom is larger than it looked, not unlimited, and the
+sampler competes with every other lane user for the same per-address budget.
 
 ### The dashboard reads the same API as everything else
 
