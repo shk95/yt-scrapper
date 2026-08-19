@@ -125,14 +125,25 @@ def test_a_spent_quota_reaches_the_controller_as_a_rate_limit(
         TrendingVideosSource().collect("KR", FakeEgress(answering(spent, 403)), runtime=None)  # type: ignore[arg-type]
 
 
-def test_a_403_that_is_not_a_quota_is_not_reported_as_a_rate_limit(
+def test_a_key_the_api_refuses_is_a_setting_and_not_a_route_in_trouble(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """A disabled key and a spent quota are both 403 and want opposite
-    responses: one is waiting, the other is a person fixing something."""
+    """A disabled key and a spent quota are both 403 and want opposite answers.
+
+    A spent quota is waiting. A key the project has not enabled answers the
+    same way to every retry — so an `UpstreamError`, which is retryable and
+    maps to `Verdict.THROTTLED`, would spend quota units to be told the same
+    thing three times *and* narrow the lane's own window. The earlier version
+    of this test asserted only that it was not a rate limit, which was true and
+    weaker than what should hold.
+    """
+    from tubedepth.errors import ConfigurationError
+
     monkeypatch.setenv("TUBEDEPTH_DATA_API_KEY", "test-key")
     refused = {"error": {"errors": [{"reason": "accessNotConfigured"}], "message": "off"}}
 
-    with pytest.raises(UpstreamError) as raised:
+    with pytest.raises(ConfigurationError):
         TrendingVideosSource().collect("KR", FakeEgress(answering(refused, 403)), runtime=None)  # type: ignore[arg-type]
-    assert not isinstance(raised.value, RateLimitedError)
+
+    assert not issubclass(ConfigurationError, RateLimitedError)
+    assert not issubclass(ConfigurationError, UpstreamError)

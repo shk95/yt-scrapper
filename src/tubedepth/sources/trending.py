@@ -189,6 +189,13 @@ class TrendingVideosSource:
             # responses: one is waiting, the other is a person fixing
             # something. Only the first is the controller's business.
             raise RateLimitedError(f"the data api quota is spent: {message}")
+        if response.status_code == httpx.codes.FORBIDDEN:
+            # The other 403. A key the project has not enabled, or one that has
+            # been disabled, answers the same way to every retry — so reporting
+            # it as an upstream failure spends quota units to be told the same
+            # thing three times, and describes a route as being in trouble when
+            # the trouble is a setting nobody has changed.
+            raise ConfigurationError(f"the data api refused this key: {message}")
         raise UpstreamError(
             f"the trending chart refused {region} ({response.status_code}): {message}"
         )

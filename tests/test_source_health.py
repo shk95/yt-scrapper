@@ -272,3 +272,36 @@ def test_health_reports_the_message_that_names_what_changed(tmp_path: Path) -> N
 
     assert entry.last_error_message is not None
     assert "homeRenderer" in entry.last_error_message
+
+
+def test_a_source_that_cannot_run_at_all_is_not_reported_as_never_tried(
+    tmp_path: Path,
+) -> None:
+    """Green-because-nobody-asked, arriving by a new road.
+
+    `trending.videos` raises `ConfigurationError` when its API key is unset, and
+    only `ExtractionError` and `UpstreamError` counted — so every job failed
+    while `/healthz` and the dashboard said the source had never been tried.
+
+    That is not the rule this table follows, it is a gap in it: the failures
+    excluded are facts about a *target* — a caption track that is not there, a
+    private video, a bad id. A source that cannot run at all is a fact about
+    the source, which is the only thing this table is about.
+    """
+    from tubedepth.errors import ConfigurationError
+
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    service = SourceHealthService(database=database)
+
+    for _ in range(3):
+        service.record(
+            "trending.videos",
+            succeeded=False,
+            error=ConfigurationError("TUBEDEPTH_DATA_API_KEY is not set"),
+        )
+
+    entry = service.snapshot()["trending.videos"]
+    assert entry.status != "unknown", "a source failing every time reported as never tried"
+    assert entry.consecutive_failures == 3
+    assert entry.last_error_message is not None

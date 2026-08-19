@@ -332,10 +332,20 @@ class Worker:
                 # dies with it, while "is this route being refused" is asked
                 # from the API. Without it a quarantined lane is indis-
                 # tinguishable from an empty queue.
-                state, monotonic = self._controller.observed(self._egress.name, source.lane)
-                self._lanes.observe(
-                    self._egress.name, source.lane.value, state=state, monotonic=monotonic
-                )
+                try:
+                    state, monotonic = self._controller.observed(self._egress.name, source.lane)
+                    self._lanes.observe(
+                        self._egress.name, source.lane.value, state=state, monotonic=monotonic
+                    )
+                except Exception:
+                    # This is a database write in a `finally`, on the success
+                    # path of every job. If it raised — `database is locked`
+                    # under contention is the plausible one — it would replace
+                    # the normal control flow and the job would never be
+                    # settled: payload on disk, artifact row committed, row
+                    # left `running` until the reaper takes it and burns an
+                    # attempt. Telemetry is worth strictly less than that.
+                    logger.warning("could not record lane health", exc_info=True)
         finally:
             self._leave(source.cost)
 

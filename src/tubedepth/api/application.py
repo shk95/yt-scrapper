@@ -763,7 +763,19 @@ def create_application(
         except TubedepthError:
             source = None
 
-        if source is not None and artifact.schema_version in retracted_versions_of(source):
+        retracted = retracted_versions_of(source) if source is not None else frozenset()
+        if retracted and artifact.schema_version is None:
+            # Not "fine", "not known". A kind that has withdrawn a version has
+            # rows that predate the column holding NULL, and reading NULL as
+            # safe is how a known-bad observation gets served with a 200 — the
+            # exact thing the withdrawal exists to refuse. 409 rather than 410,
+            # because we are not claiming it *is* retracted: we are saying the
+            # question cannot be answered until something answers it.
+            raise ConflictError(
+                f"the schema version of {digest} was never recorded, and {artifact.kind} has "
+                "withdrawn a version — run `tubedepth backfill-schema-versions` and ask again"
+            )
+        if artifact.schema_version in retracted:
             raise RetractedError(
                 f"the {artifact.kind} observation at {digest} was collected by "
                 f"schema version {artifact.schema_version}, which is retracted: its payloads "

@@ -710,7 +710,7 @@ def test_a_submission_carries_the_bound_its_kind_deserves(tmp_path: Path) -> Non
     )
 
 
-def _stored_artifact(tmp_path: Path, database: Database, *, kind: str, version: str) -> str:
+def _stored_artifact(tmp_path: Path, database: Database, *, kind: str, version: str | None) -> str:
     """One artifact row and its payload, as a collection would have left them."""
     from tubedepth.models import Artifact, utcnow
 
@@ -984,3 +984,52 @@ def test_a_batch_whose_first_target_is_uncached_does_not_deadlock(
     body = response.json()
     assert [job["target"] for job in body["queued"]] == ["dQw4w9WgXcQ"]
     assert [held["target"] for held in body["held"]] == ["nfgdJyL-Jmg"]
+
+
+def test_an_observation_whose_version_is_unrecorded_is_not_claimed_to_be_fine(
+    tmp_path: Path,
+) -> None:
+    """The window between deploying the column and running the backfill.
+
+    `channel.about` was already at "2" before `Artifact.schema_version`
+    existed, so on any real database its v1 rows hold NULL — and
+    `None in frozenset({"1"})` is False. The retraction check therefore did not
+    fire, and the route added to refuse a video's description presented as the
+    channel's served exactly that, with a 200 and no log.
+
+    A null version is not "fine", it is "not known". Saying so is the whole
+    difference, and the message names the command that resolves it.
+    """
+    from tubedepth.egress.control import Lane as _Lane
+
+    class Retracted:
+        kind = "channel.retracted"
+        target_type = TargetType.CHANNEL
+        lane = _Lane.YOUTUBE
+        cost = SourceCost.CHEAP
+        schema_version = "2"
+        retracted_versions = frozenset({"1"})
+        payload_model: type[BaseModel] = EchoPayload
+        default_freshness = timedelta(hours=6)
+
+        def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
+            return EchoPayload(target=target)
+
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    registry = SourceRegistry()
+    registry.register(Retracted())  # type: ignore[arg-type]
+    client = TestClient(
+        create_application(
+            database=database, payloads=PayloadStore(tmp_path / "payloads"), registry=registry
+        )
+    )
+    key = ApiKeyService(database).mint(label="test").secret
+    digest = _stored_artifact(tmp_path, database, kind="channel.retracted", version=None)
+
+    response = client.get(f"/v1/artifacts/{digest}", headers={"X-API-Key": key})
+
+    assert response.status_code == 409, (
+        "an unattributed observation was served as though known good"
+    )
+    assert "backfill-schema-versions" in response.json()["error"]["message"]
