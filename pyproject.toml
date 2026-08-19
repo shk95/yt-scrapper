@@ -46,6 +46,13 @@ packages = ["src/tubedepth"]
 [tool.ruff]
 line-length = 100
 target-version = "py312"
+# The plan is a historical document: it records what was approved on
+# 2026-08-18, including code sketches that were never run and in several places
+# turned out wrong. Reformatting it would edit the record — and a record that
+# gets edited to match current conventions stops being evidence of what was
+# actually decided. ruff formats Python blocks inside Markdown, so it has to be
+# told.
+extend-exclude = ["docs/plan.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]

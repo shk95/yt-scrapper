@@ -3,31 +3,32 @@
 Rewritten freely as the project moves. Anything that must survive a rewrite —
 an error and its fix — belongs in [`troubleshooting.md`](troubleshooting.md).
 
-Last updated: 2026-08-18.
+Last updated: 2026-08-19.
 
 ---
 
 ## Where things stand
 
-| Milestone | State |
-| --- | --- |
-| M0 — repository skeleton | done |
-| M1 — domain core | done |
-| M2 — first yt-dlp source | done (video.metadata) |
-| M4 — transcripts | done (video.transcript); third-party sources not started |
-| M5 — comments | done (video.comments) |
-| queue wired end to end | **done** — enqueue → work → jobs collects for real |
-| M6 — discovery | done (channel.videos, search.videos, playlist.items) |
-| worker concurrency + AIMD wired | done |
-| caching + dedup + retention | done |
-| M4 — SponsorBlock | done (dislikes removed, see below) |
-| M7 — InnerTube trio | done |
-| M3 — HTTP API and auth | done |
-| M4.5 — egress pool | deferred; see "decisions" below |
+Everything the plan called M0–M9 is built, plus a dashboard it did not ask for.
+Two kinds it specified are deliberately absent, each with its reasons recorded
+below: `video.dislikes` was removed, and `channel.profile` was cancelled when
+its content turned out to arrive in a response another source already makes.
 
-Nothing under `src/tubedepth/` exists yet beyond the package marker. The plan
-this is being built from lives outside the repository at
-`~/.claude/plans/encapsulated-herding-dolphin.md`.
+| Area | State |
+| --- | --- |
+| Collection — 11 kinds | metadata, transcript, comments, sponsor segments, related, community, about, channel videos, playlist items, search, bundle |
+| Queue | claim, retry, backoff, lease reaping, lease renewal, cancellation, cost lanes |
+| Rate control | AIMD per (egress, lane), quarantine, verdict classification |
+| Storage | content-addressed gzip blobs, artifact index, age retention, orphan sweep |
+| API | jobs, artifacts, results, sources, health — behind `X-API-Key` |
+| Dashboard | `/`, self-contained, reads the same `/v1` routes |
+| Health | per-source status written by the worker, read by the API |
+| Delivery | signed webhooks on job completion |
+| Deployment | systemd user units, Alembic migrations |
+| Egress pool | deferred; its case left with the dislikes source — GitHub milestone 1 |
+
+The plan is kept at [`plan.md`](plan.md) as history. Where it and this file
+disagree, this file is right.
 
 The collection path works end to end against real YouTube:
 
@@ -316,6 +317,12 @@ Direct egress is a residential KT line in KR.
 ---
 
 ## Decisions that are expensive to reverse
+
+Three of these have since been paid for and moved to
+[`decisions/`](../decisions/README.md), which holds only rules something has
+actually gone wrong without. What stays here is reasoning that has not yet cost
+anyone anything — recorded so it can be argued with, not presented as a lesson.
+
 
 ### Dislikes were removed, and deleted rather than archived
 
