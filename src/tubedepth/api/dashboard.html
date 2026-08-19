@@ -113,7 +113,12 @@
   </section>
 
   <section>
-    <h2>Queue</h2>
+    <h2>
+      Queue
+      <span class="pill" id="control-said"></span>
+      <div class="grow"></div>
+      <button id="pause"></button>
+    </h2>
     <div class="body"><div class="counts" id="counts"></div></div>
   </section>
 
@@ -215,6 +220,30 @@ const bytes = (n) => n == null ? "—"
   : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / 1048576).toFixed(1)} MiB`;
 const escape = (value) => String(value ?? "").replace(/[<>&"]/g, (c) =>
   ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+
+let paused = false;
+
+async function loadControl() {
+  const control = (await api("/v1/control")).body;
+  paused = control.paused;
+  $("pause").textContent = paused ? "resume" : "pause";
+  // Say what pausing does and does not do, where the button is. It stops the
+  // worker claiming; it does not stop an extraction already in flight, which
+  // keeps spending requests until it finishes.
+  $("control-said").textContent = paused
+    ? `claiming nothing${control.reason ? " — " + control.reason : ""}; work already running still finishes`
+    : "";
+}
+
+$("pause").onclick = async () => {
+  try {
+    const reason = paused ? null : (prompt("why? (optional — helps whoever lifts it)") || null);
+    await api("/v1/control", { method: "PATCH", body: { paused: !paused, reason } });
+    await load();
+  } catch (error) {
+    say(error.message, true);
+  }
+};
 
 async function loadHealth() {
   const health = await api("/healthz");
@@ -419,6 +448,7 @@ function actionsFor(job) {
 
 async function load() {
   try {
+    await loadControl();
     await loadHealth();
     cursor = null; rows = [];
     await loadRecords();

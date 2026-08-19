@@ -191,6 +191,39 @@ for something nobody has run is worse than one admitting it does not know.
 
 ---
 
+## `GET /v1/control`, `PATCH /v1/control`
+
+Whether the worker is claiming, and the only way to tell it not to.
+
+```sh
+curl -s -X PATCH -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+     -d '{"paused": true, "reason": "watching a quota"}' \
+     localhost:8080/v1/control
+```
+
+```json
+{ "paused": true, "reason": "watching a quota", "changed_at": "2026-08-20T09:12:44Z" }
+```
+
+**This does not reach into the worker.** The API and the worker are separate
+processes on purpose — a yt-dlp crash must not take the API down — so nothing
+here can stop anything directly. It writes a row the worker reads at the top of
+each drain, and `tubedepth work` drains and exits with its unit restarting it
+every ten seconds, so a pause takes effect within about that.
+
+**A job already running finishes.** Pausing means claim nothing; it is not a
+cancellation, and the extraction in flight keeps spending requests until it is
+done. To stop one of those, cancel it.
+
+Queued jobs stay queued and nothing is failed on the way in, so resuming is the
+whole of the undo. `reason` is optional and worth filling in: a pause nobody can
+explain an hour later is a pause nobody dares lift.
+
+No row yet means nobody has ever paused this, which is reported as running
+rather than as an error.
+
+---
+
 ## `GET /v1/sources`
 
 What this build can collect, read from the registry — so a source added in code

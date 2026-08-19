@@ -34,7 +34,7 @@ from .egress.control import RateController, Verdict, verdict_for_error
 from .egress.transport import DirectEgress, Egress
 from .errors import TubedepthError, UpstreamError
 from .health import LaneHealthService, SourceHealthService
-from .models import Job, JobState, utcnow
+from .models import WORKER_CONTROL_ID, Job, JobState, WorkerControl, utcnow
 from .payload_store import PayloadStore
 from .repositories import JobRepository
 from .retrying import backoff_for_attempt, is_retryable
@@ -132,6 +132,18 @@ class Worker:
             return 0
         return self._webhooks.deliver_pending()
 
+    def paused(self) -> bool:
+        """Whether an operator has told this worker to stop claiming.
+
+        Read at the top of a drain rather than watched: `tubedepth work` drains
+        and exits, and the unit restarts it every ten seconds, so that loop is
+        what makes a pause take effect — no polling of our own, and no state to
+        get out of step with the row.
+        """
+        with self._database.session(readonly=True) as session:
+            control = session.get(WorkerControl, WORKER_CONTROL_ID)
+            return bool(control and control.paused)
+
     def reap(self) -> int:
         """Return jobs whose worker stopped reporting. Safe to call often."""
         with self._database.session() as session:
@@ -156,6 +168,10 @@ class Worker:
         announced at all. One path with a bound rather than two paths, because
         two paths are how they came to disagree.
         """
+        if self.paused():
+            logger.info("worker is paused; claiming nothing")
+            return 0
+
         self.deliver_webhooks()
         reaped = self.reap()
         if reaped:

@@ -217,6 +217,37 @@ class ApiKey(Base):
     revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
 
 
+# One row, addressed by a fixed key. See WorkerControl.
+WORKER_CONTROL_ID = "worker"
+
+
+class WorkerControl(Base):
+    """What an operator has told the worker to do. One row.
+
+    The worker is a separate process from the API on purpose — a yt-dlp crash
+    must not take the API down — so nothing in the API can reach into its
+    memory to stop it. A row is the only channel the two share, and it is the
+    same channel `source_health` and `lane_health` already use, running the
+    other way.
+
+    A single row rather than a settings table: there is one worker, and a
+    schema that implies several would be a promise nothing here keeps.
+    """
+
+    __tablename__ = "worker_control"
+
+    # Fixed. The primary key exists so the row is addressable, not so there
+    # can be more than one of them.
+    identifier: Mapped[str] = mapped_column(String(32), primary_key=True, default="worker")
+    # Paused means "claim nothing", not "discard". Queued jobs stay queued and
+    # nothing is failed on the way in, so resuming is the whole of the undo.
+    paused: Mapped[bool] = mapped_column(default=False)
+    # Why, in the operator's words. A pause nobody can explain an hour later is
+    # a pause nobody dares lift.
+    reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    changed_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+
 class LaneHealth(Base):
     """One row per (egress, lane): what the rate controller currently believes.
 

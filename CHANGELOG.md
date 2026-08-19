@@ -36,6 +36,17 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Added
 
+- **`GET` and `PATCH /v1/control` — an operator can pause the worker.** The API
+  and the worker are separate processes on purpose, so nothing in one can reach
+  into the other; the control is a row the worker reads at the top of each
+  drain, which the restart loop turns into a pause that takes effect in about
+  ten seconds. Pausing means claim nothing: queued jobs stay queued, nothing is
+  failed on the way in, and a job already running finishes — the extraction in
+  flight keeps spending requests until it is done. The dashboard has the button.
+- **`/healthz` reports what each route is allowed.** The rate controller's
+  state lived only in the worker's memory, so a quarantined lane and an empty
+  queue looked identical from outside. `window`, `in_flight` and a wall-clock
+  quarantine deadline are now written by the worker and shown on the dashboard.
 - **`POST /v1/jobs/batch`.** One kind, many targets, one request — and one
   charge against the sixty-a-minute allowance, which is the difference between
   an API that can express a hundred-video sweep and one that can run it. All or

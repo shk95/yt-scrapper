@@ -44,7 +44,7 @@ from ..errors import (
 )
 from ..health import SourceHealthService
 from ..identifiers import normalize_target
-from ..models import Artifact, Job, LaneHealth
+from ..models import WORKER_CONTROL_ID, Artifact, Job, LaneHealth, WorkerControl, utcnow
 from ..payload_store import PayloadStore
 from ..repositories import JobRepository, JobState
 from ..services.keys import ApiKeyService, VerifiedKey
@@ -219,6 +219,19 @@ class LaneHealthView(BaseModel):
     # empty queue unless something says so.
     quarantined_until: datetime | None = None
     observed_at: datetime | None = None
+
+
+class ControlView(BaseModel):
+    paused: bool
+    reason: str | None = None
+    changed_at: datetime | None = None
+
+
+class ControlChange(BaseModel):
+    paused: bool
+    # Optional, and worth filling in. A pause nobody can explain an hour later
+    # is a pause nobody dares lift.
+    reason: str | None = None
 
 
 class HealthView(BaseModel):
@@ -426,6 +439,50 @@ def create_application(
     # added later is protected by construction and a forgotten decorator cannot
     # open a hole. A test walks the routes and asserts it.
     versioned = APIRouter(prefix="/v1", dependencies=[Depends(require_api_key)])
+
+    @versioned.get("/control", response_model=ControlView)
+    def read_control(
+        open_session: Annotated[Session, Depends(get_reading_session)],
+    ) -> ControlView:
+        """Whether the worker has been told to stop claiming.
+
+        No row means nobody has ever paused this, which is not an error and is
+        reported as running.
+        """
+        control = open_session.get(WorkerControl, WORKER_CONTROL_ID)
+        if control is None:
+            return ControlView(paused=False)
+        return ControlView(
+            paused=control.paused, reason=control.reason, changed_at=control.changed_at
+        )
+
+    @versioned.patch("/control", response_model=ControlView)
+    def change_control(
+        change: ControlChange,
+        open_session: Annotated[Session, Depends(get_session)],
+    ) -> ControlView:
+        """Pause or resume the worker.
+
+        The API and the worker are separate processes on purpose, so this
+        cannot reach in and stop anything. It writes the row the worker reads
+        at the top of each drain, and `tubedepth work` drains and exits with
+        the unit restarting it every ten seconds — so a pause takes effect
+        within about that, and a job already running finishes.
+
+        Paused means claim nothing. Queued jobs stay queued and nothing is
+        failed on the way in, so resuming is the whole of the undo.
+        """
+        control = open_session.get(WorkerControl, WORKER_CONTROL_ID) or WorkerControl(
+            identifier=WORKER_CONTROL_ID
+        )
+        control.paused = change.paused
+        control.reason = change.reason
+        control.changed_at = utcnow()
+        open_session.add(control)
+        open_session.flush()
+        return ControlView(
+            paused=control.paused, reason=control.reason, changed_at=control.changed_at
+        )
 
     @versioned.get("/sources")
     def list_sources(

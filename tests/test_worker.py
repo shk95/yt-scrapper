@@ -714,3 +714,48 @@ def test_the_jobs_a_listing_fans_out_carry_their_own_kinds_bound(tmp_path: Path)
     assert bounds and bounds != {3}, (
         f"the follow-up jobs took the column default instead of their kind's bound: {bounds}"
     )
+
+
+def test_a_paused_worker_claims_nothing(tmp_path: Path) -> None:
+    """The one control an operator actually needs, and the only shared channel is the row.
+
+    The worker is a separate process from the API — that split is deliberate,
+    so a yt-dlp crash cannot take the API down — which means a pause button
+    cannot reach into its memory. It reads the flag at the top of a drain
+    instead, and `tubedepth work` drains and exits, so the systemd restart loop
+    is what makes the pause take effect within seconds.
+    """
+    from tubedepth.models import WorkerControl
+
+    source = EchoSource()
+    database, worker, _ = build(tmp_path, source)
+    enqueue(database, "video.echo", "dQw4w9WgXcQ")
+    with database.session() as session:
+        session.add(WorkerControl(identifier="worker", paused=True))
+
+    completed = worker.drain()
+
+    assert completed == 0
+    assert source.calls == [], "a paused worker collected anyway"
+    with database.session() as session:
+        assert session.query(Job).filter(Job.state == JobState.QUEUED).count() == 1
+
+
+def test_resuming_lets_the_queue_move_again(tmp_path: Path) -> None:
+    """Paused is a state, not a discarded queue: nothing is failed or cancelled
+    on the way in, so resuming is the whole of the undo."""
+    from tubedepth.models import WorkerControl
+
+    source = EchoSource()
+    database, worker, _ = build(tmp_path, source)
+    enqueue(database, "video.echo", "dQw4w9WgXcQ")
+    with database.session() as session:
+        session.add(WorkerControl(identifier="worker", paused=True))
+    worker.drain()
+
+    with database.session() as session:
+        session.get(WorkerControl, "worker").paused = False  # type: ignore[union-attr]
+    completed = worker.drain()
+
+    assert completed == 1
+    assert source.calls == ["dQw4w9WgXcQ"]
