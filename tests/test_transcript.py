@@ -21,7 +21,6 @@ from tubedepth.sources.transcript import (
     TranscriptSource,
     caption_track_candidates,
     parse_json3,
-    select_caption_track,
 )
 
 
@@ -63,7 +62,7 @@ def test_the_videos_own_manual_captions_are_taken(recorded_dump: dict[str, Any])
     """This video is English and its uploader wrote English captions."""
     assert recorded_dump["language"] == "en"
 
-    track = select_caption_track(recorded_dump)
+    track = caption_track_candidates(recorded_dump)[0]
 
     assert track.language == "en"
     assert track.is_automatic is False
@@ -74,7 +73,7 @@ def test_the_videos_own_asr_is_taken_when_nobody_wrote_captions(
 ) -> None:
     dump = dict(recorded_dump, subtitles={})
 
-    track = select_caption_track(dump)
+    track = caption_track_candidates(dump)[0]
 
     assert track.language == "en"
     assert track.is_automatic is True
@@ -135,7 +134,7 @@ def test_a_regional_track_counts_as_the_videos_language() -> None:
         "automatic_captions": {},
     }
 
-    track = select_caption_track(dump)
+    track = caption_track_candidates(dump)[0]
 
     assert track.language == "pt-BR"
     assert track.is_automatic is False
@@ -148,7 +147,7 @@ def test_the_orig_marker_stands_in_when_yt_dlp_reports_no_language(
     same question `language` answers — so either one settles it."""
     dump = dict(recorded_dump, language=None, subtitles={})
 
-    track = select_caption_track(dump)
+    track = caption_track_candidates(dump)[0]
 
     assert track.language == "en"
     assert track.is_automatic is True
@@ -172,7 +171,7 @@ def test_a_video_with_no_language_at_all_falls_back_to_the_configured_order() ->
         "automatic_captions": {},
     }
 
-    track = select_caption_track(dump, fallback_languages=("ko", "en"))
+    track = caption_track_candidates(dump, fallback_languages=("ko", "en"))[0]
 
     assert track.language == "en"
 
@@ -188,7 +187,7 @@ def test_a_video_with_no_track_in_its_own_language_is_reported_as_not_found(
     assert "zz" not in dump["automatic_captions"]
 
     with pytest.raises(NotFoundError, match="the video's own language: zz"):
-        select_caption_track(dump)
+        caption_track_candidates(dump)
 
 
 @pytest.fixture
@@ -308,7 +307,7 @@ def test_a_video_with_no_caption_tracks_at_all_says_so(recorded_dump: dict[str, 
     dump = dict(recorded_dump, language=None, subtitles={}, automatic_captions={})
 
     with pytest.raises(NotFoundError, match="no caption tracks at all"):
-        select_caption_track(dump)
+        caption_track_candidates(dump)
 
 
 def test_live_chat_replay_is_not_mistaken_for_a_caption_track(
@@ -323,4 +322,4 @@ def test_live_chat_replay_is_not_mistaken_for_a_caption_track(
     )
 
     with pytest.raises(NotFoundError, match="no caption tracks at all"):
-        select_caption_track(dump)
+        caption_track_candidates(dump)
