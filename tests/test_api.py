@@ -934,3 +934,53 @@ def test_control_reports_a_running_worker_before_anyone_has_touched_it(
 
     assert response.status_code == 200
     assert response.json()["paused"] is False
+
+
+def test_a_batch_whose_first_target_is_uncached_does_not_deadlock(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    """The batch route's own use case, which it could not serve.
+
+    `submit_batch` holds a write session, so from the second target on it holds
+    SQLite's RESERVED lock — and `CollectionService._cached` opened the *write*
+    engine to answer a question that only reads. Second `BEGIN IMMEDIATE`,
+    against a lock the same request is holding: five seconds of `busy_timeout`
+    and then `database is locked`.
+
+    `decisions/002-only-writers-take-the-write-lock.md` records this exact
+    shape happening once before, inside `_repair_existing_tables`.
+
+    The order matters and is why the first two batch tests missed it: one
+    passes `refresh: true`, which skips the cache check entirely, and the other
+    puts the cached target first so the lock is not held yet when the second
+    check runs.
+    """
+    from tubedepth.worker import Worker
+
+    client, key, database = api
+    registry = SourceRegistry()
+    registry.register(EchoSource())  # type: ignore[arg-type]
+    # Warm exactly one target, and send it *second*.
+    client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "nfgdJyL-Jmg"},
+        headers={"X-API-Key": key},
+    )
+    Worker(
+        database=database,
+        payloads=PayloadStore(tmp_path / "payloads"),
+        registry=registry,
+        name="test",
+        concurrency=1,
+    ).drain()
+
+    response = client.post(
+        "/v1/jobs/batch",
+        json={"kind": "video.echo", "targets": ["dQw4w9WgXcQ", "nfgdJyL-Jmg"]},
+        headers={"X-API-Key": key},
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert [job["target"] for job in body["queued"]] == ["dQw4w9WgXcQ"]
+    assert [held["target"] for held in body["held"]] == ["nfgdJyL-Jmg"]
