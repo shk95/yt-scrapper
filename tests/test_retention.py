@@ -8,6 +8,8 @@ reported rather than quietly absorbed.
 
 from __future__ import annotations
 
+import json
+import random
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -119,14 +121,21 @@ def test_exceeding_the_size_ceiling_is_reported_rather_than_absorbed(
 ) -> None:
     # The ceiling is a backstop, not an operating point. Reaching it means the
     # age policy is not keeping up, and silently evicting hides that.
+    #
+    # The payloads are distinct and incompressible on purpose. Sixty identical
+    # `x` bytes three times over is one file after content addressing and about
+    # thirty bytes after gzip, so the arithmetic only worked while the ceiling
+    # was measured against uncompressed row totals.
     clock = FakeClock()
     database, payloads, service = build(
         tmp_path,
         RetentionPolicy(maximum_age=timedelta(days=30), maximum_bytes=100),
         clock,
     )
+    generator = random.Random(20260819)
     for index in range(3):
-        store(database, payloads, clock, b"x" * 60, f"video{index:06d}")
+        body = bytes(generator.randrange(256) for _ in range(200))
+        store(database, payloads, clock, body, f"video{index:06d}")
 
     outcome = service.prune()
 
@@ -146,3 +155,64 @@ def test_staying_under_the_ceiling_is_not_reported_as_a_problem(tmp_path: Path) 
     outcome = service.prune()
 
     assert outcome.over_ceiling is False
+
+
+def test_a_blob_with_no_artifact_row_is_swept(tmp_path: Path) -> None:
+    """Orphans are produced routinely, not exceptionally.
+
+    `tubedepth collect` writes a payload and no row — it takes no database at
+    all — so every CLI collection leaves one. Ten were sitting in the working
+    store when this was written, and nothing in the system could ever have
+    removed them: `prune` walks artifact rows and deletes *their* payloads, so
+    a file without a row is unreachable by construction.
+    """
+    clock = FakeClock(datetime(2026, 8, 19, tzinfo=UTC))
+    database, payloads, service = build(tmp_path, RetentionPolicy(), clock)
+    stored = payloads.put("video.metadata", b'{"orphan": true}')
+    clock.advance(timedelta(days=1))
+    assert payloads.path_for("video.metadata", stored.digest) is not None
+
+    outcome = service.prune()
+
+    assert payloads.path_for("video.metadata", stored.digest) is None
+    assert outcome.orphans_removed == 1
+
+
+def test_a_blob_written_moments_ago_is_left_alone(tmp_path: Path) -> None:
+    """The race this sweep must not lose.
+
+    Payloads are written before their artifact row — deliberately, so a crash
+    leaves an orphan rather than a row pointing at nothing. That means every
+    successful collection is briefly an orphan, and a sweep with no grace
+    period would delete the result of a job that is still committing.
+    """
+    clock = FakeClock(datetime(2026, 8, 19, tzinfo=UTC))
+    database, payloads, service = build(tmp_path, RetentionPolicy(), clock)
+    stored = payloads.put("video.metadata", b'{"just": "written"}')
+
+    outcome = service.prune()
+
+    assert payloads.path_for("video.metadata", stored.digest) is not None
+    assert outcome.orphans_removed == 0
+
+
+def test_the_store_size_is_measured_on_disk_and_not_from_the_rows(tmp_path: Path) -> None:
+    """The ceiling's only job is to describe the disk, so it must measure it.
+
+    `byte_count` is the uncompressed payload size. Reporting that as the store
+    size overstated the working store by five times — 4.5 MiB claimed against
+    0.91 MiB of files — so a 50 GiB ceiling would have fired at roughly 10 GiB
+    of actual use. Gzip is the whole reason the blob store exists; a size that
+    ignores it is not a size.
+    """
+    clock = FakeClock(datetime(2026, 8, 19, tzinfo=UTC))
+    database, payloads, service = build(tmp_path, RetentionPolicy(), clock)
+    body = json.dumps({"text": "compressible " * 500}).encode()
+    digest = store(database, payloads, clock, body, "video000001")
+    stored_path = payloads.path_for("video.metadata", digest)
+
+    outcome = service.prune()
+
+    assert stored_path is not None
+    assert outcome.total_bytes == stored_path.stat().st_size
+    assert outcome.total_bytes < len(body) / 2, "gzip is why the blob store exists"

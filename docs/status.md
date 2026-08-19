@@ -171,6 +171,30 @@ because three harvests cannot fill eight slots; this one exceeds the cap
 Throughput against YouTube is capped by YouTube, so not asking twice was the
 only large multiplier left, and it is a 129× one on a repeat sweep.
 
+**Two defects in retention, found 2026-08-19 by looking at the real store.**
+
+*Orphaned payloads were unreachable.* `prune` walks artifact rows and deletes
+their payloads, so a file with no row could never be found — and those are
+produced routinely rather than exceptionally, because `tubedepth collect` takes
+no database at all and leaves one behind on every CLI collection. Thirteen were
+sitting in the working store. The sweep now walks the store itself, with a one
+hour grace period: payloads are written before their rows on purpose, so every
+successful collection is briefly an orphan and a sweep without grace would
+delete the result of a job still committing.
+
+*The ceiling did not measure the disk.* It summed `byte_count`, which is the
+*uncompressed* payload size, and reported 4.5 MiB for a store holding 0.91 MiB
+of files. A 50 GiB ceiling would have fired at roughly 10 GiB of real use. Gzip
+is the entire reason the blob store exists, so a size that ignores it is not a
+size. It now stats the files.
+
+Both errors also ran in the other direction: 261 small files occupied 2.6 MiB
+of disk against 0.91 MiB of content, because a 4 KiB block holds a 1 KiB
+payload. So the reported figure was wrong high on large payloads and wrong low
+on small ones, and the two effects do not scale together. What is measured now
+is file bytes; block overhead is left to the filesystem, and the fan-out that
+makes it matter is documented in `payload_store.py`.
+
 **Storage is bounded by age, with a 50 GiB backstop.** The ceiling is not a
 target and nothing tries to fill it; reaching it means the retention age is too
 generous for what is being collected, so `tubedepth prune` reports it and exits

@@ -248,7 +248,9 @@ def prune(
         f"✓ removed {outcome.artifacts_removed} artifact(s), "
         f"freeing {outcome.bytes_removed / 1024**2:.1f} MiB"
     )
-    typer.echo(f"  store is now {outcome.total_bytes / 1024**2:.1f} MiB")
+    if outcome.orphans_removed:
+        typer.echo(f"  swept {outcome.orphans_removed} payload file(s) with no artifact row")
+    typer.echo(f"  store is now {outcome.total_bytes / 1024**2:.1f} MiB on disk")
     if outcome.over_ceiling:
         typer.echo(
             f"✗ over the {maximum_gigabytes:.0f} GiB ceiling — "

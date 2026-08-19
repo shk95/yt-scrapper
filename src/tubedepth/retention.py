@@ -16,7 +16,7 @@ from __future__ import annotations
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 
 from sqlalchemy import select
 
@@ -35,14 +35,21 @@ DEFAULT_MAXIMUM_BYTES = 50 * 1024**3
 class RetentionPolicy:
     maximum_age: timedelta = DEFAULT_MAXIMUM_AGE
     maximum_bytes: int = DEFAULT_MAXIMUM_BYTES
+    # How long a payload with no artifact row is left alone. Long enough that a
+    # collection committing its row is never mistaken for rubbish; short enough
+    # that a crashed worker's leftovers do not accumulate for a day.
+    orphan_grace: timedelta = timedelta(hours=1)
 
 
 @dataclass(frozen=True, slots=True)
 class RetentionOutcome:
     artifacts_removed: int
     bytes_removed: int
+    # On disk, gzipped, as the filesystem sees it — not the sum of byte_count,
+    # which is the uncompressed size and overstated the working store fivefold.
     total_bytes: int
     over_ceiling: bool
+    orphans_removed: int = 0
 
 
 class RetentionService:
@@ -58,6 +65,38 @@ class RetentionService:
         self._payloads = payloads
         self._policy = policy or RetentionPolicy()
         self._clock = clock
+
+    def _sweep_orphans(self, live: set[str]) -> tuple[int, int]:
+        """Delete payloads no artifact row points at, and total what remains.
+
+        These are produced routinely rather than exceptionally: `tubedepth
+        collect` takes no database, so every CLI collection leaves one. Ten
+        were sitting in the working store when this was written and nothing in
+        the system could ever have removed them — `prune` walks rows and
+        deletes *their* payloads, so a file without a row is unreachable.
+
+        The grace period is the part that matters. Payloads are written before
+        their row, deliberately, so that a crash leaves an orphan rather than a
+        row pointing at nothing. Every successful collection is therefore
+        briefly an orphan, and a sweep without a grace period would delete the
+        result of a job that is still committing.
+
+        The total returned is what the filesystem holds after the sweep, which
+        is what the ceiling is about. Summing `byte_count` instead reported the
+        uncompressed size and overstated this store fivefold.
+        """
+        now = self._clock()
+        orphans = 0
+        total = 0
+        for kind, digest, path in self._payloads.stored_files():
+            if digest not in live:
+                age = now - datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+                if age >= self._policy.orphan_grace:
+                    self._payloads.delete(kind, digest)
+                    orphans += 1
+                    continue
+            total += path.stat().st_size
+        return orphans, total
 
     def prune(self) -> RetentionOutcome:
         cutoff = self._clock() - self._policy.maximum_age
@@ -77,16 +116,17 @@ class RetentionService:
             # What maximum_age therefore buys is a bounded window of history:
             # how a video's counts moved over the last month is free, and older
             # than that is not kept.
-            total = 0
+            live: set[str] = set()
             for artifact in artifacts:
                 if artifact.fetched_at >= cutoff:
-                    total += artifact.byte_count
+                    live.add(artifact.digest)
                     continue
                 self._payloads.delete(artifact.kind, artifact.digest)
                 session.delete(artifact)
                 removed += 1
                 freed += artifact.byte_count
 
+        orphans, total = self._sweep_orphans(live)
         over = total > self._policy.maximum_bytes
         if over:
             logger.warning(
@@ -98,9 +138,13 @@ class RetentionService:
         if removed:
             logger.info("pruned %s artifact(s), freeing %.1f MiB", removed, freed / 1024**2)
 
+        if orphans:
+            logger.info("swept %s payload file(s) with no artifact row", orphans)
+
         return RetentionOutcome(
             artifacts_removed=removed,
             bytes_removed=freed,
             total_bytes=total,
             over_ceiling=over,
+            orphans_removed=orphans,
         )

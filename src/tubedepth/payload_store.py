@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import gzip
 import hashlib
+from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -52,6 +53,17 @@ class PayloadStore:
             return False
         path.unlink()
         return True
+
+    def stored_files(self) -> Iterator[tuple[str, str, Path]]:
+        """Every payload on disk as (kind, digest, path).
+
+        The store is the only thing that knows its own layout, so walking it
+        belongs here rather than in a caller reconstructing the fan-out.
+        """
+        if not self._root.exists():
+            return
+        for path in self._root.glob("*/*/*.json.gz"):
+            yield path.parent.parent.name, path.name.removesuffix(".json.gz"), path
 
     def read(self, digest: str) -> bytes:
         matches = list(self._root.glob(f"*/{digest[:2]}/{digest}.json.gz"))
