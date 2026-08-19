@@ -586,3 +586,37 @@ def test_a_failure_that_can_never_succeed_says_so_rather_than_counting_attempts(
 
     assert "is not retryable" in caplog.text
     assert "exhausted its attempts" not in caplog.text
+
+
+def test_a_video_with_nothing_to_collect_does_not_slow_the_route_down(
+    tmp_path: Path,
+) -> None:
+    """Measured, then reproduced here.
+
+    A forty-job transcript sweep at concurrency 8 finished twenty-two jobs in
+    its first fifteen seconds and then fell to roughly one per fifteen seconds
+    for the remaining three and a half minutes. The only failures in it were
+    seven videos with captions turned off — a fact about those videos, which
+    the worker reported to the controller as throttling, doubling the lane's
+    minimum interval each time until it reached the tail rate above.
+    """
+    source = FailingSource()
+    database, _, payloads = build(tmp_path, source)
+    for index in range(3):
+        enqueue(database, "video.failing", f"video{index:06d}")
+    controller = RateController(window_ceiling=6)
+    for _ in range(8):
+        controller.record("direct", Lane.YOUTUBE, Verdict.OK)
+    widened = controller.window("direct", Lane.YOUTUBE)
+    worker = Worker(
+        database=database,
+        registry=_registry(source),
+        payloads=payloads,
+        name="worker-1",
+        controller=controller,
+    )
+
+    worker.drain()
+
+    assert controller.window("direct", Lane.YOUTUBE) == widened
+    assert controller.is_available("direct", Lane.YOUTUBE)

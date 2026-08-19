@@ -28,9 +28,9 @@ from pydantic import BaseModel
 
 from .collection import CollectionService
 from .database import Database
-from .egress.control import RateController, Verdict
+from .egress.control import RateController, Verdict, verdict_for_error
 from .egress.transport import DirectEgress, Egress
-from .errors import RateLimitedError, TubedepthError, UpstreamError
+from .errors import TubedepthError, UpstreamError
 from .models import Job, JobState, utcnow
 from .payload_store import PayloadStore
 from .repositories import JobRepository
@@ -214,20 +214,20 @@ class Worker:
             # ones we did not — and a leaked permit is indistinguishable from
             # a busy route, so the next job waits out the whole lease before
             # anyone finds out. That is how this method hung the first time.
-            verdict = Verdict.THROTTLED
+            verdict = Verdict.NEUTRAL
             try:
                 result, digest, byte_count = self._collect(kind, target)
                 verdict = Verdict.OK
             except TubedepthError as error:
-                verdict = (
-                    Verdict.BLOCKED if isinstance(error, RateLimitedError) else Verdict.THROTTLED
-                )
+                verdict = verdict_for_error(error)
                 self._fail_or_retry(identifier, kind, error)
                 return
             except Exception:
                 # Not a domain error, so nothing above knows what to do with
-                # it. The job is failed rather than left running, and the
-                # traceback is logged rather than swallowed.
+                # it — least of all the rate controller, which keeps the
+                # neutral verdict set below. A bug in this process is not
+                # evidence that the address is in trouble.
+                verdict = Verdict.NEUTRAL
                 logger.exception("job %s (%s) raised an unexpected error", identifier, kind)
                 self._settle(
                     identifier,

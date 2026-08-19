@@ -12,7 +12,14 @@ from __future__ import annotations
 
 import pytest
 
-from tubedepth.egress.control import Lane, RateController, Verdict
+from tubedepth.egress.control import Lane, RateController, Verdict, verdict_for_error
+from tubedepth.errors import (
+    ExtractionError,
+    NotFoundError,
+    RateLimitedError,
+    UpstreamError,
+    ValidationError,
+)
 
 
 class FakeClock:
@@ -223,3 +230,36 @@ def test_concurrent_callers_never_exceed_the_window() -> None:
         thread.join(timeout=30)
 
     assert sum(granted) == 1
+
+
+def test_a_failure_that_says_nothing_about_the_route_leaves_it_alone() -> None:
+    """The safety property: an unknown result must not burn a healthy address.
+
+    A video with captions turned off, a bad id, a parser that no longer matches
+    — none of these are evidence about the line the request went out on, and
+    treating them as evidence is how a working address gets throttled to a
+    standstill by videos it fetched perfectly well.
+    """
+    assert verdict_for_error(NotFoundError("the video has no caption tracks at all")) is (
+        Verdict.NEUTRAL
+    )
+    assert verdict_for_error(ValidationError("video identifier is not valid: x")) is Verdict.NEUTRAL
+    assert verdict_for_error(ExtractionError("no known renderer")) is Verdict.NEUTRAL
+
+
+def test_being_told_to_slow_down_is_evidence_about_the_route() -> None:
+    assert verdict_for_error(RateLimitedError("429")) is Verdict.BLOCKED
+    assert verdict_for_error(UpstreamError("connection reset")) is Verdict.THROTTLED
+
+
+def test_a_neutral_verdict_changes_neither_the_window_nor_the_interval() -> None:
+    controller = RateController(window_ceiling=6)
+    for _ in range(8):
+        controller.record("direct", Lane.YOUTUBE, Verdict.OK)
+    widened = controller.window("direct", Lane.YOUTUBE)
+
+    for _ in range(5):
+        controller.record("direct", Lane.YOUTUBE, Verdict.NEUTRAL)
+
+    assert controller.window("direct", Lane.YOUTUBE) == widened
+    assert controller.is_available("direct", Lane.YOUTUBE)

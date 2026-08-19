@@ -20,6 +20,8 @@ from contextlib import contextmanager
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from ..errors import RateLimitedError, UpstreamError
+
 
 class Lane(StrEnum):
     """A rate-limit domain — a service, not a backend."""
@@ -35,6 +37,30 @@ class Verdict(StrEnum):
     OK = "ok"
     THROTTLED = "throttled"
     BLOCKED = "blocked"  # this address is burned; the request itself was fine
+    NEUTRAL = "neutral"  # the attempt says nothing about the route either way
+
+
+def verdict_for_error(error: BaseException) -> Verdict:
+    """What a failed job tells the controller about the line it went out on.
+
+    Most failures tell it nothing. A video with captions turned off, a bad
+    identifier, a renderer that no longer matches — the request went out and
+    came back exactly as the network intended, and the disappointment is about
+    the content. Reporting those as throttling is how an address that is
+    working perfectly gets slowed to a standstill by the videos it fetched.
+
+    Measured: seven caption-less videos in a forty-job sweep doubled the lane's
+    minimum interval on each one and took the run from roughly ninety jobs a
+    minute to four.
+
+    So the default is NEUTRAL, and only the two failures that are genuinely
+    about the route move anything.
+    """
+    if isinstance(error, RateLimitedError):
+        return Verdict.BLOCKED
+    if isinstance(error, UpstreamError):
+        return Verdict.THROTTLED
+    return Verdict.NEUTRAL
 
 
 QUARANTINE_BASE_SECONDS = 300.0
@@ -139,6 +165,8 @@ class RateController:
             self._apply(self._state(egress, lane), verdict, self.clock())
 
     def _apply(self, state: LaneState, verdict: Verdict, now: float) -> None:
+        if verdict is Verdict.NEUTRAL:
+            return
         if verdict is Verdict.OK:
             state.window = min(self.window_ceiling, state.window + 1.0 / state.window)
             state.minimum_interval = max(
