@@ -5,6 +5,7 @@ from __future__ import annotations
 import gzip
 import json
 import os
+from collections.abc import Sequence
 from datetime import timedelta
 from pathlib import Path
 from typing import Annotated
@@ -17,7 +18,7 @@ from .collection import CollectionService
 from .database import Database
 from .egress.control import RateController
 from .egress.transport import DirectEgress
-from .errors import TubedepthError
+from .errors import TubedepthError, ValidationError
 from .fixture_capture import redact_for_fixture
 from .identifiers import normalize_target, normalize_video_identifier
 from .models import Job
@@ -40,7 +41,26 @@ def _payload_store(data_directory: Path) -> PayloadStore:
     return PayloadStore(data_directory / "payloads")
 
 
-@application.command()
+# Video, channel and playlist ids are base64url, so roughly one in a hundred
+# begins with `-` and click reads it as an option: `No such option: -2`, naming
+# neither the id nor the video it came from. These commands therefore take
+# unknown options as arguments.
+TOLERATE_LEADING_DASHES = {"ignore_unknown_options": True}
+
+
+def _reject_option_like(values: Sequence[str]) -> None:
+    """Refuse anything that is obviously a mistyped option, not an id.
+
+    The setting above is what lets `--thn video.metadata` become two targets
+    and a hundred jobs that can only fail. No id has ever started with two
+    dashes, so shape alone separates the two cases.
+    """
+    for value in values:
+        if value.startswith("--"):
+            raise ValidationError(f"unknown option: {value}")
+
+
+@application.command(context_settings=TOLERATE_LEADING_DASHES)
 def collect(
     kind: Annotated[str, typer.Argument(help="What to collect; see `tubedepth sources`")],
     target: Annotated[str, typer.Argument(help="A video URL or bare video id")],
@@ -51,6 +71,7 @@ def collect(
     show: Annotated[bool, typer.Option("--show/--no-show", help="Print the payload")] = False,
 ) -> None:
     """Collect one kind of data for one video and store it."""
+    _reject_option_like([kind, target])
     payloads = _payload_store(data_directory)
     service = CollectionService(payloads=payloads)
 
@@ -69,7 +90,7 @@ def _database(data_directory: Path) -> Database:
     return database
 
 
-@application.command()
+@application.command(context_settings=TOLERATE_LEADING_DASHES)
 def enqueue(
     kind: Annotated[str, typer.Argument(help="What to collect; see `tubedepth sources`")],
     targets: Annotated[list[str], typer.Argument(help="Videos, channels, playlists or a query")],
@@ -86,6 +107,7 @@ def enqueue(
     With `--then`, one queued channel becomes a job per video it holds. That is
     the difference between enumerating and collecting at any volume.
     """
+    _reject_option_like([kind, *targets])
     registry = default_registry()
     source = registry.get(kind)
     if then is not None:
