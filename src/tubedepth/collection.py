@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
 
 from .database import Database
 from .egress.transport import DirectEgress, Egress
@@ -174,8 +175,31 @@ class CollectionService:
         # cache still has to produce the videos it holds, and a cache that
         # cannot reproduce the parsed value makes every consumer refetch —
         # which turns a repeat sweep from cheap into a silent no-op.
-        model = self._registry.get(kind).payload_model
-        result = model.model_validate_json(self._payloads.read(digest))
+        source = self._registry.get(kind)
+        try:
+            result = source.payload_model.model_validate_json(self._payloads.read(digest))
+        except PydanticValidationError:
+            # A model changed and its `schema_version` did not, so the cache
+            # holds bytes the current shape rejects. This is the only place in
+            # the codebase that parses a stored payload with a model, and
+            # letting it raise reaches FastAPI's default handler: `POST
+            # /v1/jobs` answers 500 for every target that has a cached
+            # artifact, which is most of them.
+            #
+            # A stored payload the current model cannot read is not an answer
+            # to the current question, so it is a miss. The cost becomes
+            # requests until someone bumps, rather than an API that is down —
+            # and the warning plus the payload-shape check in CI are what make
+            # the cause loud instead of the symptom.
+            logger.warning(
+                "stored payload for %s %s (%s) does not fit schema version %s; "
+                "treating it as a cache miss — a bump was probably missed",
+                kind,
+                target,
+                digest[:12],
+                source.schema_version,
+            )
+            return None
         return Collected(
             kind=kind,
             target=target,

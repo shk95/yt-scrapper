@@ -283,3 +283,29 @@ def test_two_sources_differing_only_in_a_parameter_do_not_share_an_artifact(
     ).collect("video.parameterised", "dQw4w9WgXcQ")
 
     assert wide.calls == 1, "the wider request was served the narrower one's answer"
+
+
+def test_a_stored_payload_the_model_can_no_longer_parse_is_a_cache_miss(tmp_path: Path) -> None:
+    """Forget the bump and the cache serves bytes the new model rejects.
+
+    A pydantic `ValidationError` is not a `TubedepthError`, and the API
+    registers a handler only for those — so it reaches FastAPI's default and
+    `POST /v1/jobs` answers 500 for **every target that has a cached
+    artifact**. A stored payload the current model cannot read is, by
+    definition, not an answer to the current question: handled as a miss, the
+    cost is requests until someone bumps, rather than an API that is down.
+    """
+    source = CountingSource()
+    service, database = cached_service(tmp_path, source)
+    service.collect("video.counted", "dQw4w9WgXcQ")
+    with database.session() as session:
+        digest = session.query(Artifact).one().digest
+    # What a forgotten bump looks like from here: bytes that no longer fit.
+    PayloadStore(tmp_path / "payloads").put("video.counted", b'{"unexpected": true}')
+    stored = tmp_path / "payloads"
+    for path in stored.rglob(f"*{digest[:8]}*"):
+        path.write_bytes(__import__("gzip").compress(b'{"nothing": "matching"}'))
+
+    held = service.cached("video.counted", "dQw4w9WgXcQ")
+
+    assert held is None, "unparseable stored bytes were served as a cache hit"

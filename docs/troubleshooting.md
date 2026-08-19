@@ -76,6 +76,24 @@ writing inside a transaction it opened by reading.
 
 ## Third-party services
 
+## `stored payload for … does not fit schema version …`
+
+A payload model changed and its source's `schema_version` did not, so the cache
+holds bytes the current shape rejects.
+
+Nothing is broken and nothing is lost — the collection path treats it as a miss
+and re-collects, which is the correct answer to a question the stored bytes no
+longer answer. What it costs is requests against the one per-address budget,
+one per affected target, until the version is bumped.
+
+The fix is the bump. `just check` will already be failing with
+`… changed shape without a bump`, naming the kind and the line; bump the
+version in that source module and run `just record-payload-shapes`.
+
+Before that check existed this failed differently and much worse: the
+`ValidationError` reached FastAPI's default handler, so `POST /v1/jobs`
+answered 500 for every target that had a cached artifact.
+
 ## `table jobs has no column named api_key_id`
 
 The database file predates the column. `create_all` never alters a table it
