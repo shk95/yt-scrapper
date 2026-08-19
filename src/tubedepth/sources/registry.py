@@ -162,6 +162,12 @@ class SourceRegistry:
                 "lane": self.get(kind).lane.value,
                 "cost": self.get(kind).cost.value,
                 "freshness_seconds": int(self.get(kind).default_freshness.total_seconds()),
+                # The effective values, not the built-in ones. `serve` and
+                # `work` are separate processes reading the same environment
+                # variables once each, so this is how an operator compares
+                # what the two of them actually believe — a disagreement makes
+                # the API answer for a question the worker did not collect.
+                "cache_parameters": cache_parameters_of(self.get(kind)),
             }
             for kind in self.kinds()
         }

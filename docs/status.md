@@ -496,6 +496,38 @@ yt-dlp forwards one. That is a different and larger job than the "cheapest
 change in this issue by a wide margin" the issue estimated, and it should be
 re-estimated before it is scheduled.
 
+### The listing cap is a deployment setting, and both units must agree
+
+`channel.videos`, `search.videos` and `playlist.items` stopped at 100 and
+nothing at runtime could raise it, so a channel with more videos than that
+could not be collected in full. `TUBEDEPTH_LISTING_LIMIT` and
+`TUBEDEPTH_COMMENT_LIMIT` now do, read once per process in `default_registry()`.
+
+*The dangerous half was already closed.* Raising the constant alone would have
+been a silent wrong answer — the limit was not in the cache key, so re-running a
+channel swept an hour earlier would have served the cached 100-item listing for
+the request that asked for 1,000, with nothing looking wrong. That is why the
+parameters went into the fingerprint first and this came second.
+
+**The remaining hazard is that `serve` and `work` are separate processes.** Each
+reads the environment once, and `default_registry()` is `@cache`d. If the two
+units carry different values the API computes a different cache key than the
+worker records: it stops matching anything the worker writes, *and* keeps
+matching rows written before the change and serving them as 200 — a listing
+collected at the old cap answering a request for the new one.
+
+Nothing inside one process can detect that, so `GET /v1/sources` reports the
+values actually in effect, and comparing that route between the two instances
+is the check. The unit files carry both variables commented out together, so
+the next person sets them in both places or neither.
+
+*A bigger cap is not free.* `extract_flat` makes a listing one extraction, but
+yt-dlp still walks continuations to reach a thousand, and every one of those
+comes out of the per-address budget everything else draws on. It is refused
+rather than defaulted when it does not parse: an operator who sets it and
+silently gets the old behaviour concludes the variable does nothing, and the
+sweep they ran is exactly the size they were trying to change.
+
 ### The upcast machinery is deferred, and here is what should build it
 
 Issue #4 asks for five things. Four shipped: `Artifact.schema_version` and its

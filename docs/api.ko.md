@@ -226,7 +226,8 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/sources
     "target": "video",
     "lane": "youtube",
     "cost": "standard",
-    "freshness_seconds": 21600
+    "freshness_seconds": 21600,
+    "cache_parameters": {}
   }
 }
 ```
@@ -404,6 +405,13 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/jobs?state=failed&limit=20'
 ```
 
 ---
+
+`cache_parameters`는 kind와 target 외에 그 소스의 답을 다른 답으로 만드는 것이다 — 리스팅의
+상한, 댓글 수집의 정렬과 상한, 자막의 언어 우선순위. **응답한 프로세스에서 실제로 적용 중인
+값이다.** `tubedepth serve`와 `tubedepth work`는 각각 별개 프로세스에서 환경변수를 한 번씩
+읽고, 둘이 어긋나면 API가 워커가 기록하는 것과 다른 캐시 키를 계산한다 — 워커가 쓰는 것과는
+더 이상 맞지 않으면서, 변경 이전의 행과는 계속 맞는다. 둘 사이에서 이 라우트를 비교하는 것이
+그것을 잡는 방법이다.
 
 ## `GET /v1/artifacts`
 
