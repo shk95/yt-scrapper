@@ -17,6 +17,23 @@ Data API v3는 공개 영상에 대해서도 많은 것을 감춘다. `snippet.t
 자막 본문은 소유자 OAuth 없이 못 받으며, 챕터·히트맵·싫어요·관련 영상·커뮤니티 게시물은 필드 자체가 없다.
 댓글은 있지만 쿼터 소모가 커서 대량 수집에 못 쓴다.
 
+## 배포
+
+systemd **유저 유닛** 두 개가 `deploy/`에 있다. root가 필요 없고, 권한을 조용히 얻을 수도 없다.
+
+```sh
+cp deploy/tubedepth-*.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now tubedepth-api tubedepth-worker
+loginctl enable-linger $USER    # 로그아웃 후에도 살아있게 — 없으면 재부팅이 크래시처럼 보인다
+```
+
+API와 워커를 나눈 이유는 취향이 아니다. yt-dlp 추출은 블로킹이고 메모리를 쓰므로,
+같이 돌리면 댓글 수집 하나가 `GET /v1/jobs/{id}`의 p99를 결정하고 yt-dlp 크래시가 API를 같이 죽인다.
+
+API는 기본적으로 **loopback에만** 바인딩한다. 이 프로젝트의 인증은 헤더이고 그건 TLS의 대체물이 아니므로,
+외부에 열려면 리버스 프록시를 앞에 둔다.
+
 ## 대시보드
 
 ```sh

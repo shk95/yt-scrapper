@@ -1,0 +1,44 @@
+# The HTTP API and dashboard, as a systemd *user* unit.
+#
+#   mkdir -p ~/.config/systemd/user
+#   cp deploy/tubedepth-*.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now tubedepth-api tubedepth-worker
+#   loginctl enable-linger $USER      # so they survive logout, not just this session
+#
+# A user unit rather than a system one because nothing here needs root, and a
+# service that runs as you is a service that cannot quietly gain privileges it
+# was never given. The cost is `enable-linger`: without it systemd stops your
+# units when the last session ends, which looks exactly like a crash on reboot.
+
+[Unit]
+Description=tubedepth API and dashboard
+Documentation=file://%h/github_prj/yt-scrapper/README.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+WorkingDirectory=%h/github_prj/yt-scrapper
+Environment=TUBEDEPTH_DATA_DIR=%h/github_prj/yt-scrapper/var
+# --frozen so a restart cannot silently resolve a newer dependency than the one
+# in uv.lock. A service that upgrades itself on restart is a service whose
+# version nobody can state, and yt-dlp is deliberately uncapped in
+# pyproject.toml — the lock file is what pins it.
+ExecStart=/usr/bin/env uv run --frozen tubedepth serve --host 127.0.0.1 --port 8080
+Restart=on-failure
+RestartSec=5s
+
+# Bound to loopback in ExecStart. Put a reverse proxy in front to expose it;
+# the API's own auth is a header, which is not a substitute for TLS.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/github_prj/yt-scrapper/var
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=default.target

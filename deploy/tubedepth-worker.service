@@ -1,0 +1,51 @@
+# The worker: claims jobs, collects, retries, reaps, sweeps and sends callbacks.
+#
+# Separate from the API on purpose. yt-dlp extraction is blocking and memory
+# hungry, so running it beside the API would let a comment harvest decide the
+# p99 of `GET /v1/jobs/{id}` — and a yt-dlp crash would take the API with it.
+#
+# Install and enable it with the API unit; see tubedepth-api.service.
+
+[Unit]
+Description=tubedepth collection worker
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=exec
+WorkingDirectory=%h/github_prj/yt-scrapper
+Environment=TUBEDEPTH_DATA_DIR=%h/github_prj/yt-scrapper/var
+# Concurrency is an upper bound, not a target: the rate controller narrows it
+# whenever YouTube pushes back. Eight was measured, not chosen — see
+# docs/status.md, where the figure and the sweep that produced it are recorded.
+Environment=TUBEDEPTH_CONCURRENCY=8
+# Set this to sign job callbacks. Without it none are sent, which is the safe
+# default — an unsigned callback is one the receiver cannot attribute. Prefer
+# an EnvironmentFile with mode 0600 over putting the secret in this file, which
+# is world-readable in the unit directory.
+#EnvironmentFile=%h/.config/tubedepth/worker.env
+ExecStart=/usr/bin/env uv run --frozen tubedepth work
+
+# Always restarting, because an empty queue is not a reason to stay stopped and
+# a crashed extractor is not a reason to give up on the queue. RestartSec keeps
+# a persistent failure from becoming a spin.
+Restart=always
+RestartSec=10s
+
+# SIGINT rather than SIGTERM: the worker's threads finish the job they hold and
+# the lease is released, instead of a running job being abandoned to wait out
+# its full lease before another worker can take it.
+KillSignal=SIGINT
+TimeoutStopSec=120
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/github_prj/yt-scrapper/var
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+
+[Install]
+WantedBy=default.target
