@@ -243,3 +243,32 @@ def test_a_quarantined_lane_is_recorded_with_a_deadline_a_reader_can_use(
         row = session.query(LaneHealth).one()
     assert row.quarantined_until is not None
     assert row.quarantined_until > datetime.now(UTC), "the quarantine was recorded as already over"
+
+
+def test_health_reports_the_message_that_names_what_changed(tmp_path: Path) -> None:
+    """`last_error_message` was written on every failure and read by nothing.
+
+    The code alone says `ExtractionError`. The message is the line that names
+    the renderer YouTube renamed — "expected one of […], observed […]" — and
+    `docs/api.md` sends an operator to `/healthz` for exactly that, telling
+    them a `broken` source needs a code change without saying which one.
+
+    This is the situation `Job.error_message` exists to prevent, in its own
+    words: a job that only says "failed" sends whoever is on call to the logs
+    for what was already known at the moment it happened.
+    """
+    from tubedepth.errors import ExtractionError
+
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    service = SourceHealthService(database=database)
+    service.record(
+        "channel.about",
+        succeeded=False,
+        error=ExtractionError("expected one of [aboutRenderer], observed [homeRenderer]"),
+    )
+
+    entry = service.snapshot()["channel.about"]
+
+    assert entry.last_error_message is not None
+    assert "homeRenderer" in entry.last_error_message

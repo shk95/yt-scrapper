@@ -42,6 +42,11 @@ class HealthEntry:
     last_success_at: datetime | None
     last_failure_at: datetime | None
     last_error_code: str | None
+    # The code alone says `ExtractionError`; the message is the line that names
+    # the renderer that changed. Recorded since this table existed and read by
+    # nothing, which left `/healthz` telling an operator that a source is
+    # broken and needs a code change without saying which one.
+    last_error_message: str | None = None
 
 
 def _counts_against_the_source(error: BaseException | None) -> bool:
@@ -123,6 +128,7 @@ class SourceHealthService:
                 last_success_at=row.last_success_at if row else None,
                 last_failure_at=row.last_failure_at if row else None,
                 last_error_code=row.last_error_code if row else None,
+                last_error_message=row.last_error_message if row else None,
             )
         return entries
 

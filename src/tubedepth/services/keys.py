@@ -9,6 +9,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from datetime import datetime
 
 from sqlalchemy import select
 
@@ -32,6 +33,22 @@ class MintedKey:
     # Shown once. Nothing keeps a copy, which is the property that makes
     # hashing the stored form worth anything.
     secret: str
+
+
+@dataclass(frozen=True, slots=True)
+class ListedKey:
+    """A key as an operator sees it. Never the secret; nothing keeps a copy."""
+
+    identifier: str
+    label: str
+    key_prefix: str
+    requests_per_minute: int
+    created_at: datetime
+    # The answer to "is anything still using this", which is the question
+    # anyone asks before revoking. Recorded on every verified request from the
+    # day the table existed and readable from nowhere until now.
+    last_used_at: datetime | None
+    revoked: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -68,6 +85,28 @@ class ApiKeyService:
             session.flush()
             identifier = key.identifier
         return MintedKey(identifier=identifier, label=label, secret=secret)
+
+    def listed(self) -> list[ListedKey]:
+        """Every key this instance has, newest first, revoked ones included.
+
+        Revocation is not deletion: jobs carry `api_key_id`, and a row that
+        vanished would make every job it submitted unattributable — which is
+        the opposite of why the column exists.
+        """
+        with self._database.session(readonly=True) as session:
+            rows = session.scalars(select(ApiKey).order_by(ApiKey.created_at.desc())).all()
+            return [
+                ListedKey(
+                    identifier=row.identifier,
+                    label=row.label,
+                    key_prefix=row.key_prefix,
+                    requests_per_minute=row.requests_per_minute,
+                    created_at=row.created_at,
+                    last_used_at=row.last_used_at,
+                    revoked=row.revoked_at is not None,
+                )
+                for row in rows
+            ]
 
     def revoke(self, identifier: str) -> None:
         with self._database.session() as session:

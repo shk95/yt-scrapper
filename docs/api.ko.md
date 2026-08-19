@@ -127,7 +127,8 @@ curl -s localhost:8080/healthz
       "consecutive_failures": 0,
       "last_success_at": "2026-08-19T09:12:44Z",
       "last_failure_at": null,
-      "last_error_code": null
+      "last_error_code": null,
+      "last_error_message": null
     }
   ]
 }
@@ -159,7 +160,9 @@ curl -s localhost:8080/healthz
 
 개별 소스가 성치 않아도 `status`는 `"ok"`로 남는다. 이 엔드포인트는 프로세스를 재시작하는
 것들이 읽고, 파서 하나가 깨진 것은 나머지 열 종류가 여전히 수집 중인 API를 재기동할 이유가
-아니기 때문이다. 나쁜 소식은 사람이 읽는 `sources`에 실린다.
+아니기 때문이다. 나쁜 소식은 사람이 읽는 `sources`에 실린다 — 그리고 `last_error_code`가 아니라
+`last_error_message`에 실린다. 코드는 `parse_mismatch`라고 말하고, 메시지는 더 이상 맞지 않는
+렌더러의 이름을 말한다. 소스가 깨졌다는 것을 아는 것과 무엇을 고쳐야 하는지 아는 것의 차이다.
 
 소스의 `status`는 고치는 방법이 서로 다른 원인들을 구분한다.
 

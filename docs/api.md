@@ -137,7 +137,8 @@ curl -s localhost:8080/healthz
       "consecutive_failures": 0,
       "last_success_at": "2026-08-19T09:12:44Z",
       "last_failure_at": null,
-      "last_error_code": null
+      "last_error_code": null,
+      "last_error_message": null
     }
   ]
 }
@@ -173,7 +174,10 @@ says so.
 `status` stays `"ok"` while individual sources are not, because this endpoint is
 read by things that restart processes and one broken parser is not a reason to
 cycle an API whose other ten kinds are still collecting. The bad news is in
-`sources`, where a person reads it.
+`sources`, where a person reads it — and in `last_error_message` rather than
+`last_error_code`. The code says `parse_mismatch`; the message names the
+renderer that stopped matching, which is the difference between knowing a
+source is broken and knowing what to change.
 
 A source's `status` distinguishes causes that need different fixes:
 

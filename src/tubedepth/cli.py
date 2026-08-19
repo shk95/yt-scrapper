@@ -421,6 +421,32 @@ def key_create(
     typer.echo("  Store it now — nothing here keeps a copy.")
 
 
+@keys_app.command("list")
+def key_list(
+    data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
+        "var"
+    ),
+) -> None:
+    """What keys this instance has, and when each was last used.
+
+    "Is anything still using this" is the question anyone asks before revoking,
+    and until now it could not be answered: the column was written on every
+    verified request and read by nothing, while the secret is shown once and
+    cannot be worked out afterwards.
+
+    Revoked keys stay listed. Jobs carry `api_key_id`, so a row that vanished
+    would make every job that key submitted unattributable.
+    """
+    listed = ApiKeyService(_database(data_directory)).listed()
+    if not listed:
+        typer.echo("no keys; mint one with `tubedepth key create --label <name>`")
+        return
+    for entry in listed:
+        used = entry.last_used_at.strftime("%Y-%m-%d %H:%M") if entry.last_used_at else "never used"
+        state = " (revoked)" if entry.revoked else ""
+        typer.echo(f"{entry.identifier}  {entry.key_prefix}…  {used:<16}  {entry.label}{state}")
+
+
 @keys_app.command("revoke")
 def key_revoke(
     identifier: Annotated[str, typer.Argument(help="The key identifier, not the secret")],

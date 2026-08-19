@@ -36,6 +36,15 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Added
 
+- **The schema answers the questions it was already recording.** Four columns
+  were written on every relevant operation and read by nothing.
+  `last_error_message` now reaches `/healthz` and the dashboard — the code says
+  `parse_mismatch`, the message names the renderer that stopped matching, and
+  only one of those tells you what to change. `api_key_id` and `claimed_by`
+  reach `GET /v1/jobs`, so "which client is running away" and "which worker is
+  stuck on this" no longer mean opening SQLite by hand. `tubedepth key list`
+  says when each key was last used, which is the question anyone asks before
+  revoking one.
 - **`GET` and `PATCH /v1/control` — an operator can pause the worker.** The API
   and the worker are separate processes on purpose, so nothing in one can reach
   into the other; the control is a row the worker reads at the top of each
