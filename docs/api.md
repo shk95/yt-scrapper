@@ -105,6 +105,25 @@ registry, so it is never out of date; the copy here says what each one is for.
 
 <!-- kinds:end -->
 
+**To enumerate a channel completely, use `playlist.items` on its uploads
+playlist** — the channel id with `UC` swapped for `UU`. `channel.videos` reads
+the `/videos` tab, which holds neither Shorts nor past live streams at any cap.
+Measured on one 697-video channel, 2026-08-20:
+
+| | items | requests |
+| --- | --- | --- |
+| `playlist.items` on `UU…` | **698** | **8** |
+| `channel.videos` | 474 | 16 |
+
+So the uploads playlist is both wider and cheaper — it pages a hundred at a
+time where the tab pages thirty. The 224 it adds are 216 Shorts, 3 past live
+streams, and 5 entries that appear in the grid with titles and view counts and
+cannot be watched at all; those five become jobs that fail as `not_found`,
+because nothing in a flat listing distinguishes them from a live video.
+
+Mind the cap: `TUBEDEPTH_LISTING_LIMIT` is deployment-wide, so at its default
+of 100 this returns 100 of the 698.
+
 `target` is what the `target` field of a submission has to name. A video
 accepts an id, a `youtu.be` link or a `watch?v=` URL; a channel accepts an id,
 an `@handle` or a channel URL — normalisation happens before the job is
