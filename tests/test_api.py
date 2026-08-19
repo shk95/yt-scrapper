@@ -897,3 +897,40 @@ def test_a_batch_larger_than_the_cap_is_refused(
     )
 
     assert response.status_code == 422
+
+
+def test_the_worker_can_be_paused_and_resumed_through_the_api(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """The API and the worker are separate processes, so this is the channel.
+
+    Nothing in the API can reach into the worker to stop it — that split is
+    what keeps a yt-dlp crash from taking the API down — so the control is a
+    row the worker reads, and this route is what writes it.
+    """
+    client, key, _ = api
+
+    paused = client.patch(
+        "/v1/control",
+        json={"paused": True, "reason": "watching a quota"},
+        headers={"X-API-Key": key},
+    )
+    reported = client.get("/v1/control", headers={"X-API-Key": key})
+    resumed = client.patch("/v1/control", json={"paused": False}, headers={"X-API-Key": key})
+
+    assert paused.json()["paused"] is True
+    assert reported.json() == {**paused.json()}
+    assert reported.json()["reason"] == "watching a quota"
+    assert resumed.json()["paused"] is False
+
+
+def test_control_reports_a_running_worker_before_anyone_has_touched_it(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """No row yet is not an error; it means nobody has ever paused this."""
+    client, key, _ = api
+
+    response = client.get("/v1/control", headers={"X-API-Key": key})
+
+    assert response.status_code == 200
+    assert response.json()["paused"] is False

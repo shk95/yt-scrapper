@@ -113,13 +113,23 @@
   </section>
 
   <section>
-    <h2>Queue</h2>
+    <h2>
+      Queue
+      <span class="pill" id="control-said"></span>
+      <div class="grow"></div>
+      <button id="pause"></button>
+    </h2>
     <div class="body"><div class="counts" id="counts"></div></div>
   </section>
 
   <section>
     <h2>Sources <span class="pill">what each kind has been doing</span></h2>
     <div class="body"><table id="health"></table></div>
+  </section>
+
+  <section>
+    <h2>Routes <span class="pill">what the rate controller currently allows</span></h2>
+    <div class="body"><table id="lanes"></table></div>
   </section>
 
   <section>
@@ -211,6 +221,30 @@ const bytes = (n) => n == null ? "—"
 const escape = (value) => String(value ?? "").replace(/[<>&"]/g, (c) =>
   ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
 
+let paused = false;
+
+async function loadControl() {
+  const control = (await api("/v1/control")).body;
+  paused = control.paused;
+  $("pause").textContent = paused ? "resume" : "pause";
+  // Say what pausing does and does not do, where the button is. It stops the
+  // worker claiming; it does not stop an extraction already in flight, which
+  // keeps spending requests until it finishes.
+  $("control-said").textContent = paused
+    ? `claiming nothing${control.reason ? " — " + control.reason : ""}; work already running still finishes`
+    : "";
+}
+
+$("pause").onclick = async () => {
+  try {
+    const reason = paused ? null : (prompt("why? (optional — helps whoever lifts it)") || null);
+    await api("/v1/control", { method: "PATCH", body: { paused: !paused, reason } });
+    await load();
+  } catch (error) {
+    say(error.message, true);
+  }
+};
+
 async function loadHealth() {
   const health = await api("/healthz");
   $("version").textContent = health.version;
@@ -227,6 +261,25 @@ async function loadHealth() {
       <td>${ago(source.last_success_at)}</td>
       <td class="err">${escape(source.last_error_code || "")}</td>
     </tr>`).join("");
+
+  // A quarantined route and an empty queue look identical from here unless
+  // this says otherwise, which is the whole reason the worker writes it down.
+  $("lanes").innerHTML = health.lanes.length
+    ? "<tr><th>egress</th><th>lane</th><th>window</th><th>in flight</th><th>state</th><th>seen</th></tr>" +
+      health.lanes.map((lane) => {
+        const held = lane.quarantined_until && new Date(lane.quarantined_until) > new Date();
+        return `<tr>
+          <td class="mono">${escape(lane.egress)}</td>
+          <td class="mono">${escape(lane.lane)}</td>
+          <td>${lane.window.toFixed(2)}</td>
+          <td>${lane.in_flight}</td>
+          <td class="status ${held ? "blocked" : "healthy"}">${held
+            ? "quarantined, " + ago(lane.quarantined_until).replace(" ago", " left")
+            : "open"}${lane.quarantine_streak ? ` (streak ${lane.quarantine_streak})` : ""}</td>
+          <td>${ago(lane.observed_at)}</td>
+        </tr>`;
+      }).join("")
+    : '<tr><td class="note">no route has been used yet</td></tr>';
 
   if (!$("kind").dataset.filled) {
     const options = health.sources.map((source) => `<option>${escape(source.kind)}</option>`).join("");
@@ -395,6 +448,7 @@ function actionsFor(job) {
 
 async function load() {
   try {
+    await loadControl();
     await loadHealth();
     cursor = null; rows = [];
     await loadRecords();

@@ -33,8 +33,8 @@ from .database import Database
 from .egress.control import RateController, Verdict, verdict_for_error
 from .egress.transport import DirectEgress, Egress
 from .errors import TubedepthError, UpstreamError
-from .health import SourceHealthService
-from .models import Job, JobState, utcnow
+from .health import LaneHealthService, SourceHealthService
+from .models import WORKER_CONTROL_ID, Job, JobState, WorkerControl, utcnow
 from .payload_store import PayloadStore
 from .repositories import JobRepository
 from .retrying import backoff_for_attempt, is_retryable
@@ -92,6 +92,7 @@ class Worker:
         # about consecutive attempts, and reconstructing that from rows means
         # scanning them in order every time anyone asks.
         self._health = health or SourceHealthService(database=database)
+        self._lanes = LaneHealthService(database=database)
         # Absent by default, and silence is the safer default: an unsigned
         # callback is one a receiver cannot tell from anyone else who learned
         # the URL, and a callback URL travels in a job submission rather than
@@ -131,6 +132,18 @@ class Worker:
             return 0
         return self._webhooks.deliver_pending()
 
+    def paused(self) -> bool:
+        """Whether an operator has told this worker to stop claiming.
+
+        Read at the top of a drain rather than watched: `tubedepth work` drains
+        and exits, and the unit restarts it every ten seconds, so that loop is
+        what makes a pause take effect — no polling of our own, and no state to
+        get out of step with the row.
+        """
+        with self._database.session(readonly=True) as session:
+            control = session.get(WorkerControl, WORKER_CONTROL_ID)
+            return bool(control and control.paused)
+
     def reap(self) -> int:
         """Return jobs whose worker stopped reporting. Safe to call often."""
         with self._database.session() as session:
@@ -155,6 +168,10 @@ class Worker:
         announced at all. One path with a bound rather than two paths, because
         two paths are how they came to disagree.
         """
+        if self.paused():
+            logger.info("worker is paused; claiming nothing")
+            return 0
+
         self.deliver_webhooks()
         reaped = self.reap()
         if reaped:
@@ -298,6 +315,15 @@ class Worker:
                 return
             finally:
                 self._controller.release(self._egress.name, source.lane, verdict)
+                # Written on the same tick as source health and for the same
+                # reason: the controller's state is a dict in this process and
+                # dies with it, while "is this route being refused" is asked
+                # from the API. Without it a quarantined lane is indis-
+                # tinguishable from an empty queue.
+                state, monotonic = self._controller.observed(self._egress.name, source.lane)
+                self._lanes.observe(
+                    self._egress.name, source.lane.value, state=state, monotonic=monotonic
+                )
         finally:
             self._leave(source.cost)
 

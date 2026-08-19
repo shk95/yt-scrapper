@@ -9,7 +9,7 @@ import enum
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Enum, Index, Integer, String, Text, TypeDecorator
+from sqlalchemy import DateTime, Enum, Float, Index, Integer, String, Text, TypeDecorator
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -215,6 +215,66 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+
+# One row, addressed by a fixed key. See WorkerControl.
+WORKER_CONTROL_ID = "worker"
+
+
+class WorkerControl(Base):
+    """What an operator has told the worker to do. One row.
+
+    The worker is a separate process from the API on purpose — a yt-dlp crash
+    must not take the API down — so nothing in the API can reach into its
+    memory to stop it. A row is the only channel the two share, and it is the
+    same channel `source_health` and `lane_health` already use, running the
+    other way.
+
+    A single row rather than a settings table: there is one worker, and a
+    schema that implies several would be a promise nothing here keeps.
+    """
+
+    __tablename__ = "worker_control"
+
+    # Fixed. The primary key exists so the row is addressable, not so there
+    # can be more than one of them.
+    identifier: Mapped[str] = mapped_column(String(32), primary_key=True, default="worker")
+    # Paused means "claim nothing", not "discard". Queued jobs stay queued and
+    # nothing is failed on the way in, so resuming is the whole of the undo.
+    paused: Mapped[bool] = mapped_column(default=False)
+    # Why, in the operator's words. A pause nobody can explain an hour later is
+    # a pause nobody dares lift.
+    reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    changed_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+
+class LaneHealth(Base):
+    """One row per (egress, lane): what the rate controller currently believes.
+
+    Same argument as SourceHealth, one level along — the controller's state is
+    a dict in the worker's memory and dies with the process, while the question
+    "is this route being refused right now" is asked by the API and by whoever
+    is looking at the dashboard when collection has stopped.
+
+    Without this the only symptom of a quarantined lane is that nothing is
+    happening, which is indistinguishable from an empty queue.
+    """
+
+    __tablename__ = "lane_health"
+
+    egress: Mapped[str] = mapped_column(String(64), primary_key=True)
+    lane: Mapped[str] = mapped_column(String(32), primary_key=True)
+    # How many requests the controller will allow at once. It is a measured
+    # ceiling rather than a setting: it halves on a refusal and grows back.
+    window: Mapped[float] = mapped_column(Float, default=1.0)
+    in_flight: Mapped[int] = mapped_column(default=0)
+    quarantine_streak: Mapped[int] = mapped_column(default=0)
+    # Wall clock, converted at write time. The controller measures in
+    # `time.monotonic` because this host's wall clock jumps after the Windows
+    # host sleeps — but a reader needs a time it can compare to its own, and a
+    # monotonic reading from another process means nothing here.
+    quarantined_until: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
 
 
 class SourceHealth(Base):

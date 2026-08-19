@@ -181,3 +181,65 @@ def test_the_worker_records_health_as_it_goes(tmp_path: Path) -> None:
     # not count against the source even though the job failed.
     assert "video.failing" not in recorded or recorded["video.failing"].consecutive_failures == 0
     assert health is not None
+
+
+def test_the_worker_records_lane_health_as_it_goes(tmp_path: Path) -> None:
+    """The check `renew_lease` did not have, applied to the other health table.
+
+    A recorder nothing calls is a table that stays empty while the dashboard
+    shows nothing wrong — and "nothing is happening" is exactly what a
+    quarantined lane and an empty queue both look like.
+    """
+    from test_worker import EchoSource, _registry, enqueue
+
+    from tubedepth.models import LaneHealth
+    from tubedepth.payload_store import PayloadStore
+    from tubedepth.worker import Worker
+
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    worker = Worker(
+        database=database,
+        registry=_registry(EchoSource()),
+        payloads=PayloadStore(tmp_path / "payloads"),
+        name="worker-1",
+        concurrency=1,
+    )
+    enqueue(database, "video.echo", "dQw4w9WgXcQ")
+
+    worker.drain()
+
+    with database.session() as session:
+        recorded = session.query(LaneHealth).all()
+        assert [(row.egress, row.lane) for row in recorded] == [("direct", "youtube")]
+        assert recorded[0].window > 0
+        assert recorded[0].quarantined_until is None
+
+
+def test_a_quarantined_lane_is_recorded_with_a_deadline_a_reader_can_use(
+    tmp_path: Path,
+) -> None:
+    """The controller measures in `time.monotonic` because this host's wall
+    clock jumps after the Windows host sleeps. A monotonic reading from another
+    process means nothing, so the deadline is converted where both readings are
+    available and only the result is stored."""
+    from datetime import UTC, datetime
+
+    from tubedepth.egress.control import Lane, RateController, Verdict
+    from tubedepth.health import LaneHealthService
+    from tubedepth.models import LaneHealth
+
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    controller = RateController()
+    controller.record("direct", Lane.YOUTUBE, Verdict.BLOCKED)
+    state, monotonic = controller.observed("direct", Lane.YOUTUBE)
+
+    LaneHealthService(database=database).observe(
+        "direct", "youtube", state=state, monotonic=monotonic
+    )
+
+    with database.session() as session:
+        row = session.query(LaneHealth).one()
+    assert row.quarantined_until is not None
+    assert row.quarantined_until > datetime.now(UTC), "the quarantine was recorded as already over"

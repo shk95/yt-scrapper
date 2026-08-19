@@ -143,6 +143,33 @@ curl -s localhost:8080/healthz
 }
 ```
 
+`lanes` is what the rate controller currently allows on each route, written by
+the worker because the controller's state is a dict in the worker's memory and
+dies with the process.
+
+```json
+{
+  "lanes": [
+    {
+      "egress": "direct",
+      "lane": "youtube",
+      "window": 3.5,
+      "in_flight": 1,
+      "quarantine_streak": 0,
+      "quarantined_until": null,
+      "observed_at": "2026-08-20T09:12:44Z"
+    }
+  ]
+}
+```
+
+`window` is a **measured** ceiling rather than a setting: it halves when an
+upstream refuses and grows back on success, so a window well under one is the
+number that explains a queue draining slowly. `quarantined_until` is null while
+the route is open, and present means nothing will be attempted on it until then
+— which from outside is indistinguishable from an empty queue unless something
+says so.
+
 `status` stays `"ok"` while individual sources are not, because this endpoint is
 read by things that restart processes and one broken parser is not a reason to
 cycle an API whose other ten kinds are still collecting. The bad news is in
@@ -161,6 +188,39 @@ A source's `status` distinguishes causes that need different fixes:
 
 `unknown` and `stale` are deliberately not green. A dashboard showing healthy
 for something nobody has run is worse than one admitting it does not know.
+
+---
+
+## `GET /v1/control`, `PATCH /v1/control`
+
+Whether the worker is claiming, and the only way to tell it not to.
+
+```sh
+curl -s -X PATCH -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+     -d '{"paused": true, "reason": "watching a quota"}' \
+     localhost:8080/v1/control
+```
+
+```json
+{ "paused": true, "reason": "watching a quota", "changed_at": "2026-08-20T09:12:44Z" }
+```
+
+**This does not reach into the worker.** The API and the worker are separate
+processes on purpose — a yt-dlp crash must not take the API down — so nothing
+here can stop anything directly. It writes a row the worker reads at the top of
+each drain, and `tubedepth work` drains and exits with its unit restarting it
+every ten seconds, so a pause takes effect within about that.
+
+**A job already running finishes.** Pausing means claim nothing; it is not a
+cancellation, and the extraction in flight keeps spending requests until it is
+done. To stop one of those, cancel it.
+
+Queued jobs stay queued and nothing is failed on the way in, so resuming is the
+whole of the undo. `reason` is optional and worth filling in: a pause nobody can
+explain an hour later is a pause nobody dares lift.
+
+No row yet means nobody has ever paused this, which is reported as running
+rather than as an error.
 
 ---
 

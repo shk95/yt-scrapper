@@ -44,7 +44,7 @@ from ..errors import (
 )
 from ..health import SourceHealthService
 from ..identifiers import normalize_target
-from ..models import Artifact, Job
+from ..models import WORKER_CONTROL_ID, Artifact, Job, LaneHealth, WorkerControl, utcnow
 from ..payload_store import PayloadStore
 from ..repositories import JobRepository, JobState
 from ..services.keys import ApiKeyService, VerifiedKey
@@ -201,12 +201,46 @@ class ArtifactListView(BaseModel):
     cursor: str | None = None
 
 
+class LaneHealthView(BaseModel):
+    """What the rate controller currently allows on one route.
+
+    `window` is a measured ceiling rather than a setting — it halves when the
+    upstream refuses and grows back — so a window well under one is the number
+    that explains why a queue is draining slowly.
+    """
+
+    egress: str
+    lane: str
+    window: float
+    in_flight: int
+    quarantine_streak: int
+    # Null when the lane is open. Present means nothing on this route will be
+    # attempted until then, which from outside is indistinguishable from an
+    # empty queue unless something says so.
+    quarantined_until: datetime | None = None
+    observed_at: datetime | None = None
+
+
+class ControlView(BaseModel):
+    paused: bool
+    reason: str | None = None
+    changed_at: datetime | None = None
+
+
+class ControlChange(BaseModel):
+    paused: bool
+    # Optional, and worth filling in. A pause nobody can explain an hour later
+    # is a pause nobody dares lift.
+    reason: str | None = None
+
+
 class HealthView(BaseModel):
     status: str
     version: str
     queued: int = Field(default=0)
     running: int = Field(default=0)
     sources: list[SourceHealthView] = Field(default_factory=list)
+    lanes: list[LaneHealthView] = Field(default_factory=list)
 
 
 # Dependencies live at module level, not inside the factory.
@@ -368,11 +402,26 @@ def create_application(
         # read by things that restart processes, and one broken parser is not a
         # reason to cycle an API whose other nine kinds are still collecting.
         # The bad news travels in the detail, where a person reads it.
+        lanes = open_session.scalars(
+            select(LaneHealth).order_by(LaneHealth.egress, LaneHealth.lane)
+        ).all()
         return HealthView(
             status="ok",
             version=__version__,
             queued=counts[JobState.QUEUED],
             running=counts[JobState.RUNNING],
+            lanes=[
+                LaneHealthView(
+                    egress=row.egress,
+                    lane=row.lane,
+                    window=row.window,
+                    in_flight=row.in_flight,
+                    quarantine_streak=row.quarantine_streak,
+                    quarantined_until=row.quarantined_until,
+                    observed_at=row.observed_at,
+                )
+                for row in lanes
+            ],
             sources=[
                 SourceHealthView(
                     kind=entry.kind,
@@ -390,6 +439,50 @@ def create_application(
     # added later is protected by construction and a forgotten decorator cannot
     # open a hole. A test walks the routes and asserts it.
     versioned = APIRouter(prefix="/v1", dependencies=[Depends(require_api_key)])
+
+    @versioned.get("/control", response_model=ControlView)
+    def read_control(
+        open_session: Annotated[Session, Depends(get_reading_session)],
+    ) -> ControlView:
+        """Whether the worker has been told to stop claiming.
+
+        No row means nobody has ever paused this, which is not an error and is
+        reported as running.
+        """
+        control = open_session.get(WorkerControl, WORKER_CONTROL_ID)
+        if control is None:
+            return ControlView(paused=False)
+        return ControlView(
+            paused=control.paused, reason=control.reason, changed_at=control.changed_at
+        )
+
+    @versioned.patch("/control", response_model=ControlView)
+    def change_control(
+        change: ControlChange,
+        open_session: Annotated[Session, Depends(get_session)],
+    ) -> ControlView:
+        """Pause or resume the worker.
+
+        The API and the worker are separate processes on purpose, so this
+        cannot reach in and stop anything. It writes the row the worker reads
+        at the top of each drain, and `tubedepth work` drains and exits with
+        the unit restarting it every ten seconds — so a pause takes effect
+        within about that, and a job already running finishes.
+
+        Paused means claim nothing. Queued jobs stay queued and nothing is
+        failed on the way in, so resuming is the whole of the undo.
+        """
+        control = open_session.get(WorkerControl, WORKER_CONTROL_ID) or WorkerControl(
+            identifier=WORKER_CONTROL_ID
+        )
+        control.paused = change.paused
+        control.reason = change.reason
+        control.changed_at = utcnow()
+        open_session.add(control)
+        open_session.flush()
+        return ControlView(
+            paused=control.paused, reason=control.reason, changed_at=control.changed_at
+        )
 
     @versioned.get("/sources")
     def list_sources(

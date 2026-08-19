@@ -20,8 +20,9 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 
 from .database import Database
+from .egress.control import LaneState
 from .errors import ExtractionError, RateLimitedError, UpstreamError
-from .models import SourceHealth, utcnow
+from .models import LaneHealth, SourceHealth, utcnow
 
 # How many failures in a row before a source is called broken rather than
 # unlucky. Three, because one is noise and two is a coincidence — and because
@@ -135,3 +136,40 @@ class SourceHealthService:
         if row.last_success_at is not None and now - row.last_success_at > self._stale_after:
             return "stale"
         return "healthy"
+
+
+class LaneHealthService:
+    """Write what the rate controller believes somewhere another process can read.
+
+    The controller keeps its state in a dict keyed by `(egress, lane)` and
+    measures time with `time.monotonic`, both of which are correct and both of
+    which are invisible outside the worker. So a quarantined lane looks exactly
+    like an empty queue from the API, from the dashboard, and from anyone
+    trying to work out why collection stopped.
+
+    Written on the same tick as source health, for the same reason: the process
+    that knows is not the process being asked.
+    """
+
+    def __init__(self, *, database: Database, clock: Callable[[], datetime] = utcnow) -> None:
+        self._database = database
+        self._clock = clock
+
+    def observe(self, egress: str, lane: str, *, state: LaneState, monotonic: float) -> None:
+        """Record one lane's state, converting its deadline to a wall clock.
+
+        `monotonic` is the controller's own reading taken at the same moment,
+        so the remaining quarantine is a difference between two monotonic
+        values — which is the only arithmetic on them that is meaningful — and
+        only the result crosses into wall-clock time.
+        """
+        now = self._clock()
+        remaining = state.quarantined_until - monotonic
+        with self._database.session() as session:
+            row = session.get(LaneHealth, (egress, lane)) or LaneHealth(egress=egress, lane=lane)
+            row.window = state.window
+            row.in_flight = state.in_flight
+            row.quarantine_streak = state.quarantine_streak
+            row.quarantined_until = now + timedelta(seconds=remaining) if remaining > 0 else None
+            row.observed_at = now
+            session.add(row)
