@@ -21,7 +21,7 @@ from sqlalchemy import select
 
 from .database import Database
 from .egress.control import LaneState
-from .errors import ExtractionError, RateLimitedError, UpstreamError
+from .errors import ConfigurationError, ExtractionError, RateLimitedError, UpstreamError
 from .models import LaneHealth, SourceHealth, utcnow
 
 # How many failures in a row before a source is called broken rather than
@@ -57,13 +57,21 @@ def _counts_against_the_source(error: BaseException | None) -> bool:
     fail legitimately and repeatedly; a sweep of such videos would paint the
     source red while it works perfectly.
 
-    So only two kinds of failure count. `ExtractionError` means our parser no
+    So three kinds of failure count. `ExtractionError` means our parser no
     longer matches what YouTube sends, which is the exact thing this table
     exists to surface. `UpstreamError` and its subclasses mean the other end
-    refused or could not be reached. Everything else — a missing caption track,
-    a private video, a bad identifier — is a fact about the target.
+    refused or could not be reached. `ConfigurationError` means the source
+    cannot run at all — a missing API key, a credential the other end will not
+    accept — and excluding it left `trending.videos` reporting as never tried
+    while every job it had failed, which is the lie the docstring above is
+    about.
+
+    Everything else — a missing caption track, a private video, a bad
+    identifier — is a fact about the **target**, and that is the line: a target
+    this source cannot serve says nothing about the source, and a source that
+    cannot serve anything says nothing about the target.
     """
-    return isinstance(error, ExtractionError | UpstreamError)
+    return isinstance(error, ExtractionError | UpstreamError | ConfigurationError)
 
 
 class SourceHealthService:

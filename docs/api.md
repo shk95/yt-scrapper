@@ -546,6 +546,11 @@ withdrawn — its payloads are wrong rather than merely old, and serving them as
 history would launder a known-bad observation. Not a 404: the observation
 happened, and a 404 would claim it never did.
 
+**409 `conflict`** if the observation's schema version was never recorded and
+its kind has withdrawn one. A null version is not "fine", it is "not known" —
+and a kind that has withdrawn a version has rows predating the column that
+could be either. Run `tubedepth backfill-schema-versions` and ask again.
+
 404 `not_found` for a digest this instance never stored, and for one whose
 payload has since aged out of retention.
 

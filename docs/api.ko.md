@@ -505,6 +505,10 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/artifacts/b9f4c0e2...
 아니라 틀린 것이고, 그것을 이력으로 내주는 것은 잘못된 것으로 알려진 관측을 세탁하는 일이다.
 404가 아닌 이유는, 관측은 실제로 일어났고 404는 일어나지 않았다고 말하기 때문이다.
 
+관측의 schema 버전이 기록된 적 없고 그 kind가 어떤 버전을 철회한 적이 있다면 **409 `conflict`**.
+null 버전은 "괜찮다"가 아니라 "모른다"이고, 버전을 철회한 kind에는 컬럼보다 오래된 행이 있어서
+둘 중 어느 쪽인지 알 수 없다. `tubedepth backfill-schema-versions`를 돌린 뒤 다시 물으면 된다.
+
 이 인스턴스가 저장한 적 없는 digest, 그리고 payload가 retention을 지나 사라진 digest는
 404 `not_found`.
 
