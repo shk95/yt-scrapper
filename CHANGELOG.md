@@ -34,6 +34,14 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
   carrying thirty ids on its `ExecStart`. A list that cannot be read is refused
   rather than treated as empty.
 
+### Added
+
+- **`TUBEDEPTH_COOKIES_FILE` now does what the troubleshooting guide said it
+  did.** Point it at a Netscape-format cookie jar and the worker carries it
+  into every extraction. A path that is not there is refused at startup rather
+  than dropped, because silently ignoring a typo behaves exactly like the
+  version that read nothing at all.
+
 ### Fixed
 
 - **An expensive kind is queued with fewer attempts than a cheap one.**

@@ -13,6 +13,8 @@ was the one thing that never reached it.
 
 from __future__ import annotations
 
+from pathlib import Path
+
 import pytest
 from yt_dlp.utils import DownloadError
 
@@ -77,3 +79,61 @@ def test_the_runtime_translates_rather_than_leaking_yt_dlps_exception() -> None:
 
     with pytest.raises(RateLimitedError):
         BotCheckedRuntime().extract("dQw4w9WgXcQ", egress=DirectEgress())
+
+
+def test_a_configured_cookie_jar_reaches_yt_dlp(tmp_path: Path) -> None:
+    """docs/troubleshooting.md prescribes this as the first rung of the ladder.
+
+    Nothing read the variable, so an operator locked out by the bot check
+    exported a jar, set it, restarted the worker, and every request went out
+    byte-identical. The conclusion available to them was that cookies do not
+    help — and the next rung is a different egress, which on this host means a
+    datacenter address that the README says is expected to make the YouTube
+    lane worse.
+    """
+    from tubedepth.egress.transport import DirectEgress
+    from tubedepth.sources.ytdlp_runtime import LibraryYtdlpRuntime
+
+    jar = tmp_path / "cookies.txt"
+    jar.write_text("# Netscape HTTP Cookie File\n", encoding="utf-8")
+    seen: dict[str, object] = {}
+
+    class Capturing(LibraryYtdlpRuntime):
+        def _run(self, target: str, options: dict[str, object]) -> object:
+            seen.update(options)
+            return {"id": target}
+
+    Capturing(cookies_file=jar).extract("dQw4w9WgXcQ", egress=DirectEgress())
+
+    assert seen["cookiefile"] == str(jar)
+
+
+def test_a_cookie_jar_that_is_not_there_is_refused_rather_than_ignored(tmp_path: Path) -> None:
+    """Silently ignoring it is the bug, one layer along.
+
+    A path with a typo in it would otherwise behave exactly like the version
+    that read nothing at all, and the operator would draw the same wrong
+    conclusion from the same absent evidence.
+    """
+    from tubedepth.errors import ConfigurationError
+    from tubedepth.sources.ytdlp_runtime import LibraryYtdlpRuntime
+
+    with pytest.raises(ConfigurationError, match="cookie"):
+        LibraryYtdlpRuntime(cookies_file=tmp_path / "not-there.txt")
+
+
+def test_no_cookie_jar_configured_sends_no_cookie_option() -> None:
+    """The default is unchanged: nothing about the request moves."""
+    from tubedepth.egress.transport import DirectEgress
+    from tubedepth.sources.ytdlp_runtime import LibraryYtdlpRuntime
+
+    seen: dict[str, object] = {}
+
+    class Capturing(LibraryYtdlpRuntime):
+        def _run(self, target: str, options: dict[str, object]) -> object:
+            seen.update(options)
+            return {"id": target}
+
+    Capturing().extract("dQw4w9WgXcQ", egress=DirectEgress())
+
+    assert "cookiefile" not in seen
