@@ -338,3 +338,27 @@ def test_every_option_the_justfile_passes_exists() -> None:
         missing += [f"{subcommand} {option}" for option in options if option not in help_text]
 
     assert not missing, f"the Justfile passes options that do not exist: {missing}"
+
+
+def test_every_route_the_dashboard_calls_is_served() -> None:
+    """The dashboard is the third surface that names routes, and had no check.
+
+    `deploy/*.service` is checked for the commands it runs and the Justfile now
+    is too, because a file that names something which does not exist fails only
+    when someone runs it — and for the dashboard that means in a browser, on a
+    page whose whole job is to be trusted when something is already wrong.
+
+    One path is skipped on purpose: `/v1/${table}` is built from a select whose
+    options are `jobs` and `artifacts`, so the literal is not in the source.
+    Both of those are covered by their own entries here.
+    """
+    dashboard = (ROOT / "src/tubedepth/api/dashboard.html").read_text()
+    served = {normalise(path) for path in served_paths()} | {"/healthz"}
+
+    called = {
+        normalise(re.sub(r"\$\{[^}]*\}", "{}", path))
+        for path in re.findall(r'["`](/(?:v1/|healthz)[^"`?\s]*)', dashboard)
+    }
+    unknown = sorted(path for path in called - served if path != "/v1/{}")
+
+    assert not unknown, f"the dashboard calls routes that are not served: {unknown}"

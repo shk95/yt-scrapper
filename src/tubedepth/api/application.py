@@ -104,6 +104,31 @@ class JobView(BaseModel):
     finished_at: datetime | None = None
 
 
+MAXIMUM_BATCH = 500
+
+
+class BatchSubmission(BaseModel):
+    kind: str
+    targets: list[str]
+    refresh: bool = False
+    webhook_url: HttpUrl | None = None
+
+
+class HeldView(BaseModel):
+    """A target the batch did not have to queue, and where its answer is."""
+
+    target: str
+    digest: str
+
+
+class BatchView(BaseModel):
+    queued: list[JobView]
+    # Reported rather than returned. A hundred cached payloads is megabytes,
+    # and the caller asked to collect these, not to download them — the digest
+    # is what `GET /v1/artifacts/{digest}` needs to hand any of them over.
+    held: list[HeldView]
+
+
 class SourceHealthView(BaseModel):
     """One source's recent behaviour, as an operator needs to read it.
 
@@ -420,6 +445,74 @@ def create_application(
             state=job.state.value,
             attempt_count=job.attempt_count,
         )
+
+    @versioned.post("/jobs/batch", response_model=BatchView, status_code=202)
+    def submit_batch(
+        submission: BatchSubmission,
+        open_session: Annotated[Session, Depends(get_session)],
+        api_key: Annotated[VerifiedKey, Depends(require_api_key)],
+        registry: Annotated[SourceRegistry, Depends(get_registry)],
+        payloads: Annotated[PayloadStore, Depends(get_payloads)],
+        database: Annotated[Database, Depends(get_database)],
+    ) -> BatchView:
+        """Queue one kind for many targets, at the cost of one request.
+
+        A key is allowed sixty requests a minute, so a hundred-video sweep
+        submitted one at a time is rate-limited before it is half done. That is
+        the difference between an API that can express a sweep and one that can
+        run it.
+
+        **All or nothing.** Every target is normalised before anything is
+        queued, so one bad id refuses the batch instead of queueing the other
+        ninety-nine and answering 202 — a partial sweep is the worst outcome
+        here, because the caller believes it ran and the gap surfaces later as
+        an absence nobody is looking for.
+
+        Unlike `POST /v1/jobs` this never returns a payload. A target already
+        held is named with its digest, which is what
+        `GET /v1/artifacts/{digest}` needs; returning a hundred bodies would
+        make a submission a bulk download.
+        """
+        source = registry.get(submission.kind)
+        if not submission.targets:
+            raise ValidationError("a batch names at least one target")
+        if len(submission.targets) > MAXIMUM_BATCH:
+            raise ValidationError(
+                f"a batch is at most {MAXIMUM_BATCH} targets, and this one names "
+                f"{len(submission.targets)}"
+            )
+        # Normalised first, all of them, before a single row is added.
+        targets = [normalize_target(source.target_type, target) for target in submission.targets]
+
+        collection = CollectionService(payloads=payloads, database=database, registry=registry)
+        queued: list[JobView] = []
+        held: list[HeldView] = []
+        for target in targets:
+            if not submission.refresh:
+                cached = collection.cached(submission.kind, target)
+                if cached is not None:
+                    held.append(HeldView(target=target, digest=cached.payload.digest))
+                    continue
+            job = Job(
+                kind=submission.kind,
+                target=target,
+                api_key_id=api_key.identifier,
+                refresh=submission.refresh,
+                max_attempts=attempts_for(source),
+                webhook_url=str(submission.webhook_url) if submission.webhook_url else None,
+            )
+            open_session.add(job)
+            open_session.flush()
+            queued.append(
+                JobView(
+                    job_id=job.identifier,
+                    kind=job.kind,
+                    target=job.target,
+                    state=job.state.value,
+                    attempt_count=job.attempt_count,
+                )
+            )
+        return BatchView(queued=queued, held=held)
 
     @versioned.get("/jobs", response_model=JobListView)
     def list_jobs(

@@ -802,3 +802,98 @@ def test_an_observation_from_a_retracted_version_is_gone_rather_than_served(
 
     assert response.status_code == 410
     assert response.json()["error"]["code"] == "retracted"
+
+
+def test_a_batch_queues_every_target_in_one_request(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """One charge against the allowance, not one per target.
+
+    A key is allowed 60 requests a minute, so a hundred-video sweep submitted
+    one at a time is rate-limited before it is half done — which makes the
+    difference between "the API can express this" and "the API can do this".
+    """
+    client, key, database = api
+
+    response = client.post(
+        "/v1/jobs/batch",
+        json={"kind": "video.echo", "targets": ["dQw4w9WgXcQ", "nfgdJyL-Jmg"], "refresh": True},
+        headers={"X-API-Key": key},
+    )
+
+    assert response.status_code == 202
+    assert len(response.json()["queued"]) == 2
+    with database.session() as session:
+        assert session.query(Job).count() == 2
+        assert all(job.refresh for job in session.query(Job).all())
+
+
+def test_a_batch_says_which_targets_it_did_not_need_to_queue(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    """Reporting rather than returning: a hundred cached payloads is megabytes,
+    and the caller asked to collect, not to download."""
+    from tubedepth.worker import Worker
+
+    client, key, database = api
+    registry = SourceRegistry()
+    registry.register(EchoSource())  # type: ignore[arg-type]
+    client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+        headers={"X-API-Key": key},
+    )
+    Worker(
+        database=database,
+        payloads=PayloadStore(tmp_path / "payloads"),
+        registry=registry,
+        name="test",
+        concurrency=1,
+    ).drain()
+
+    response = client.post(
+        "/v1/jobs/batch",
+        json={"kind": "video.echo", "targets": ["dQw4w9WgXcQ", "nfgdJyL-Jmg"]},
+        headers={"X-API-Key": key},
+    )
+
+    body = response.json()
+    assert [held["target"] for held in body["held"]] == ["dQw4w9WgXcQ"]
+    assert [job["target"] for job in body["queued"]] == ["nfgdJyL-Jmg"]
+
+
+def test_a_batch_that_names_one_bad_target_queues_nothing(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """All or nothing, because a partial answer to a sweep is the worst one.
+
+    Queueing 99 of 100 and returning 202 leaves the caller believing the sweep
+    ran; the missing one surfaces as an absence nobody looks for.
+    """
+    client, key, database = api
+
+    response = client.post(
+        "/v1/jobs/batch",
+        json={"kind": "video.echo", "targets": ["dQw4w9WgXcQ", "not a video id"]},
+        headers={"X-API-Key": key},
+    )
+
+    assert response.status_code == 422
+    with database.session() as session:
+        assert session.query(Job).count() == 0
+
+
+def test_a_batch_larger_than_the_cap_is_refused(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """An unbounded list is a way to queue a hundred thousand jobs in one
+    request that the allowance was supposed to bound."""
+    client, key, _ = api
+
+    response = client.post(
+        "/v1/jobs/batch",
+        json={"kind": "video.echo", "targets": [f"video{index:07d}" for index in range(501)]},
+        headers={"X-API-Key": key},
+    )
+
+    assert response.status_code == 422
