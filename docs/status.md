@@ -109,6 +109,17 @@ second is that neither bug was visible in a single job, in the test suite, or
 in a ten-job trial — both needed a sweep large enough for the interval to
 compound.
 
+**Lane isolation, measured 2026-08-19.** Three comment harvests queued
+*ahead* of twenty-five dislike jobs, concurrency 8: every dislike job finished
+at 09:30:42–43 and the harvests at 09:30:58, 09:31:03 and 09:31:17. Cheap work
+does not queue behind expensive work even when it was asked for later, which is
+the M5 criterion. Honest limit of that test: three harvests against eight
+slots cannot saturate the worker, so it demonstrates interleaving rather than
+proving the expensive-lane cap. Twelve harvests would.
+
+A mixed sweep the same day — 25 dislikes, 25 sponsor-segment lookups and 3
+harvests — completed 53 jobs in 38 s with nothing failed.
+
 **Caching, measured 2026-08-18.** The same channel sweep, twice:
 
 | sweep | wall clock | YouTube requests |

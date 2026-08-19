@@ -145,3 +145,25 @@ few come back in Korean and the rest come back in English. Check `language` and
 filters `tlang=` tracks out of the candidates entirely. Seeing it means
 something else fetched a caption URL — check what, because that path is
 rationed and the caller probably does not know it.
+
+## `youtube asked for proof we are not a bot, fetching: <id>`
+
+The bot check. This is the one yt-dlp failure that is about the address rather
+than the video, and it is deliberately raised as a `RateLimitedError` so the
+rate controller quarantines that lane instead of treating it as a bad video.
+
+Before doing anything else, upgrade: `just update-ytdlp`. That fixes this more
+often than any other step. After that the ladder is cookies
+(`TUBEDEPTH_COOKIES_FILE`), then `--impersonate`, then a different egress. Do
+not raise concurrency to make up the lost throughput — that is the input that
+produced the check.
+
+## `video cannot be watched from here: <id>`
+
+Private, deleted, members-only, age-gated or region-blocked. Terminal and not
+retried, because waiting does not make a private video public. It says nothing
+about the address and does not touch the rate controller.
+
+Both phrasings of the unavailable message are matched (`Video unavailable` and
+`This video is unavailable`) — the second was found only by running against a
+withdrawn video, having written the first from an invalid id.

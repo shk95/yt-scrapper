@@ -31,6 +31,17 @@ class NotFoundError(TubedepthError):
     """The thing asked for does not exist here, or the video does not have it."""
 
 
+class UnavailableError(TubedepthError):
+    """The video exists but cannot be watched from here, so nor can we read it.
+
+    Private, deleted, members-only, age-gated, region-blocked. Terminal by
+    construction: no amount of waiting turns a private video public, and the
+    retry would spend a request against the same address that just answered
+    correctly. Kept apart from NotFoundError because "you may not see this" and
+    "there is no such thing" are different answers to give an API client.
+    """
+
+
 class UpstreamError(TubedepthError):
     """A backend answered, and the answer was unusable.
 
