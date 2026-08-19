@@ -69,6 +69,7 @@ class Worker:
         controller: RateController | None = None,
         concurrency: int = DEFAULT_CONCURRENCY,
         lease: timedelta = DEFAULT_LEASE,
+        permit_wait: timedelta = timedelta(seconds=PERMIT_WAIT_SECONDS),
     ) -> None:
         self._database = database
         self._payloads = payloads
@@ -79,6 +80,7 @@ class Worker:
         self._controller = controller or RateController()
         self._concurrency = max(1, concurrency)
         self._lease = lease
+        self._permit_wait = permit_wait.total_seconds()
         self._lock = threading.Lock()
         self._in_flight_by_cost: dict[SourceCost, int] = {}
         self._collection = CollectionService(
@@ -251,7 +253,7 @@ class Worker:
         # permit is indistinguishable from being stuck, and requeueing the
         # job costs nothing because the backoff and the attempt count both
         # survive.
-        deadline = PERMIT_WAIT_SECONDS
+        deadline = self._permit_wait
         waited = 0.0
         while waited < deadline:
             if self._controller.acquire(self._egress.name, lane):  # type: ignore[arg-type]
@@ -303,9 +305,15 @@ class Worker:
             job = session.get(Job, identifier)
             if job is None:  # pragma: no cover - the row was deleted mid-flight
                 return
+            retryable = is_retryable(error)
             exhausted = job.attempt_count >= job.max_attempts
-            if not is_retryable(error) or exhausted:
-                reason = "exhausted its attempts" if exhausted else "is not retryable"
+            if not retryable or exhausted:
+                # Order matters: a failure that can never succeed is reported
+                # as such even when the attempts happen to have run out too.
+                # "exhausted its attempts" reads as "we tried and gave up",
+                # which sends an operator looking for a flaky network rather
+                # than at a video that simply has no captions.
+                reason = "exhausted its attempts" if retryable else "is not retryable"
                 logger.warning("job %s (%s) failed, %s: %s", identifier, kind, reason, error)
                 job.state = JobState.FAILED
                 job.finished_at = utcnow()
@@ -333,12 +341,23 @@ class Worker:
             )
 
     def _requeue(self, identifier: str) -> None:
+        """Put a job back without charging it for the trip.
+
+        The attempt is counted by the claim, before anything knows whether the
+        route will let the request out — so a job put back because the route
+        was busy has to be given that attempt back. Leaving it spent means a
+        worker running above the measured window eats the retry budget of jobs
+        it never tried: at concurrency 8 against a window near 2, jobs reached
+        attempt 6 while still running, and a job that never once reached
+        YouTube could be failed as having exhausted its attempts.
+        """
         with self._database.session() as session:
             job = session.get(Job, identifier)
             if job is not None:
                 job.state = JobState.QUEUED
                 job.claimed_by = None
                 job.lease_expires_at = None
+                job.attempt_count = max(0, job.attempt_count - 1)
 
     def _settle(
         self,

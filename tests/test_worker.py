@@ -7,15 +7,17 @@ which is the only way this loop gets exercised as often as it needs to be.
 
 from __future__ import annotations
 
+import logging
 import threading
 import time
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
 from pydantic import BaseModel
 
 from tubedepth.database import Database
-from tubedepth.egress.control import Lane, RateController
+from tubedepth.egress.control import Lane, RateController, Verdict
 from tubedepth.egress.transport import Egress
 from tubedepth.errors import NotFoundError, UpstreamError
 from tubedepth.identifiers import TargetType
@@ -523,3 +525,64 @@ def test_a_cached_listing_still_queues_the_videos_it_holds(tmp_path: Path) -> No
         queued_videos = session.query(Job).filter(Job.kind == "video.echo").count()
     assert queued_videos == 6, "a cached listing produced no work at all"
     assert len(echo.calls) == 3, "the follow-ups refetched instead of hitting the cache"
+
+
+def test_a_job_put_back_because_the_route_was_busy_keeps_its_attempts(
+    tmp_path: Path,
+) -> None:
+    """The attempt is counted at claim, and nothing was attempted.
+
+    Found in a forty-job sweep at concurrency 8 against an AIMD window near 2:
+    most claims lose the permit race, and each loss was burning one of three
+    attempts. Jobs reached attempt 6 while still running, and a job that had
+    never once reached YouTube could be failed as having "exhausted its
+    attempts". The route being busy is not the job's fault and must not spend
+    its budget.
+    """
+    source = EchoSource()
+    database, _, payloads = build(tmp_path, source)
+    identifier = enqueue(database, "video.echo", "video000001")
+    quarantined = RateController(window_ceiling=1)
+    quarantined.record("direct", Lane.YOUTUBE, Verdict.BLOCKED)
+    worker = Worker(
+        database=database,
+        registry=_registry(source),
+        payloads=payloads,
+        name="worker-1",
+        controller=quarantined,
+        permit_wait=timedelta(seconds=0),
+    )
+
+    worker.run_once()
+
+    with database.session() as session:
+        job = session.get(Job, identifier)
+        assert job is not None
+        assert job.state is JobState.QUEUED, "the job should be back in the queue"
+        assert job.attempt_count == 0, "a busy route spent one of the job's attempts"
+    assert source.calls == [], "the source ran despite the route being unavailable"
+
+
+def test_a_failure_that_can_never_succeed_says_so_rather_than_counting_attempts(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    """`exhausted its attempts` reads as "we tried and gave up".
+
+    For an error that is not retryable, that is the wrong story: no number of
+    attempts would have helped, and an operator reading it goes looking for a
+    flaky network instead of a video with no captions.
+    """
+    source = FailingSource()
+    database, worker, _ = build(tmp_path, source)
+    identifier = enqueue(database, "video.failing", "video000001")
+    with database.session() as session:
+        job = session.get(Job, identifier)
+        assert job is not None
+        job.attempt_count = job.max_attempts - 1  # the claim adds the last one
+
+    with caplog.at_level(logging.WARNING, logger="tubedepth.worker"):
+        worker.run_once()
+
+    assert "is not retryable" in caplog.text
+    assert "exhausted its attempts" not in caplog.text
