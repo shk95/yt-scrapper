@@ -50,6 +50,28 @@ def test_the_unit_runs_a_command_this_project_actually_has(name: str) -> None:
 
 
 @pytest.mark.parametrize("name", SERVICES)
+def test_the_unit_can_find_the_command_it_runs(name: str) -> None:
+    """A user unit does not inherit the shell's PATH, and `uv` is not on the one it gets.
+
+    systemd hands a user service `/usr/bin:/bin` and a little more, while this
+    host installs uv into a nix profile under $HOME — see AGENTS.md, where nix
+    is the install route because there is no Docker and no passwordless sudo.
+    So `/usr/bin/env uv` resolves to nothing and the unit dies with status 127.
+
+    Found by enabling these for the first time. All three had that defect,
+    which is to say none of them had ever run: the failure appears only on the
+    machine, only at enable time, and every other check here reads the file.
+    """
+    body = (UNITS / name).read_text()
+    if "/usr/bin/env uv " not in body:
+        pytest.skip(f"{name} does not run uv")
+
+    declared = [line for line in body.splitlines() if line.startswith("Environment=PATH=")]
+
+    assert len(declared) == 1, f"{name} runs uv without a PATH of its own, so it cannot find it"
+
+
+@pytest.mark.parametrize("name", SERVICES)
 def test_the_unit_pins_the_lock_file(name: str) -> None:
     """Without --frozen a restart may resolve a newer dependency than the one
     committed, so the running version becomes whatever the day supplies."""
