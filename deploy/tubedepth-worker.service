@@ -48,7 +48,10 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/github_prj/yt-scrapper/var
+# uv writes while it runs, and ProtectHome=read-only covers all of it: its
+# cache under ~/.cache/uv, and a lock inside the project's .venv. Naming the
+# three paths keeps the sandbox strict; loosening ProtectHome would not.
+ReadWritePaths=%h/github_prj/yt-scrapper/var %h/github_prj/yt-scrapper/.venv %h/.cache/uv
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true
