@@ -181,7 +181,7 @@ class Worker:
 
     # -- the gates -------------------------------------------------------
 
-    def _claim(self) -> tuple[str, str, str, str | None] | None:
+    def _claim(self) -> tuple[str, str, str, str | None, bool] | None:
         """Take a job and reserve its cost slot, atomically.
 
         Both under one lock because checking the reservation and then taking it
@@ -201,7 +201,7 @@ class Worker:
                 )
                 if job is None:
                     return None
-                claimed = (job.identifier, job.kind, job.target, job.follow_up_kind)
+                claimed = (job.identifier, job.kind, job.target, job.follow_up_kind, job.refresh)
                 cost = self._registry.get(job.kind).cost if self._knows(job.kind) else None
             if cost is not None:
                 self._in_flight_by_cost[cost] = self._in_flight_by_cost.get(cost, 0) + 1
@@ -230,7 +230,9 @@ class Worker:
             return None
         return [kind for kind in self._registry.kinds() if self._registry.get(kind).cost in allowed]
 
-    def _execute(self, identifier: str, kind: str, target: str, follow_up: str | None) -> None:
+    def _execute(
+        self, identifier: str, kind: str, target: str, follow_up: str | None, refresh: bool
+    ) -> None:
         try:
             source = self._registry.get(kind)
         except TubedepthError as error:
@@ -255,7 +257,7 @@ class Worker:
             verdict = Verdict.NEUTRAL
             try:
                 with self._holding_lease(identifier):
-                    result, digest, byte_count = self._collect(kind, target)
+                    result, digest, byte_count = self._collect(kind, target, refresh=refresh)
                 verdict = Verdict.OK
             except TubedepthError as error:
                 verdict = verdict_for_error(error)
@@ -363,14 +365,16 @@ class Worker:
 
     # -- persistence -----------------------------------------------------
 
-    def _collect(self, kind: str, target: str) -> tuple[BaseModel | None, str, int]:
+    def _collect(
+        self, kind: str, target: str, *, refresh: bool = False
+    ) -> tuple[BaseModel | None, str, int]:
         """Delegate to the one collection path.
 
         The worker used to have its own copy of this, which meant the CLI
         consulted the cache and the queue did not — and the queue is the side
         running a hundred jobs unattended.
         """
-        collected = self._collection.collect(kind, target)
+        collected = self._collection.collect(kind, target, refresh=refresh)
         if collected.from_cache:
             logger.info("job for %s %s served from cache", kind, target)
         return collected.result, collected.payload.digest, collected.payload.byte_count
@@ -380,6 +384,13 @@ class Worker:
 
         The follow-up kind is validated against the registry first, so a typo
         costs nothing rather than queueing a hundred jobs that can only fail.
+
+        A forced listing does not force its follow-ups. Propagating would
+        multiply one flag into a collection per video on every sweep, out of
+        the one per-address budget everything else draws on, and nothing needs
+        that yet — the sampler polls a fixed list of videos directly. Left
+        undecided on purpose rather than settled by whichever behaviour fell
+        out; the watch list in the trend work is what should settle it.
         """
         self._registry.get(kind)
         with self._database.session() as session:

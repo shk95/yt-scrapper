@@ -110,9 +110,15 @@ def test_a_required_column_with_a_known_default_is_added_with_it(tmp_path: Path)
     Database(path).create_schema()
 
     with sqlite3.connect(path) as connection:
+        # Every NOT NULL column that `create_all` wrote has to be named here:
+        # its default is SQLAlchemy's, applied by Python at INSERT, so a
+        # statement that bypasses the ORM gets no help from it. Only the column
+        # this test dropped and had repaired carries a DEFAULT in the DDL,
+        # which is the difference being asserted below.
         connection.execute(
             "INSERT INTO jobs (identifier, kind, target, state, attempt_count, max_attempts,"
-            " scheduled_at, created_at) VALUES ('a', 'k', 't', 'queued', 0, 3, 'x', 'y')"
+            " scheduled_at, created_at, refresh)"
+            " VALUES ('a', 'k', 't', 'queued', 0, 3, 'x', 'y', 0)"
         )
         value = next(connection.execute("SELECT webhook_attempts FROM jobs"))[0]
     assert value == 0, "existing rows were left without a value for a NOT NULL column"

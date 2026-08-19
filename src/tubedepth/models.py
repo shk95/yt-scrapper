@@ -86,6 +86,14 @@ class Job(Base):
     # and stop, which is a legitimate thing to want: checking what a channel
     # holds should not cost a hundred extractions.
     follow_up_kind: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Whether this submission asked to collect even if a fresh artifact is
+    # held. On the row because the collection happens in another process
+    # minutes later: a flag consumed at the HTTP boundary is one the worker
+    # never sees, and `refresh` spent a release changing only which of 200 or
+    # 202 the API answered while the job it created was still served from the
+    # cache. Deliberately not indexed — the claim filters on state and
+    # scheduled_at and never asks this.
+    refresh: Mapped[bool] = mapped_column(default=False)
     # Which key submitted this. How a runaway client gets identified rather
     # than guessed at.
     api_key_id: Mapped[str | None] = mapped_column(String(32), nullable=True)

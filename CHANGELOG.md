@@ -20,7 +20,32 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
-Nothing yet.
+### Added
+
+- **A sampler, so a history starts accumulating.** `tubedepth-sample.timer` in
+  `deploy/` forces a re-collection of a watch list every hour; the list is
+  `~/.config/tubedepth/watchlist.txt`, one video id per line, and
+  `deploy/watchlist.example.txt` shows the format. Off unless you enable it.
+  Velocity is the difference between two observations and observations only
+  accumulate in real time, so this is worth starting before anything needs it.
+- **`tubedepth enqueue --refresh` and `--from-file`.** The first puts the same
+  forced collection on the command line that `POST /v1/jobs` has; the second
+  reads targets one per line, so a schedule points at a list instead of
+  carrying thirty ids on its `ExecStart`. A list that cannot be read is refused
+  rather than treated as empty.
+
+### Fixed
+
+- **`refresh` now reaches the worker.** `"refresh": true` on `POST /v1/jobs`
+  skipped the API's own cache check and was then discarded, so the job it
+  created was served from the cache anyway: it succeeded, pointed at the
+  payload collected hours earlier, and recorded no new observation. Anything
+  polling faster than a kind's freshness window was collecting nothing while
+  reporting success. The flag is a column on the job now, so it survives the
+  queue and a retry. A database that already exists gains the column from the
+  startup repair, so a running deployment does not break — but run `tubedepth
+  migrate` anyway, or Alembic's version table stays behind and the next
+  migration tries to add a column that is already there.
 
 ## [0.1.0] - 2026-08-19
 

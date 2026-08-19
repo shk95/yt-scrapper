@@ -368,6 +368,7 @@ def create_application(
             kind=submission.kind,
             target=target,
             api_key_id=api_key.identifier,
+            refresh=submission.refresh,
             webhook_url=str(submission.webhook_url) if submission.webhook_url else None,
         )
         open_session.add(job)

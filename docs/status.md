@@ -416,6 +416,122 @@ One trap found immediately: `fileConfig` defaults to `disable_existing_loggers
 logging for the rest of the process. It silenced two unrelated tests, which is
 how it was noticed rather than in production.
 
+### `refresh` is a column, because it has to outlive the request
+
+`"refresh": true` was read once, in `POST /v1/jobs`, to skip the API's own cache
+check — and then dropped. The `Job` row never carried it, so the worker called
+`collect()` with the default and served the job from the cache it had just been
+told to bypass. The job succeeded, pointed at a payload collected hours earlier,
+and recorded no artifact. Nothing errored, nothing logged a problem, and from
+outside it was indistinguishable from a fresh collection.
+
+What that cost is not hypothetical: it is the whole premise of trend detection.
+Velocity is the difference between two observations, and a poller running faster
+than a kind's freshness window was recording none while reporting success.
+
+*The flag lives on the row rather than being resolved at submission.* The
+collection happens in another process, minutes later; a decision made in the
+request handler is one the worker never sees. It also means a retry is still a
+forced collection, which falls out of the column rather than having to be
+arranged — and would have been the next silent version of the same bug.
+
+*It is deliberately not indexed.* The claim filters on `state` and
+`scheduled_at` and orders by `scheduled_at, created_at`; nothing asks this
+column in a query, so an index on it would be write cost for no read.
+
+*A forced listing does not force its follow-ups.* `--then` turns one listing
+into a job per video, so propagating would multiply one flag into a collection
+per video on every sweep, out of the one per-address budget everything else
+draws on. Nothing needs it yet — the sampler polls a fixed list of videos
+directly — so the question is left open rather than settled by whichever
+behaviour happened to fall out. The watch list in the trend work should settle
+it, with the arithmetic in hand.
+
+*The migration carries a `server_default` and the model does not.* SQLite
+refuses `ADD COLUMN ... NOT NULL` outright unless the statement carries a
+default, so the migration must supply one — the same rule `Database._add_column`
+learned earlier and wrote into its own docstring. Putting it on the model too
+would have been tidier and is wrong: `_add_column` renders the column with
+`CreateColumn` and then appends its own `DEFAULT`, so a server default on the
+model produces `refresh BOOLEAN DEFAULT 0 NOT NULL DEFAULT 0` and the startup
+repair fails on the statement. The two paths therefore differ in DDL, which
+nothing depends on, and agree in behaviour, which everything does.
+
+### Measured 2026-08-19: the trending chart is alive, `ytsearchdate` is not
+
+Issue #3 lists three routes to trend detection and says which one is real
+decides the design of the other two, so both of its unverified claims were
+checked before anything was built. Both answers are in.
+
+**`videos.list?chart=mostPopular` still returns data.** `regionCode=KR` and
+`regionCode=US` each answer 200 results. So the retirement of the `/feed/trending`
+*page* did not take the chart endpoint with it, and route C is available.
+
+That settles issue #3's fork the good way. C spends **Google API quota, not the
+per-address YouTube budget** everything else in this project competes for — 1
+unit per request against 10,000/day, so a five-minute cadence is ~288 units.
+General "what is rising on YouTube" therefore costs nothing that matters, and
+routes A and B shrink to what C cannot do: velocity inside a chosen topic.
+
+It also wants its own `Lane`. Google's quota is a different budget from
+YouTube's bot tolerance, and riding on `Lane.YOUTUBE` would make one throttle
+the other for no reason. Transport goes in `src/tubedepth/egress/` per the
+architecture rule.
+
+**`ytsearchdate{N}:` does not exist.** Issue #3 flagged this as remembered
+rather than run, and it was wrong. yt-dlp 2026.07.04 answers
+`Unsupported url scheme: "ytsearchdate5"`, and its extractor list holds only
+`youtube:search`, `youtube:search_url` and `youtube:music:search_url` — there is
+no date-sorted search extractor. Plain `ytsearch3:` works, so the failure is the
+prefix and not the mechanism.
+
+The obvious workaround does not work either: `search_url` with YouTube's
+`sp=CAI%3D` ("sort by upload date") returns the same videos as the relevance
+search, so the parameter is being dropped somewhere between us and the results.
+
+**So route B needs building, not calling.** The likely home is this project's
+own InnerTube client (`src/tubedepth/innertube/`), which already constructs
+search requests and can carry a sort parameter directly instead of hoping
+yt-dlp forwards one. That is a different and larger job than the "cheapest
+change in this issue by a wide margin" the issue estimated, and it should be
+re-estimated before it is scheduled.
+
+### The sampler is a timer and a text file, not a scheduler
+
+Nothing in this project ran periodically, so the artifact table was a time
+series with nothing taking samples. `tubedepth-sample.timer` fires
+`tubedepth enqueue video.metadata --from-file … --refresh` every hour and that
+is the whole mechanism.
+
+*It was built now rather than with the feature that needs it.* Trend detection
+is the difference between two observations, and observations only accumulate in
+real time — no amount of work later produces last week's view count. Everything
+else in the backlog can be built faster by adding people or agents to it; this
+one cannot, so it starts first and runs while the rest is built.
+
+*Deliberately not a scheduler.* No table of schedules, no watch-list model, no
+cadence per target. The trend work will need a real watch list, and it should
+inherit a generic worker control channel — the same one an operator pausing the
+worker from the dashboard needs — rather than a bespoke table built here that
+would then have to be replaced. A timer and a file cost nothing to throw away.
+
+*The list lives outside the repository,* at `~/.config/tubedepth/watchlist.txt`,
+next to the WireGuard config and for the same reason: which videos someone is
+watching is operator data, not project data, and a checked-in list is one every
+clone starts collecting.
+
+*A missing list is a failure, not an empty sweep.* A timer firing hourly at a
+file somebody moved would otherwise queue nothing, report success, and leave
+the series to stop moving with nothing anywhere reporting a problem — which is
+the exact shape of the `refresh` bug above, rebuilt on purpose.
+
+*Sizing is arithmetic, and it is written down so it can be checked.* One line
+is one forced collection per firing. Thirty videos hourly is 30 jobs/h against
+a measured ceiling near 2,150 jobs/h, or about one percent. Three hundred is
+ten percent, and this file is explicit elsewhere that behaviour under sustained
+load is unmeasured — a trend poller is precisely sustained load, so the watch
+list and the cadence are one decision and should move together.
+
 ### The dashboard reads the same API as everything else
 
 `/` serves one self-contained page: queue counts, per-source health, a

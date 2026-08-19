@@ -14,6 +14,12 @@ Wants=network-online.target
 [Service]
 Type=exec
 WorkingDirectory=%h/github_prj/yt-scrapper
+# systemd gives a user service a minimal PATH of its own — the shell's is not
+# inherited — and uv lives in a nix profile under $HOME on this host, because
+# there is no Docker and no passwordless sudo here (see AGENTS.md). Without
+# this line `/usr/bin/env uv` resolves to nothing and the unit exits 127 the
+# first time it is enabled.
+Environment=PATH=%h/.nix-profile/bin:/usr/local/bin:/usr/bin:/bin
 Environment=TUBEDEPTH_DATA_DIR=%h/github_prj/yt-scrapper/var
 # Concurrency is an upper bound, not a target: the rate controller narrows it
 # whenever YouTube pushes back. Eight was measured, not chosen — see
@@ -42,7 +48,10 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/github_prj/yt-scrapper/var
+# uv writes while it runs, and ProtectHome=read-only covers all of it: its
+# cache under ~/.cache/uv, and a lock inside the project's .venv. Naming the
+# three paths keeps the sandbox strict; loosening ProtectHome would not.
+ReadWritePaths=%h/github_prj/yt-scrapper/var %h/github_prj/yt-scrapper/.venv %h/.cache/uv
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true

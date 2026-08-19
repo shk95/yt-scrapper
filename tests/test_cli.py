@@ -102,6 +102,84 @@ def test_the_error_boundary_prints_a_refusal_instead_of_a_traceback(
     assert "Traceback" not in completed.stderr
 
 
+def test_enqueue_records_a_refresh_so_the_worker_bypasses_the_cache(tmp_path: Path) -> None:
+    """The flag is only worth anything on the row, which is where the worker reads it."""
+    result = runner.invoke(
+        application,
+        ["enqueue", "video.transcript", "dQw4w9WgXcQ", "--refresh", "--data-dir", str(tmp_path)],
+    )
+
+    assert result.exit_code == 0, result.output
+    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
+        assert next(connection.execute("SELECT refresh FROM jobs"))[0] == 1
+
+
+def test_targets_can_come_from_a_file(tmp_path: Path) -> None:
+    """A watch list is edited far more often than whatever reads it.
+
+    Thirty ids written into a unit's ExecStart would mean editing the unit and
+    reloading the manager to change one of them, so the schedule points at a
+    file instead. Blank lines and `#` comments are how a list stays legible to
+    the person maintaining it.
+    """
+    watchlist = tmp_path / "watchlist.txt"
+    watchlist.write_text("# being sampled\ndQw4w9WgXcQ\n\n-2BFZsiVejU\n", encoding="utf-8")
+
+    result = runner.invoke(
+        application,
+        [
+            "enqueue",
+            "video.transcript",
+            "--from-file",
+            str(watchlist),
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert queued_targets(tmp_path) == ["dQw4w9WgXcQ", "-2BFZsiVejU"]
+
+
+def test_a_watch_list_that_is_not_there_is_refused_rather_than_queueing_nothing(
+    tmp_path: Path,
+) -> None:
+    """Silence is the wrong answer for something on a schedule.
+
+    A timer firing hourly at a file someone moved would otherwise queue nothing,
+    report success, and leave the series to stop moving with no failure anywhere
+    for anyone to notice — which is the shape of bug this project keeps finding.
+    """
+    result = runner.invoke(
+        application,
+        [
+            "enqueue",
+            "video.transcript",
+            "--from-file",
+            str(tmp_path / "gone.txt"),
+            "--data-dir",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "gone.txt" in result.output + str(result.exception), (
+        "the refusal did not name the list it could not read"
+    )
+    assert queued_targets(tmp_path) == []
+
+
+def test_enqueue_with_no_targets_at_all_is_refused(tmp_path: Path) -> None:
+    """Naming a kind and nothing to collect it for is a mistake, not an empty sweep."""
+    result = runner.invoke(
+        application, ["enqueue", "video.transcript", "--data-dir", str(tmp_path)]
+    )
+
+    assert result.exit_code != 0
+    assert "no targets" in str(result.exception), result.output
+    assert queued_targets(tmp_path) == []
+
+
 def test_cancelling_a_queued_job_from_the_command_line(tmp_path: Path) -> None:
     runner.invoke(
         application,

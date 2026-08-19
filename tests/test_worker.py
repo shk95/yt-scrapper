@@ -82,9 +82,9 @@ def build(tmp_path: Path, *sources: object) -> tuple[Database, Worker, PayloadSt
     return database, worker, payloads
 
 
-def enqueue(database: Database, kind: str, target: str) -> str:
+def enqueue(database: Database, kind: str, target: str, *, refresh: bool = False) -> str:
     with database.session() as session:
-        job = Job(kind=kind, target=target)
+        job = Job(kind=kind, target=target, refresh=refresh)
         session.add(job)
         session.flush()
         return job.identifier
@@ -487,6 +487,65 @@ def test_the_worker_reuses_a_cached_answer_rather_than_refetching(tmp_path: Path
     worker.drain()
 
     assert source.calls == ["dQw4w9WgXcQ"], "the second job refetched an answer already held"
+
+
+def test_a_job_that_asked_for_a_refresh_collects_again(tmp_path: Path) -> None:
+    """The mirror image of the test above, and the whole point of the flag.
+
+    Counts move, and sometimes the current number is the point. A submission
+    that said so must not be handed the answer held from an hour ago — which
+    means the flag has to be on the row, because the collection happens in
+    another process minutes after the request that asked for it.
+    """
+    source = EchoSource()
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    worker = Worker(
+        database=database,
+        registry=_registry(source),
+        payloads=PayloadStore(tmp_path / "payloads"),
+        name="worker-1",
+        concurrency=1,
+    )
+    enqueue(database, "video.echo", "dQw4w9WgXcQ")
+    enqueue(database, "video.echo", "dQw4w9WgXcQ", refresh=True)
+
+    worker.drain()
+
+    assert source.calls == ["dQw4w9WgXcQ", "dQw4w9WgXcQ"], (
+        "the refresh job was served the cached answer it explicitly asked to bypass"
+    )
+
+
+def test_a_refresh_job_that_is_retried_still_refreshes(tmp_path: Path) -> None:
+    """A retry is the same request again, so it keeps the same intent.
+
+    The flag lives on the row rather than in the claim, so this falls out
+    rather than being arranged — the test is here because the alternative
+    (deciding the bypass once, at submission) would silently stop refreshing
+    the moment a job needed a second attempt.
+    """
+    source = FlakySource(failures=1)
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    worker = Worker(
+        database=database,
+        registry=_registry(source),
+        payloads=PayloadStore(tmp_path / "payloads"),
+        name="worker-1",
+        concurrency=1,
+    )
+    identifier = enqueue(database, "video.flaky", "dQw4w9WgXcQ", refresh=True)
+
+    worker.drain()
+    _clear_backoff(database)
+    worker.drain()
+
+    with database.session() as session:
+        job = session.get(Job, identifier)
+        assert job is not None
+        assert job.state is JobState.SUCCEEDED
+        assert job.refresh is True, "the retry lost the intent the submission recorded"
 
 
 def test_a_cached_listing_still_queues_the_videos_it_holds(tmp_path: Path) -> None:
