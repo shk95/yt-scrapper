@@ -17,10 +17,11 @@ from collections.abc import Iterator
 # time with "is not fully defined" — the second trap that future-annotations
 # has set in this file.
 from datetime import datetime
+from pathlib import Path
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, FastAPI, Request, Response, Security, status
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
 from sqlalchemy import and_, or_, select
@@ -155,6 +156,8 @@ class HealthView(BaseModel):
 # entirely.
 
 
+DASHBOARD = Path(__file__).parent / "dashboard.html"
+
 # A page big enough to fill a screen and small enough that a careless caller
 # cannot ask for the whole table.
 MAXIMUM_PAGE = 500
@@ -269,6 +272,22 @@ def create_application(
             status_code=code,
             content={"error": {"code": label, "message": str(error)}},
         )
+
+    @application.get("/", response_class=HTMLResponse, include_in_schema=False)
+    def dashboard() -> HTMLResponse:
+        """The operator page: an empty shell that calls the same `/v1` routes.
+
+        Unauthenticated because it carries no data. It asks the browser for a
+        key and sends it as a header, which is the only place this project's
+        auth lives — putting the requirement on the HTML would mean a secret in
+        a URL or a cookie instead.
+
+        Self-contained by rule, asserted by a test. A private tool on a private
+        network cannot assume the internet is reachable, and an external
+        stylesheet would tell a third party when this instance is being looked
+        at.
+        """
+        return HTMLResponse(DASHBOARD.read_text(encoding="utf-8"))
 
     # Unauthenticated on purpose: something has to be reachable before you have
     # a key, or a broken deploy cannot be diagnosed from outside.

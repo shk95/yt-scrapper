@@ -518,3 +518,47 @@ def test_artifacts_can_be_listed_and_filtered(api: tuple[TestClient, str, Databa
     assert len(listed["artifacts"]) == 1
     assert listed["artifacts"][0]["target"] == "vid00000001"
     assert listed["artifacts"][0]["byte_count"] == 123
+
+
+def test_the_dashboard_is_served_and_needs_no_key_to_load(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """The page itself carries no data, so it is not what the key protects.
+
+    It is an empty shell that asks the browser for a key and then calls the
+    same `/v1` endpoints every other client uses. Putting the key requirement
+    on the HTML would mean putting a secret in a URL or a cookie, and the whole
+    auth design here is a header.
+    """
+    client, _, _ = api
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "<title>" in response.text
+
+
+def test_the_dashboard_ships_no_external_references(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """A private tool on a private network cannot assume the internet.
+
+    An external stylesheet or script would also hand a third party the pattern
+    of when this instance is being looked at, which is a needless disclosure
+    for an operator page.
+    """
+    client, _, _ = api
+
+    page = client.get("/").text
+
+    for marker in ("http://", "https://", "//cdn", "<script src="):
+        assert marker not in page, f"the dashboard reaches outside itself: {marker}"
+
+
+def test_the_dashboard_never_embeds_a_key(api: tuple[TestClient, str, Database]) -> None:
+    """The page is served to anyone who can reach the port."""
+    client, key, _ = api
+
+    assert key not in client.get("/").text
+    assert "ytd_" not in client.get("/").text
