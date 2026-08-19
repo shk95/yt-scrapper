@@ -29,6 +29,9 @@
 
 ### Added
 
+- **`tubedepth pause`와 `tubedepth resume`.** `PATCH /v1/control`이 쓰는 것과 같은 행을 API 없이
+  건드린다 — API에 의존하는 것이 잘못이었다. API가 죽어 있거나 애초에 설치되지 않았다면, 워커는
+  가장 멈추고 싶은 프로세스이면서 멈출 수 없는 프로세스였다.
 - **`TUBEDEPTH_LISTING_LIMIT`과 `TUBEDEPTH_COMMENT_LIMIT`.** 100개 상한은 등록 시점에 고정된
   생성자 기본값이라, 그보다 영상이 많은 채널은 소스를 고치지 않고는 통째로 수집할 수 없었다.
   지금 올려도 안전한 이유는 상한이 캐시 키에 들어갔기 때문이다 — 그 전에 올렸다면 1,000개를

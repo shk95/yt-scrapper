@@ -36,6 +36,10 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Added
 
+- **`tubedepth pause` and `tubedepth resume`.** The same row `PATCH
+  /v1/control` writes, without needing the API — which was the wrong thing to
+  depend on: if the API is down or was never installed, the worker is the
+  process you most want to be able to stop and the one you could not.
 - **`TUBEDEPTH_LISTING_LIMIT` and `TUBEDEPTH_COMMENT_LIMIT`.** The 100-item
   listing cap was a constructor default frozen at registration, so a channel
   with more videos than that could not be collected in full without editing the

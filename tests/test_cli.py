@@ -337,3 +337,32 @@ def test_the_key_list_says_when_each_key_was_last_used(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     assert "ingest" in result.output
     assert "never used" in result.output
+
+
+def test_the_worker_can_be_paused_from_the_command_line(tmp_path: Path) -> None:
+    """The control was reachable only through the API, which is the wrong
+    dependency: if the API is down, or was never installed, the worker is the
+    process you most want to be able to stop and the one you cannot."""
+    from tubedepth.models import WorkerControl
+
+    result = runner.invoke(
+        application, ["pause", "--reason", "watching a quota", "--data-dir", str(tmp_path)]
+    )
+
+    assert result.exit_code == 0, result.output
+    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
+        assert next(connection.execute("SELECT paused, reason FROM worker_control")) == (
+            1,
+            "watching a quota",
+        )
+    assert WorkerControl is not None
+
+
+def test_resuming_from_the_command_line_says_what_changed(tmp_path: Path) -> None:
+    runner.invoke(application, ["pause", "--data-dir", str(tmp_path)])
+
+    result = runner.invoke(application, ["resume", "--data-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
+        assert next(connection.execute("SELECT paused FROM worker_control"))[0] == 0

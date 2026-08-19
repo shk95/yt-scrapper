@@ -22,7 +22,7 @@ from .errors import TubedepthError, ValidationError
 from .fixture_capture import redact_for_fixture
 from .identifiers import normalize_target, normalize_video_identifier
 from .innertube.client import InnerTubeClient
-from .models import Artifact, Job, JobState
+from .models import WORKER_CONTROL_ID, Artifact, Job, JobState, WorkerControl, utcnow
 from .observability import configure_logging
 from .payload_store import PayloadStore
 from .repositories import JobRepository
@@ -259,6 +259,56 @@ def work(
     )
     completed = worker.drain(limit=1 if once else None)
     typer.echo(f"✓ {completed} job(s) completed")
+
+
+def _set_paused(data_directory: Path, *, paused: bool, reason: str | None) -> None:
+    database = _database(data_directory)
+    with database.session() as session:
+        control = session.get(WorkerControl, WORKER_CONTROL_ID) or WorkerControl(
+            identifier=WORKER_CONTROL_ID
+        )
+        control.paused = paused
+        control.reason = reason
+        control.changed_at = utcnow()
+        session.add(control)
+
+
+@application.command()
+def pause(
+    reason: Annotated[
+        str | None, typer.Option("--reason", help="Why, for whoever lifts it")
+    ] = None,
+    data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
+        "var"
+    ),
+) -> None:
+    """Tell the worker to stop claiming.
+
+    The same row `PATCH /v1/control` writes, reachable without the API — which
+    is the wrong thing to depend on here. If the API is down, or was never
+    installed, the worker is the process you most want to be able to stop and
+    the one you could not.
+
+    A job already running finishes: the extraction is inside yt-dlp and keeps
+    spending requests until it is done. Cancel it if that is what you need.
+    """
+    _set_paused(data_directory, paused=True, reason=reason)
+    typer.echo("✓ paused — the worker will claim nothing; work already running still finishes")
+
+
+@application.command()
+def resume(
+    data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
+        "var"
+    ),
+) -> None:
+    """Let the worker claim again.
+
+    Nothing was failed or cancelled on the way in, so this is the whole of the
+    undo — the queue is where it was left.
+    """
+    _set_paused(data_directory, paused=False, reason=None)
+    typer.echo("✓ resumed")
 
 
 @application.command()
