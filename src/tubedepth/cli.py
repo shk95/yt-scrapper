@@ -228,6 +228,44 @@ def jobs(
 
 
 @application.command()
+def migrate(
+    data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
+        "var"
+    ),
+    stamp: Annotated[
+        bool,
+        typer.Option("--stamp", help="Record the current revision without running anything"),
+    ] = False,
+) -> None:
+    """Bring the database up to the current schema.
+
+    `--stamp` is for the one-time case every project meets exactly once: a
+    database that predates migrations. Upgrading it would try to create tables
+    that are already there, so instead it records which revision its schema
+    already matches and migrates forward from then on.
+
+    `create_schema` still runs on startup and still adds nullable columns and
+    missing indexes. That is a development convenience and this is the
+    deployment path; where they disagree, a test says so.
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    data_directory.mkdir(parents=True, exist_ok=True)
+    root = Path(__file__).resolve().parent.parent.parent
+    configuration = Config(str(root / "alembic.ini"))
+    configuration.set_main_option("script_location", str(root / "migrations"))
+    os.environ["TUBEDEPTH_DATABASE_URL"] = f"sqlite+pysqlite:///{data_directory / 'tubedepth.db'}"
+
+    if stamp:
+        command.stamp(configuration, "head")
+        typer.echo(f"✓ stamped {data_directory / 'tubedepth.db'} at the current revision")
+        return
+    command.upgrade(configuration, "head")
+    typer.echo(f"✓ {data_directory / 'tubedepth.db'} is at the current schema")
+
+
+@application.command()
 def prune(
     data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
         "var"

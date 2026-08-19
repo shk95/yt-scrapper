@@ -370,6 +370,45 @@ browser `User-Agent` stayed but its evidence left with the source — see
 was RYD's documented 10,000/day. It no longer has one. That is recorded under
 "Proxying is deferred" rather than left for someone to rediscover.
 
+### Migrations exist, and the startup repair stays
+
+`tubedepth migrate` runs Alembic; `--stamp` handles the one-time case every
+project meets exactly once, a database that predates migrations and would
+otherwise be asked to create tables it already has. The working database was
+stamped rather than upgraded.
+
+`create_schema` still runs on startup and still adds nullable columns and
+missing indexes. That is not redundancy — it is the development path, where the
+schema changes several times a day and writing a migration per change would
+mean rewriting them all before the first release. Where the two disagree, a
+test says so: autogenerate against a migrated database must find nothing to do,
+which fails the moment a model changes without a migration. That failure mode
+is otherwise invisible, because every developer machine builds from the models
+and only the one deployment migrates.
+
+Three decisions in the scaffolding are worth keeping:
+
+*The URL is resolved, not configured.* A URL in `alembic.ini` is a URL in git,
+and the first person to run a migration from a checkout points it at whichever
+database that file happened to name.
+
+*Custom types render as their DDL types.* `UtcDateTime` is a TypeDecorator —
+it refuses naive datetimes and reattaches UTC on load, which is application
+behaviour, not schema. Autogenerate emitted `tubedepth.models.UtcDateTime()`
+into the migration, which failed for want of an import; adding the import would
+have been worse, since every past migration would then depend on a class the
+application is free to rename. A migration that breaks when application code is
+refactored is one nobody can replay.
+
+*Batch mode is on.* SQLite cannot ALTER most things in place, so without it the
+first migration to rename a column or change a constraint fails when it is run
+rather than when it is written.
+
+One trap found immediately: `fileConfig` defaults to `disable_existing_loggers
+=True`, so running a migration in-process switched off the application's own
+logging for the rest of the process. It silenced two unrelated tests, which is
+how it was noticed rather than in production.
+
 ### The dashboard reads the same API as everything else
 
 `/` serves one self-contained page: queue counts, per-source health, a
