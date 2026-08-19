@@ -416,6 +416,47 @@ One trap found immediately: `fileConfig` defaults to `disable_existing_loggers
 logging for the rest of the process. It silenced two unrelated tests, which is
 how it was noticed rather than in production.
 
+### `refresh` is a column, because it has to outlive the request
+
+`"refresh": true` was read once, in `POST /v1/jobs`, to skip the API's own cache
+check — and then dropped. The `Job` row never carried it, so the worker called
+`collect()` with the default and served the job from the cache it had just been
+told to bypass. The job succeeded, pointed at a payload collected hours earlier,
+and recorded no artifact. Nothing errored, nothing logged a problem, and from
+outside it was indistinguishable from a fresh collection.
+
+What that cost is not hypothetical: it is the whole premise of trend detection.
+Velocity is the difference between two observations, and a poller running faster
+than a kind's freshness window was recording none while reporting success.
+
+*The flag lives on the row rather than being resolved at submission.* The
+collection happens in another process, minutes later; a decision made in the
+request handler is one the worker never sees. It also means a retry is still a
+forced collection, which falls out of the column rather than having to be
+arranged — and would have been the next silent version of the same bug.
+
+*It is deliberately not indexed.* The claim filters on `state` and
+`scheduled_at` and orders by `scheduled_at, created_at`; nothing asks this
+column in a query, so an index on it would be write cost for no read.
+
+*A forced listing does not force its follow-ups.* `--then` turns one listing
+into a job per video, so propagating would multiply one flag into a collection
+per video on every sweep, out of the one per-address budget everything else
+draws on. Nothing needs it yet — the sampler polls a fixed list of videos
+directly — so the question is left open rather than settled by whichever
+behaviour happened to fall out. The watch list in the trend work should settle
+it, with the arithmetic in hand.
+
+*The migration carries a `server_default` and the model does not.* SQLite
+refuses `ADD COLUMN ... NOT NULL` outright unless the statement carries a
+default, so the migration must supply one — the same rule `Database._add_column`
+learned earlier and wrote into its own docstring. Putting it on the model too
+would have been tidier and is wrong: `_add_column` renders the column with
+`CreateColumn` and then appends its own `DEFAULT`, so a server default on the
+model produces `refresh BOOLEAN DEFAULT 0 NOT NULL DEFAULT 0` and the startup
+repair fails on the statement. The two paths therefore differ in DDL, which
+nothing depends on, and agree in behaviour, which everything does.
+
 ### The dashboard reads the same API as everything else
 
 `/` serves one self-contained page: queue counts, per-source health, a

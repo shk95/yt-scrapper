@@ -20,7 +20,15 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
-Nothing yet.
+### Fixed
+
+- **`refresh` now reaches the worker.** `"refresh": true` on `POST /v1/jobs`
+  skipped the API's own cache check and was then discarded, so the job it
+  created was served from the cache anyway: it succeeded, pointed at the
+  payload collected hours earlier, and recorded no new observation. Anything
+  polling faster than a kind's freshness window was collecting nothing while
+  reporting success. The flag is a column on the job now, so it survives the
+  queue and a retry. Databases that already exist need `tubedepth migrate`.
 
 ## [0.1.0] - 2026-08-19
 

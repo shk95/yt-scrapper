@@ -20,7 +20,7 @@ from tubedepth.database import Database
 from tubedepth.egress.control import Lane
 from tubedepth.egress.transport import Egress
 from tubedepth.identifiers import TargetType
-from tubedepth.models import Job, JobState
+from tubedepth.models import Artifact, Job, JobState
 from tubedepth.payload_store import PayloadStore
 from tubedepth.services.keys import ApiKeyService
 from tubedepth.sources import SourceRegistry
@@ -301,6 +301,53 @@ def test_a_cached_result_comes_back_without_a_job(
 
     assert response.status_code == 200
     assert json.loads(response.text)["target"] == "dQw4w9WgXcQ"
+
+
+def test_a_forced_collection_records_a_second_observation(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    """`refresh` has to survive the queue, not just the request handler.
+
+    The artifact table is the history this project keeps by appending, so a
+    forced collection that is quietly served from the cache records no new row:
+    the series stops moving while every job still reports success and points at
+    a digest. Nothing errors, which is the failure this repository exists to
+    make impossible — and it is the one the trend work depends on not having.
+    """
+    from tubedepth.worker import Worker
+
+    client, key, database = api
+
+    def drain() -> None:
+        registry = SourceRegistry()
+        registry.register(EchoSource())  # type: ignore[arg-type]
+        Worker(
+            database=database,
+            payloads=PayloadStore(tmp_path / "payloads"),
+            registry=registry,
+            name="test",
+            concurrency=1,
+        ).drain()
+
+    client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+        headers={"X-API-Key": key},
+    )
+    drain()
+
+    response = client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ", "refresh": True},
+        headers={"X-API-Key": key},
+    )
+    drain()
+
+    assert response.status_code == 202, "a forced collection answered with the cached body"
+    with database.session() as session:
+        assert session.query(Artifact).count() == 2, (
+            "the forced collection was served from the cache and recorded no observation"
+        )
 
 
 def test_the_openapi_document_is_served(api: tuple[TestClient, str, Database]) -> None:

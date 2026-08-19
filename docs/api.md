@@ -74,6 +74,13 @@ The 200 is not an optimisation detail a client can ignore: it is the normal
 outcome for anything asked for twice inside its freshness window, and it costs
 no poll cycle. Pass `"refresh": true` to force collection anyway.
 
+A submission carrying `"refresh": true` is therefore always 202 and never 200 —
+there is no cached answer it would accept. The flag travels with the job rather
+than being spent on the request, so the worker collects again when it reaches
+it, and a retry of that job is still a forced collection. **This is what makes
+`GET /v1/artifacts` a history rather than a cache:** a forced collection records
+a new observation, and one that quietly answered from the cache would not.
+
 ## Kinds
 
 What a job can ask for. `GET /v1/sources` returns this same table from the
