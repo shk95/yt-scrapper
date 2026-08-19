@@ -56,6 +56,10 @@ class BundleSource:
 
     def __init__(self, *, parts: tuple[str, ...] = DEFAULT_PARTS) -> None:
         self.parts = parts
+        # Free to declare: `_assemble` collects each part through the same
+        # service, so an invalidated bundle re-assembles from the parts' own
+        # caches at no network cost.
+        self.cache_parameters = {"parts": list(parts)}
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> VideoBundle:
         """Never called. A composite is assembled by the collection service.

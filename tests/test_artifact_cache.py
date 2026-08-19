@@ -45,6 +45,7 @@ def test_a_recorded_artifact_is_found_again_by_its_fingerprint(tmp_path: Path) -
             digest="deadbeef",
             byte_count=1234,
             freshness=timedelta(hours=6),
+            schema_version="1",
         )
 
     with database.session() as session:
@@ -65,6 +66,7 @@ def test_an_artifact_past_its_freshness_is_not_served(tmp_path: Path) -> None:
             digest="deadbeef",
             byte_count=1,
             freshness=timedelta(hours=6),
+            schema_version="1",
         )
 
     clock.advance(timedelta(hours=6, seconds=1))
@@ -84,6 +86,7 @@ def test_a_different_question_does_not_hit_the_cache(tmp_path: Path) -> None:
             digest="deadbeef",
             byte_count=1,
             freshness=timedelta(hours=6),
+            schema_version="1",
         )
 
     with database.session() as session:
@@ -108,6 +111,7 @@ def test_recollecting_records_a_new_row_rather_than_overwriting(tmp_path: Path) 
                 digest=digest,
                 byte_count=1,
                 freshness=timedelta(hours=6),
+                schema_version="1",
             )
         clock.advance(timedelta(hours=7))
 

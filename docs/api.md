@@ -349,6 +349,7 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/artifacts?target=dQw4w9WgXcQ'
     {
       "kind": "video.metadata",
       "target": "dQw4w9WgXcQ",
+      "schema_version": "1",
       "digest": "b9f4c0e2...",
       "byte_count": 26417,
       "fetched_at": "2026-08-19T09:12:44Z",
@@ -359,6 +360,13 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/artifacts?target=dQw4w9WgXcQ'
 }
 ```
 
+`schema_version` is which version of that kind's normalizer wrote the bytes.
+It is `null` for anything collected before the column existed — the fingerprint
+carries the version and is a SHA-256, so it cannot be recovered from the row.
+**Two observations with different `schema_version` values are not directly
+comparable**: a bump means the shape changed, and a field one of them has may
+simply not have been collected by the other.
+
 The artifact table appends rather than overwrites, so filtering by `target`
 gives one video's history — how its counts moved over time. The job ledger
 cannot answer that; this is the table that keeps it.
@@ -368,6 +376,49 @@ produced identical bytes share one. Equal digests across two `fetched_at`
 values mean nothing changed.
 
 ---
+
+---
+
+## `GET /v1/artifacts/{digest}`
+
+One observation, addressed by its content. This is how history is read: the
+list route hands out digests, and this is what dereferences them.
+
+```sh
+curl -s -H "X-API-Key: $KEY" localhost:8080/v1/artifacts/b9f4c0e2...
+```
+
+```json
+{
+  "digest": "b9f4c0e2...",
+  "kind": "video.metadata",
+  "target": "dQw4w9WgXcQ",
+  "fetched_at": "2026-08-19T09:12:44Z",
+  "schema_version": "1",
+  "current_schema_version": "1",
+  "payload_fields": ["chapters", "most_replayed", "tags", "view_count"],
+  "current_fields": ["chapters", "most_replayed", "published_date", "tags", "view_count"],
+  "payload": { "...": "the bytes as they were collected" }
+}
+```
+
+**The payload is returned verbatim and is never re-parsed.** A payload written
+by an older normalizer comes back as it was stored, because the original
+observation is the thing worth keeping — re-shaping it with today's model is
+how a history stops being one.
+
+`payload_fields` and `current_fields` are computed rather than declared, and
+their difference is the honest answer to "what does this old observation not
+have". A field the older version never collected is **absent** from
+`payload_fields`, which says more than a null would.
+
+**410 `retracted`** if the version that collected it is one the source has
+withdrawn — its payloads are wrong rather than merely old, and serving them as
+history would launder a known-bad observation. Not a 404: the observation
+happened, and a 404 would claim it never did.
+
+404 `not_found` for a digest this instance never stored, and for one whose
+payload has since aged out of retention.
 
 ## Pagination
 
@@ -398,6 +449,7 @@ Every error is the same shape.
 | 422 | `invalid_request` | unknown kind, unparseable target, cursor this API did not issue |
 | 404 | `not_found` | no such job — or the video does not have the thing asked for |
 | 409 | `conflict` | the job exists but has not finished |
+| 410 | `retracted` | the version that collected this observation has been withdrawn |
 | 429 | `rate_limited` | over the key's allowance, or an upstream refused this address |
 | 502 | `parse_mismatch` | YouTube answered and our parser no longer understands it |
 | 502 | `upstream_error` | an upstream answered, and the answer was unusable |

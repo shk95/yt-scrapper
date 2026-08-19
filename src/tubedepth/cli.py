@@ -22,11 +22,12 @@ from .errors import TubedepthError, ValidationError
 from .fixture_capture import redact_for_fixture
 from .identifiers import normalize_target, normalize_video_identifier
 from .innertube.client import InnerTubeClient
-from .models import Job, JobState
+from .models import Artifact, Job, JobState
 from .observability import configure_logging
 from .payload_store import PayloadStore
 from .repositories import JobRepository
 from .retention import RetentionPolicy, RetentionService
+from .schema_versions import SchemaVersionBackfill
 from .services.keys import ApiKeyService
 from .sources import default_registry
 from .sources.innertube_sources import RECORDABLE_SURFACES, record_surface
@@ -315,6 +316,46 @@ def migrate(
         return
     command.upgrade(configuration, "head")
     typer.echo(f"✓ {data_directory / 'tubedepth.db'} is at the current schema")
+
+    # A separate command is a command that gets skipped, and the window for
+    # this one closes: attribution works by recomputing fingerprints against
+    # the versions a kind has had, and retention ages out the rows it would
+    # attribute. Say so here, where someone is already standing.
+    with _database(data_directory).session(readonly=True) as session:
+        unattributed = session.query(Artifact).filter(Artifact.schema_version.is_(None)).count()
+    if unattributed:
+        typer.echo(f"· {unattributed} artifact(s) do not name the schema version that wrote them")
+        typer.echo("  run: tubedepth backfill-schema-versions")
+
+
+@application.command(name="backfill-schema-versions")
+def backfill_schema_versions(
+    data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
+        "var"
+    ),
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Report what would change and write nothing")
+    ] = False,
+) -> None:
+    """Say which normalizer wrote each payload collected before we recorded it.
+
+    A fingerprint is a SHA-256 and gives nothing back, so attribution works
+    forwards: recompute the hash for each version the kind could have been at
+    and see which agrees. A match is a proof — the hash covers kind, target,
+    version and parameters together — so nothing here guesses. A row that
+    matches no candidate is left blank and reported by kind, because
+    unattributed and honest beats attributed and wrong.
+
+    Safe to run beside a busy worker, and safe to run twice: it selects only
+    rows that do not name a version, and a row the worker writes names one.
+    """
+    outcome = SchemaVersionBackfill(database=_database(data_directory)).run(dry_run=dry_run)
+    verb = "would attribute" if dry_run else "attributed"
+    typer.echo(f"✓ {verb} {outcome.attributed} of {outcome.scanned} artifact(s)")
+    for kind, count in sorted(outcome.unattributed.items()):
+        typer.echo(f"· {count} {kind} artifact(s) matched no known version")
+    if outcome.unattributed:
+        typer.echo("  a version missing from PREVIOUS_VERSIONS looks exactly like this")
 
 
 @application.command()

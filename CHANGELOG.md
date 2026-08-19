@@ -36,6 +36,30 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Added
 
+- **CI refuses a payload model change that does not bump `schema_version`.**
+  `tests/test_migrations.py` has always caught the database half of this; there
+  was no payload-side equivalent, and one bump was already missed in the
+  history. The check records a pruned shape per kind and version in an
+  append-only lock, so the only way to make it pass is the bump it is asking
+  for — a blind regenerate is refused. Composite kinds expand their parts, so
+  a change to `video.metadata` correctly moves `video.bundle` too. Green means
+  no shape change went unrecorded; it never means no bump was needed.
+- **`GET /v1/artifacts/{digest}`.** The list route has always handed out
+  digests and nothing could dereference them; reaching an old payload meant
+  having kept the job id that produced it, and retention deletes artifacts
+  without touching job rows, so those two age apart. The payload comes back
+  **verbatim** — no model is in the path, so an observation an older normalizer
+  wrote still reads. `payload_fields` against `current_fields` is the honest
+  answer to what an old observation lacks: a field never collected is absent,
+  which says more than a null.
+- **`410 retracted`.** A source can declare a version whose payloads are wrong
+  rather than old — `channel.about` v1 read the home tab as the about panel —
+  and reading one is refused instead of laundered. 410 and not 404, because the
+  observation happened.
+- **`tubedepth backfill-schema-versions`.** Attributes payloads collected
+  before the version was recorded, by recomputing fingerprints against the
+  versions a kind has had. Rows that match nothing are left blank and reported
+  by kind rather than guessed at.
 - **`tubedepth capture-fixture --innertube <surface>`.** InnerTube fixtures
   had no recording path at all, so the four in the tree were made by hand and
   the redaction that strips session identity and signed `googlevideo` URLs ran
@@ -52,6 +76,14 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Fixed
 
+- **The cache key no longer ignores half its inputs.** A source's parameters —
+  a listing's `limit`, a comment harvest's `sort`, a transcript's language
+  preference, a bundle's parts — were frozen at construction and left out of
+  the fingerprint, so a listing capped at 100 would have answered a request for
+  1,000 the moment that cap became configurable. Six kinds' fingerprints move
+  once as a result and their caches go cold; the other five are byte-identical
+  and untouched. `collect` and `cached` now build the key in one place, because
+  fixing one without the other is worse than fixing neither.
 - **An expensive kind is queued with fewer attempts than a cheap one.**
   `Job.max_attempts` documented itself as set when a job is queued and nothing
   set it, so every kind took the column default of three — and three failed

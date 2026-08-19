@@ -138,6 +138,11 @@ class ChannelAboutSource:
     # 2: was the channel home tab read as if it were the about panel, which
     # returned a video's description as the channel's and nothing else at all.
     schema_version = "2"
+    # v1 read the home tab as the about panel, so its stored payloads hold a
+    # video's description where the channel's belongs. That is wrong rather
+    # than old: there is nothing in those bytes to lift, and serving them as
+    # history would launder a known-bad observation.
+    retracted_versions = frozenset({"1"})
     payload_model: type[BaseModel] = ChannelAbout
     # Join date, country and links effectively never change.
     default_freshness = timedelta(days=7)

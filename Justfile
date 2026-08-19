@@ -89,6 +89,15 @@ worker:
 fixture-capture target name:
     uv run tubedepth capture-fixture {{target}} --name {{name}}
 
+# Run after a deliberate schema_version bump. Refuses to rewrite a shape
+# already recorded against the version that is still current — the only way to
+# make that check pass is the bump it is asking for.
+
+# Append the current payload shapes to the lock
+[group('repository')]
+record-payload-shapes:
+    uv run pytest tests/test_payload_shapes.py --record-payload-shapes
+
 # Record an InnerTube fixture: next-related, browse-channel-home, browse-community
 [group('data')]
 fixture-capture-innertube surface target name:

@@ -29,6 +29,24 @@
 
 ### Added
 
+- **payload 모델을 바꾸고 `schema_version`을 안 올리면 CI가 거부한다.** DB 쪽 절반은
+  `tests/test_migrations.py`가 늘 잡아왔지만 payload 쪽에는 대응물이 없었고, 실제로 이미 한 번
+  놓쳤다. kind와 버전별로 다듬은 모양을 append-only lock에 기록하므로, 통과시키는 유일한 방법은
+  요구받은 bump다 — 그냥 다시 기록하는 것은 거부된다. 복합 kind는 parts를 펼치므로
+  `video.metadata` 변경이 `video.bundle`도 올바르게 움직인다. 초록은 기록되지 않은 모양 변경이
+  없다는 뜻이지, bump가 필요 없었다는 뜻이 아니다.
+- **`GET /v1/artifacts/{digest}`.** 목록 라우트는 늘 digest를 내줬는데 그걸 실제 데이터로 바꿀
+  방법이 없었다. 옛 payload에 닿으려면 그것을 만든 잡 id를 계속 갖고 있어야 했고, retention은
+  artifact를 지우면서 잡 행은 건드리지 않으므로 둘은 서로 다른 속도로 늙는다. payload는 **그대로**
+  나온다 — 이 경로에 모델이 없어서 옛 normalizer가 쓴 관측도 읽힌다. `payload_fields`와
+  `current_fields`의 차이가 "이 옛 관측에 무엇이 없는가"에 대한 정직한 답이다: 수집된 적 없는
+  필드는 아예 없고, 그것이 null보다 강한 진술이다.
+- **`410 retracted`.** 소스는 payload가 낡은 것이 아니라 틀린 버전을 선언할 수 있다 —
+  `channel.about` v1이 홈 탭을 about 패널로 읽었다 — 그리고 그런 관측은 세탁 대신 거부된다.
+  404가 아니라 410인 이유는 관측이 실제로 일어났기 때문이다.
+- **`tubedepth backfill-schema-versions`.** 버전이 기록되기 전에 수집된 payload를, kind가 거쳐온
+  버전들에 대해 fingerprint를 다시 계산해 귀속시킨다. 아무것도 맞지 않는 행은 추측하지 않고
+  비워둔 채 kind별로 보고한다.
 - **`tubedepth capture-fixture --innertube <surface>`.** InnerTube fixture는 기록 경로가 아예
   없어서, 저장소에 있는 넷은 손으로 만들어졌고 세션 신원과 서명된 `googlevideo` URL을 지우는
   redaction은 만든 사람이 기억했을 때만 돌았다. 기록은 소스가 쓰는 것과 같은 헬퍼를 거치므로,
@@ -40,6 +58,12 @@
 
 ### Fixed
 
+- **캐시 키가 더 이상 자기 입력의 절반을 무시하지 않는다.** 소스의 파라미터 — 리스팅의 `limit`,
+  댓글 수집의 `sort`, 자막의 언어 우선순위, 번들의 parts — 가 생성 시점에 고정된 채 fingerprint에
+  빠져 있었다. 그래서 그 상한이 설정 가능해지는 순간, 100개로 자른 리스팅이 1,000개 요청에
+  답했을 것이다. 그 결과 6개 kind의 지문이 한 번 움직여 캐시가 식고, 나머지 5개는 바이트 단위로
+  동일해 영향이 없다. `collect`와 `cached`는 이제 한 곳에서 키를 만든다 — 한쪽만 고치는 것은
+  둘 다 안 고치는 것보다 나쁘기 때문이다.
 - **비싼 kind는 싼 것보다 적은 횟수로 큐에 들어간다.** `Job.max_attempts`는 스스로를 "잡을 큐에
   넣을 때 설정된다"고 적어놓고 아무도 설정하지 않아서, 모든 kind가 컬럼 기본값 3을 받았다 —
   한 타깃에 대해 실패한 댓글 수집 세 번은 모두가 경쟁하는 per-address 예산에서 약 100건의

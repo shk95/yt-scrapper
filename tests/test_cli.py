@@ -289,3 +289,35 @@ def test_recording_an_innertube_surface_nobody_records_is_refused_before_the_net
     assert result.exit_code != 0
     assert "browse-channel-about" in str(result.exception)
     assert list(tmp_path.iterdir()) == []
+
+
+def test_the_backfill_command_reports_what_it_attributed(tmp_path: Path) -> None:
+    """A command nobody runs is the same as no command, so `migrate` points at
+    this one — the window closes as retention ages out the rows it would
+    attribute."""
+    from tubedepth.database import Database
+    from tubedepth.fingerprints import fingerprint
+    from tubedepth.models import Artifact, utcnow
+
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    with database.session() as session:
+        session.add(
+            Artifact(
+                kind="video.metadata",
+                target="dQw4w9WgXcQ",
+                fingerprint=fingerprint(
+                    kind="video.metadata", target="dQw4w9WgXcQ", schema_version="1"
+                ),
+                digest="d" * 64,
+                byte_count=1,
+                fetched_at=utcnow(),
+                fresh_until=utcnow(),
+            )
+        )
+
+    result = runner.invoke(application, ["backfill-schema-versions", "--data-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
+        assert next(connection.execute("SELECT schema_version FROM artifacts"))[0] == "1"

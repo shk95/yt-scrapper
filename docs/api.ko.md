@@ -332,6 +332,7 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/artifacts?target=dQw4w9WgXcQ'
     {
       "kind": "video.metadata",
       "target": "dQw4w9WgXcQ",
+      "schema_version": "1",
       "digest": "b9f4c0e2...",
       "byte_count": 26417,
       "fetched_at": "2026-08-19T09:12:44Z",
@@ -342,6 +343,11 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/artifacts?target=dQw4w9WgXcQ'
 }
 ```
 
+`schema_version`은 그 kind의 normalizer 중 어느 버전이 이 바이트를 썼는지다. 컬럼이 생기기 전에
+수집된 것은 `null`이다 — fingerprint가 버전을 품고 있지만 SHA-256이라 행에서 되돌릴 수 없다.
+**`schema_version`이 다른 두 관측은 직접 비교할 수 없다**: bump는 모양이 바뀌었다는 뜻이고, 한쪽에
+있는 필드를 다른 쪽은 애초에 수집하지 않았을 수 있다.
+
 artifact 테이블은 덮어쓰지 않고 덧붙이므로, `target`으로 거르면 영상 하나의 이력이 나온다 —
 수치가 어떻게 움직였는지. 잡 원장은 그걸 답할 수 없고, 그것을 보관하는 것이 이 테이블이다.
 
@@ -349,6 +355,46 @@ artifact 테이블은 덮어쓰지 않고 덧붙이므로, `target`으로 거르
 `fetched_at`이 다른데 digest가 같다면 그 사이에 아무것도 바뀌지 않았다는 뜻이다.
 
 ---
+
+---
+
+## `GET /v1/artifacts/{digest}`
+
+관측 하나를, 그 내용 주소로. 이력을 읽는 방법이 이것이다 — 목록 라우트가 digest를 내주고,
+이 라우트가 그것을 실제 데이터로 바꾼다.
+
+```sh
+curl -s -H "X-API-Key: $KEY" localhost:8080/v1/artifacts/b9f4c0e2...
+```
+
+```json
+{
+  "digest": "b9f4c0e2...",
+  "kind": "video.metadata",
+  "target": "dQw4w9WgXcQ",
+  "fetched_at": "2026-08-19T09:12:44Z",
+  "schema_version": "1",
+  "current_schema_version": "1",
+  "payload_fields": ["chapters", "most_replayed", "tags", "view_count"],
+  "current_fields": ["chapters", "most_replayed", "published_date", "tags", "view_count"],
+  "payload": { "...": "수집된 그대로의 바이트" }
+}
+```
+
+**payload는 그대로 돌려주며 다시 파싱하지 않는다.** 옛 normalizer가 쓴 payload도 저장된 모습
+그대로 나온다. 보관할 가치가 있는 것은 원래의 관측이고, 오늘의 모델로 다시 모양을 잡는 것이
+이력이 이력이기를 그만두는 방식이기 때문이다.
+
+`payload_fields`와 `current_fields`는 선언이 아니라 계산된 값이고, 그 차이가 "이 옛 관측에는
+무엇이 없는가"에 대한 정직한 답이다. 옛 버전이 애초에 수집하지 않은 필드는 `payload_fields`에
+**없다** — null보다 강한 진술이다.
+
+그 관측을 수집한 버전을 소스가 철회했다면 **410 `retracted`**. 그 버전의 payload는 낡은 것이
+아니라 틀린 것이고, 그것을 이력으로 내주는 것은 잘못된 것으로 알려진 관측을 세탁하는 일이다.
+404가 아닌 이유는, 관측은 실제로 일어났고 404는 일어나지 않았다고 말하기 때문이다.
+
+이 인스턴스가 저장한 적 없는 digest, 그리고 payload가 retention을 지나 사라진 digest는
+404 `not_found`.
 
 ## 페이지네이션
 
@@ -378,6 +424,7 @@ curl -s -H "X-API-Key: $KEY" "localhost:8080/v1/jobs?cursor=$CURSOR"
 | 422 | `invalid_request` | 모르는 kind, 해석 불가한 target, 이 API가 발급하지 않은 커서 |
 | 404 | `not_found` | 그런 잡이 없음 — 또는 영상이 요청된 것을 갖고 있지 않음 |
 | 409 | `conflict` | 잡은 있으나 아직 끝나지 않음 |
+| 410 | `retracted` | 이 관측을 수집한 버전이 철회됨 |
 | 429 | `rate_limited` | 키 할당량 초과, 또는 업스트림이 이 주소를 거부 |
 | 502 | `parse_mismatch` | YouTube는 답했고 우리 파서가 그것을 더는 이해하지 못함 |
 | 502 | `upstream_error` | 업스트림이 답했으나 그 답을 쓸 수 없음 |

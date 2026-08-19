@@ -21,6 +21,7 @@ from tubedepth.database import Database
 from tubedepth.egress.control import Lane
 from tubedepth.egress.transport import Egress
 from tubedepth.identifiers import TargetType
+from tubedepth.models import Artifact
 from tubedepth.payload_store import PayloadStore
 from tubedepth.sources import SourceRegistry
 from tubedepth.sources.registry import SourceCost
@@ -204,3 +205,107 @@ def test_two_different_videos_do_not_share_a_cache_entry(tmp_path: Path) -> None
     service.collect("video.counted", "kJQP7kiw5Fk")
 
     assert source.calls == 2
+
+
+def test_a_recorded_artifact_names_the_schema_version_that_wrote_it(tmp_path: Path) -> None:
+    """The fingerprint contains the version and is a SHA-256, so it cannot be read back.
+
+    Hold an old payload and there is no way to tell which shape it is in, which
+    is what makes a bump sever history rather than merely age it. Recording the
+    version beside the row is what stops that accruing — and the cost of
+    reconstructing it later only goes up, because the list of versions a kind
+    has ever had is trivial today and archaeology after a few more bumps.
+    """
+    source = CountingSource()
+    service, database = cached_service(tmp_path, source)
+
+    service.collect("video.counted", "dQw4w9WgXcQ")
+
+    with database.session() as session:
+        recorded = session.query(Artifact).one()
+    assert recorded.schema_version == source.schema_version
+
+
+class ParameterisedSource:
+    """A source whose answer depends on more than its kind and target."""
+
+    kind = "video.parameterised"
+    target_type = TargetType.VIDEO
+    lane = Lane.YOUTUBE
+    cost = SourceCost.STANDARD
+    schema_version = "1"
+    payload_model: type[BaseModel] = FakeListing
+    default_freshness = timedelta(hours=6)
+
+    def __init__(self, limit: int) -> None:
+        self.calls = 0
+        self.cache_parameters = {"limit": limit}
+
+    def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> FakeListing:
+        self.calls += 1
+        return FakeListing(target=target)
+
+
+def test_the_cache_check_answers_for_the_question_the_collection_recorded(tmp_path: Path) -> None:
+    """`collect` and `cached` built the same key in two places.
+
+    They are the same lookup asked from two processes — the worker and the API
+    — and fixing one without the other is worse than fixing neither: the API
+    then misses everything the worker writes, and matches every pre-change row
+    forever and serves it as a 200. Both failure modes from the fingerprints
+    docstring at once.
+    """
+    source = ParameterisedSource(limit=10)
+    service, _ = cached_service(tmp_path, source)
+    service.collect("video.parameterised", "dQw4w9WgXcQ")
+
+    held = service.cached("video.parameterised", "dQw4w9WgXcQ")
+
+    assert held is not None, "the cache check asked a different question than the collection stored"
+
+
+def test_two_sources_differing_only_in_a_parameter_do_not_share_an_artifact(
+    tmp_path: Path,
+) -> None:
+    """A listing capped at 10 is not an answer to a request for 20."""
+    narrow = ParameterisedSource(limit=10)
+    service, database = cached_service(tmp_path, narrow)
+    service.collect("video.parameterised", "dQw4w9WgXcQ")
+
+    wide = ParameterisedSource(limit=20)
+    registry = SourceRegistry()
+    registry.register(wide)  # type: ignore[arg-type]
+    CollectionService(
+        payloads=PayloadStore(tmp_path / "payloads"),
+        registry=registry,
+        database=database,
+        runtime=None,
+    ).collect("video.parameterised", "dQw4w9WgXcQ")
+
+    assert wide.calls == 1, "the wider request was served the narrower one's answer"
+
+
+def test_a_stored_payload_the_model_can_no_longer_parse_is_a_cache_miss(tmp_path: Path) -> None:
+    """Forget the bump and the cache serves bytes the new model rejects.
+
+    A pydantic `ValidationError` is not a `TubedepthError`, and the API
+    registers a handler only for those — so it reaches FastAPI's default and
+    `POST /v1/jobs` answers 500 for **every target that has a cached
+    artifact**. A stored payload the current model cannot read is, by
+    definition, not an answer to the current question: handled as a miss, the
+    cost is requests until someone bumps, rather than an API that is down.
+    """
+    source = CountingSource()
+    service, database = cached_service(tmp_path, source)
+    service.collect("video.counted", "dQw4w9WgXcQ")
+    with database.session() as session:
+        digest = session.query(Artifact).one().digest
+    # What a forgotten bump looks like from here: bytes that no longer fit.
+    PayloadStore(tmp_path / "payloads").put("video.counted", b'{"unexpected": true}')
+    stored = tmp_path / "payloads"
+    for path in stored.rglob(f"*{digest[:8]}*"):
+        path.write_bytes(__import__("gzip").compress(b'{"nothing": "matching"}'))
+
+    held = service.cached("video.counted", "dQw4w9WgXcQ")
+
+    assert held is None, "unparseable stored bytes were served as a cache hit"
