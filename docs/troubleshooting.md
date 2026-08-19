@@ -76,6 +76,42 @@ writing inside a transaction it opened by reading.
 
 ## Third-party services
 
+## `duplicate column name: …` from `tubedepth migrate`
+
+Alembic is behind the schema, because `create_schema` already applied the
+change on startup and does not touch `alembic_version`. So the upgrade tries to
+add a column that is there.
+
+This is not a corner case — it is what happens to **any** database that has been
+opened by a running deployment between a model change and the migration, which
+is every database that is actually in use. It happened to the working one here.
+
+Check what is real before doing anything:
+
+```sh
+uv run python -c "
+import sqlite3; c = sqlite3.connect('var/tubedepth.db')
+print(c.execute('SELECT * FROM alembic_version').fetchone())
+print(sorted(r[0] for r in c.execute(\"SELECT name FROM sqlite_master WHERE type='table'\")))"
+uv run alembic heads
+```
+
+If the schema already matches the head — the tables and columns are all there,
+which is what the startup repair does — then the fix is to record that rather
+than to replay it:
+
+```sh
+uv run tubedepth migrate --stamp
+```
+
+**Do not stamp a database whose schema does not actually match.** Stamping is a
+claim that the migrations have run, and a wrong claim is silently believed
+forever after. If only *some* of the head's changes are present, `--stamp` to
+the last revision that is genuinely applied and upgrade from there.
+
+`--stamp` exists for the one-time case of a database that predates migrations;
+this is the same shape arriving a different way.
+
 ## `stored payload for … does not fit schema version …`
 
 A payload model changed and its source's `schema_version` did not, so the cache
