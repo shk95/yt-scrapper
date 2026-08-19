@@ -36,6 +36,11 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Fixed
 
+- **`tubedepth work --once` delivers its callbacks and reaps stale leases.**
+  It called `run_once`, which is the primitive and does neither, so the one
+  invocation with no next run to catch up was the one that skipped the
+  bookkeeping — a job it finished was never announced. `--once` is now
+  `drain(limit=1)`: one path with a bound rather than two paths that disagree.
 - **Retention no longer unlinks a payload a current observation still uses.**
   The store is content-addressed, so two observations that collected identical
   bytes are one file — which `GET /v1/artifacts` teaches readers to expect,

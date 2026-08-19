@@ -252,7 +252,7 @@ def work(
             window_ceiling=float(os.environ.get("TUBEDEPTH_WINDOW_CEILING", "6"))
         ),
     )
-    completed = 1 if (once and worker.run_once()) else (0 if once else worker.drain())
+    completed = worker.drain(limit=1 if once else None)
     typer.echo(f"✓ {completed} job(s) completed")
 
 
