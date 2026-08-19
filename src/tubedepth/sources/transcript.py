@@ -36,6 +36,9 @@ FALLBACK_LANGUAGES = ("ko", "en")
 # The query parameter marking an auto-translated track rather than a transcription.
 TRANSLATION_MARKER = "tlang="
 
+# yt-dlp files live chat replay under `subtitles`. It is not a caption track.
+LIVE_CHAT_KEY = "live_chat"
+
 
 @dataclass(frozen=True, slots=True)
 class CaptionTrack:
@@ -72,6 +75,16 @@ def _track(bucket: Mapping[str, Any], key: str, *, is_automatic: bool) -> Captio
         format=CAPTION_FORMAT,
         url=found["url"],
     )
+
+
+def _caption_languages(dump: Mapping[str, Any]) -> set[str]:
+    """Every language this video has captions in, in either bucket.
+
+    `live_chat` is excluded: yt-dlp files chat replay under `subtitles` with
+    that key, and it is a transcript of the audience rather than of the video.
+    """
+    keys = {*(dump.get("subtitles") or {}), *(dump.get("automatic_captions") or {})}
+    return {key for key in keys if key != LIVE_CHAT_KEY}
 
 
 def video_language(dump: Mapping[str, Any]) -> str | None:
@@ -172,6 +185,16 @@ def select_caption_track(
 
 
 def _no_track_message(dump: Mapping[str, Any], fallback_languages: Sequence[str]) -> str:
+    """Say which of the three failures this is; they are acted on differently.
+
+    Captions turned off is nothing to do. A video whose own language we cannot
+    serve is a fact about that video. Neither is a reason to revisit the
+    configured fallback, and a message naming that fallback in all three cases
+    invites exactly that — five of forty videos in one sweep read that way.
+    """
+    if not _caption_languages(dump):
+        return "the video has no caption tracks at all"
+
     language = video_language(dump)
     if language is not None:
         return f"no caption track in the video's own language: {language}"

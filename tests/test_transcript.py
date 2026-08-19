@@ -180,9 +180,14 @@ def test_a_video_with_no_language_at_all_falls_back_to_the_configured_order() ->
 def test_a_video_with_no_track_in_its_own_language_is_reported_as_not_found(
     recorded_dump: dict[str, Any],
 ) -> None:
-    dump = dict(recorded_dump, language="is", subtitles={}, automatic_captions={})
+    # Tracks exist — 157 automatic languages and five manual ones — just none
+    # in the language the video is in. `zz` is chosen because YouTube offers a
+    # translation into nearly everything, and a language it does offer would
+    # pass here only because fixture URLs are redacted and so carry no `tlang`.
+    dump = dict(recorded_dump, language="zz")
+    assert "zz" not in dump["automatic_captions"]
 
-    with pytest.raises(NotFoundError, match="is"):
+    with pytest.raises(NotFoundError, match="the video's own language: zz"):
         select_caption_track(dump)
 
 
@@ -290,3 +295,32 @@ def test_the_last_failure_is_raised_when_no_candidate_can_be_fetched(
 
     with pytest.raises(RateLimitedError):
         TranscriptSource().collect("dQw4w9WgXcQ", RefusingEgress(), StubRuntime(recorded_dump))
+
+
+def test_a_video_with_no_caption_tracks_at_all_says_so(recorded_dump: dict[str, Any]) -> None:
+    """Distinguishing "none exist" from "none we can use" is the whole message.
+
+    Five of forty videos in one channel sweep failed this way, and the message
+    named the configured fallback languages — which reads as a policy problem
+    when the truth is that the uploader turned captions off. Those are acted on
+    differently: one is a setting to revisit, the other is nothing to do.
+    """
+    dump = dict(recorded_dump, language=None, subtitles={}, automatic_captions={})
+
+    with pytest.raises(NotFoundError, match="no caption tracks at all"):
+        select_caption_track(dump)
+
+
+def test_live_chat_replay_is_not_mistaken_for_a_caption_track(
+    recorded_dump: dict[str, Any],
+) -> None:
+    """yt-dlp files live chat replay under `subtitles`, keyed `live_chat`."""
+    dump = dict(
+        recorded_dump,
+        language=None,
+        subtitles={"live_chat": [{"ext": "json", "url": "https://example.invalid/chat"}]},
+        automatic_captions={},
+    )
+
+    with pytest.raises(NotFoundError, match="no caption tracks at all"):
+        select_caption_track(dump)
