@@ -154,9 +154,10 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
   polling faster than a kind's freshness window was collecting nothing while
   reporting success. The flag is a column on the job now, so it survives the
   queue and a retry. A database that already exists gains the column from the
-  startup repair, so a running deployment does not break — but run `tubedepth
-  migrate` anyway, or Alembic's version table stays behind and the next
-  migration tries to add a column that is already there.
+  startup repair, so a running deployment does not break. Alembic's version
+  table does stay behind, and the next `tubedepth migrate` then fails with
+  `duplicate column name` — see `docs/troubleshooting.md`, which says how to
+  tell whether the answer is `--stamp` or an upgrade.
 
 ## [0.1.0] - 2026-08-19
 
