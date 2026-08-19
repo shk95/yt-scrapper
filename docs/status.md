@@ -370,6 +370,38 @@ browser `User-Agent` stayed but its evidence left with the source — see
 was RYD's documented 10,000/day. It no longer has one. That is recorded under
 "Proxying is deferred" rather than left for someone to rediscover.
 
+### The dashboard reads the same API as everything else
+
+`/` serves one self-contained page: queue counts, per-source health, a
+twenty-four hour completion histogram, and a filterable browser over jobs and
+artifacts. It calls the same `/v1` routes a script would, rather than private
+endpoints — the same rule the CLI follows against the service layer, and for
+the same reason. A dashboard with its own data path can show something the API
+will not, and then the two disagree about what is true.
+
+**Unauthenticated, and that is the design rather than an omission.** The page
+carries no data; it asks the browser for a key and sends it as a header. This
+project's auth is a header, so requiring one to fetch the HTML would mean a key
+in a URL or a cookie — two places a secret should not be. A test asserts no key
+appears in the served page.
+
+**No external references, asserted by a test.** No CDN stylesheet, script or
+font. A private tool on a private network cannot assume the internet is
+reachable, and an external reference tells a third party when this instance is
+being looked at.
+
+Jobs and artifacts are browsed separately because they answer different
+questions. The job ledger says what was asked for and what happened to it; the
+artifact table appends rather than overwrites, so filtering it by target gives
+one video's history — `dQw4w9WgXcQ` currently shows metadata, comments and a
+transcript collected on three different days.
+
+Paging is keyset rather than offset: an offset re-reads what it skips and
+drifts when rows arrive mid-page, which against a table a worker is actively
+writing shows one job twice and misses another. The cursor is opaque base64url,
+partly because an ISO timestamp's `+` becomes a space in a query string, and
+partly so the ordering columns stay out of the public contract.
+
 ### Source health is recorded, because nothing could see it before
 
 The rate controller already knew when a route was in trouble, and that
