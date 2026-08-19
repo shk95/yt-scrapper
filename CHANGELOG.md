@@ -20,6 +20,20 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+### Added
+
+- **A sampler, so a history starts accumulating.** `tubedepth-sample.timer` in
+  `deploy/` forces a re-collection of a watch list every hour; the list is
+  `~/.config/tubedepth/watchlist.txt`, one video id per line, and
+  `deploy/watchlist.example.txt` shows the format. Off unless you enable it.
+  Velocity is the difference between two observations and observations only
+  accumulate in real time, so this is worth starting before anything needs it.
+- **`tubedepth enqueue --refresh` and `--from-file`.** The first puts the same
+  forced collection on the command line that `POST /v1/jobs` has; the second
+  reads targets one per line, so a schedule points at a list instead of
+  carrying thirty ids on its `ExecStart`. A list that cannot be read is refused
+  rather than treated as empty.
+
 ### Fixed
 
 - **`refresh` now reaches the worker.** `"refresh": true` on `POST /v1/jobs`

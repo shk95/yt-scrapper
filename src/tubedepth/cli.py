@@ -61,6 +61,32 @@ def _reject_option_like(values: Sequence[str]) -> None:
             raise ValidationError(f"unknown option: {value}")
 
 
+def _targets_from_file(path: Path) -> list[str]:
+    """One target per line. Blank lines are skipped, and so are `#` comments.
+
+    A schedule points at a file rather than carrying the list itself, because
+    the list is edited far more often than whatever reads it — thirty ids on a
+    unit's ExecStart line would mean editing the unit and reloading the manager
+    to change one of them.
+
+    A file that cannot be read is refused rather than treated as empty. A timer
+    firing hourly at a watch list somebody moved would otherwise queue nothing,
+    report success, and leave the history to stop moving with no failure
+    anywhere for anyone to notice.
+
+    Only a line whose first character is `#` is a comment, so a search query
+    holding one survives. A query that *begins* with `#` has to be an argument
+    instead; that is the price of the list being commentable at all.
+    """
+    try:
+        lines = path.read_text(encoding="utf-8").splitlines()
+    except OSError as error:
+        raise ValidationError(f"cannot read the target list at {path}: {error}") from error
+    return [
+        stripped for line in lines if (stripped := line.strip()) and not stripped.startswith("#")
+    ]
+
+
 @application.command(context_settings=TOLERATE_LEADING_DASHES)
 def collect(
     kind: Annotated[str, typer.Argument(help="What to collect; see `tubedepth sources`")],
@@ -94,7 +120,9 @@ def _database(data_directory: Path) -> Database:
 @application.command(context_settings=TOLERATE_LEADING_DASHES)
 def enqueue(
     kind: Annotated[str, typer.Argument(help="What to collect; see `tubedepth sources`")],
-    targets: Annotated[list[str], typer.Argument(help="Videos, channels, playlists or a query")],
+    targets: Annotated[
+        list[str] | None, typer.Argument(help="Videos, channels, playlists or a query")
+    ] = None,
     data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
         "var"
     ),
@@ -102,13 +130,31 @@ def enqueue(
         str | None,
         typer.Option("--then", help="For a listing kind: what to collect per video found"),
     ] = None,
+    from_file: Annotated[
+        Path | None,
+        typer.Option("--from-file", help="Read targets from a file, one per line"),
+    ] = None,
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Collect even if a fresh artifact is held"),
+    ] = False,
 ) -> None:
     """Queue work without doing it. The worker picks it up.
 
     With `--then`, one queued channel becomes a job per video it holds. That is
     the difference between enumerating and collecting at any volume.
+
+    With `--refresh`, the job collects even where a fresh artifact is already
+    held. That is what a repeated sweep of the same videos needs to be worth
+    running: without it, anything asked for again inside its freshness window
+    is answered from the cache and records no new observation, so the history
+    the artifact table keeps simply stops moving.
     """
-    _reject_option_like([kind, *targets])
+    from_list = _targets_from_file(from_file) if from_file is not None else []
+    wanted = [*(targets or []), *from_list]
+    _reject_option_like([kind, *wanted])
+    if not wanted:
+        raise ValidationError("no targets: name them as arguments, or point --from-file at a list")
     registry = default_registry()
     source = registry.get(kind)
     if then is not None:
@@ -118,16 +164,18 @@ def enqueue(
 
     database = _database(data_directory)
     with database.session() as session:
-        for target in targets:
+        for target in wanted:
             job = Job(
                 kind=kind,
                 target=normalize_target(source.target_type, target),
                 follow_up_kind=then,
+                refresh=refresh,
             )
             session.add(job)
             session.flush()
             suffix = f" → {then}" if then else ""
-            typer.echo(f"→ queued {job.identifier[:8]}  {kind}  {job.target}{suffix}")
+            forced = " (forced)" if refresh else ""
+            typer.echo(f"→ queued {job.identifier[:8]}  {kind}  {job.target}{suffix}{forced}")
 
 
 @application.command()

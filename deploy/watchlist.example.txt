@@ -1,0 +1,14 @@
+# The sampler's watch list. Copy to ~/.config/tubedepth/watchlist.txt and
+# replace these with the videos you actually want a history of.
+#
+# One video id per line. Blank lines are skipped, and so is any line whose
+# first character is `#`. A `watch?v=` or `youtu.be` URL works too — the id is
+# normalised before the job is recorded.
+#
+# Size it deliberately: every line is one forced collection per firing of
+# tubedepth-sample.timer, out of the same per-address budget everything else
+# draws on. Thirty lines hourly is about one percent of the measured ceiling.
+# Three hundred is ten percent, and the behaviour of this system under that
+# kind of sustained load has not been measured — see docs/status.md.
+
+dQw4w9WgXcQ

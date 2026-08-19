@@ -81,14 +81,33 @@ uv run tubedepth serve --port 8080
 
 ## 배포
 
-systemd **유저 유닛** 두 개가 `deploy/`에 있다. root가 필요 없고, 권한을 조용히 얻을 수도 없다.
+systemd **유저 유닛**이 `deploy/`에 있다. 어느 것도 root가 필요 없고, 권한을 조용히 얻을 수도
+없다. 그중 둘이 서비스 본체다:
 
 ```sh
-cp deploy/tubedepth-*.service ~/.config/systemd/user/
+cp deploy/tubedepth-api.service deploy/tubedepth-worker.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now tubedepth-api tubedepth-worker
 loginctl enable-linger $USER    # 로그아웃 후에도 살아있게 — 없으면 재부팅이 크래시처럼 보인다
 ```
+
+셋째는 선택이고 기본적으로 꺼져 있다. `tubedepth-sample.timer`는 영상 목록을 매시간 다시
+수집하되 신선도 기간을 강제로 넘겨서, 매 회차가 새 관측을 기록하게 한다. `GET /v1/artifacts`를
+캐시가 아니라 미분 가능한 이력으로 만드는 것이 이것이고, 이력은 실시간으로만 쌓이므로 필요해지기
+전에 시작해두는 편이 낫다.
+
+```sh
+mkdir -p ~/.config/tubedepth
+cp deploy/watchlist.example.txt ~/.config/tubedepth/watchlist.txt
+$EDITOR ~/.config/tubedepth/watchlist.txt        # 한 줄에 영상 id 하나
+cp deploy/tubedepth-sample.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now tubedepth-sample.timer
+```
+
+**목록 크기는 의도해서 정한다.** 한 줄이 발화마다 강제 수집 한 건이고, 나머지 전부가 쓰는 것과
+같은 per-address 예산에서 나간다. 영상 30개를 시간당 도는 것은 측정된 처리량의 약 1%다. 그보다
+한참 위의 지속 부하에서 이 시스템이 어떻게 움직이는지는 측정된 바 없다.
 
 API와 워커를 나눈 이유는 취향이 아니다. yt-dlp 추출은 블로킹이고 메모리를 쓰므로,
 같이 돌리면 댓글 수집 하나가 `GET /v1/jobs/{job_id}`의 p99를 결정하고 yt-dlp 크래시가

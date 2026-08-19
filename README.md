@@ -87,15 +87,35 @@ route to the internet.
 
 ## Deployment
 
-Two systemd **user** units live in `deploy/`. Neither needs root, and neither
-can quietly acquire it.
+systemd **user** units live in `deploy/`. None needs root, and none can quietly
+acquire it. Two of them are the service itself:
 
 ```sh
-cp deploy/tubedepth-*.service ~/.config/systemd/user/
+cp deploy/tubedepth-api.service deploy/tubedepth-worker.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now tubedepth-api tubedepth-worker
 loginctl enable-linger $USER    # or a reboot looks exactly like a crash
 ```
+
+The third is optional and off by default: `tubedepth-sample.timer` re-collects
+a list of videos every hour, forcing past the freshness window so that each
+sweep records a new observation. That is what turns `GET /v1/artifacts` from a
+cache into a history you can differentiate — and it only accumulates in real
+time, so it is worth starting before anything needs it.
+
+```sh
+mkdir -p ~/.config/tubedepth
+cp deploy/watchlist.example.txt ~/.config/tubedepth/watchlist.txt
+$EDITOR ~/.config/tubedepth/watchlist.txt        # one video id per line
+cp deploy/tubedepth-sample.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now tubedepth-sample.timer
+```
+
+**Size the list deliberately.** Every line is one forced collection per firing,
+out of the same per-address budget everything else draws on. Thirty videos
+hourly is about one percent of the measured throughput; the behaviour of this
+system under sustained load well above that has not been measured.
 
 Splitting the API from the worker is not a matter of taste. yt-dlp extraction
 blocks and holds memory; run them together and one comment harvest sets the p99

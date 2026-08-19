@@ -1,0 +1,46 @@
+# One pass of the sampler: re-collect every video on the watch list, forced.
+#
+# Started by tubedepth-sample.timer rather than enabled directly. It queues
+# work and exits; the worker is what collects, so this unit is finished in
+# milliseconds and does no extraction of its own.
+#
+# BEFORE ENABLING, write the watch list — this unit fails without it, on
+# purpose, rather than sampling nothing quietly:
+#
+#   mkdir -p ~/.config/tubedepth
+#   $EDITOR ~/.config/tubedepth/watchlist.txt   # one video id per line
+#
+# `deploy/watchlist.example.txt` shows the format. Then:
+#
+#   cp deploy/tubedepth-sample.* ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now tubedepth-sample.timer
+#
+# Why forced: video.metadata is fresh for six hours, so an hourly sweep without
+# --refresh is answered from the cache and records no observation. The point of
+# sampling is the second observation, so the flag is the feature.
+
+[Unit]
+Description=tubedepth sampler: force a re-collection of the watched videos
+Documentation=file://%h/github_prj/yt-scrapper/docs/api.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/github_prj/yt-scrapper
+Environment=TUBEDEPTH_DATA_DIR=%h/github_prj/yt-scrapper/var
+ExecStart=/usr/bin/env uv run --frozen tubedepth enqueue video.metadata --from-file %h/.config/tubedepth/watchlist.txt --refresh
+
+# Not restarted. A sample that failed is not worth retrying in a tight loop —
+# the next hour is soon enough, and a watch list that has gone missing should
+# show up as a repeating failure rather than a spin.
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/github_prj/yt-scrapper/var
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

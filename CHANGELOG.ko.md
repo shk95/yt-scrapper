@@ -17,6 +17,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- **샘플러 — 이력이 쌓이기 시작한다.** `deploy/`의 `tubedepth-sample.timer`가 매시간 watch
+  list를 강제로 다시 수집한다. 목록은 `~/.config/tubedepth/watchlist.txt`이고 한 줄에 영상 id
+  하나이며, 형식은 `deploy/watchlist.example.txt`에 있다. 켜지 않으면 동작하지 않는다.
+  velocity는 두 관측의 차이이고 관측은 실시간으로만 쌓이므로, 필요해지기 전에 시작할 값어치가 있다.
+- **`tubedepth enqueue --refresh`와 `--from-file`.** 앞은 `POST /v1/jobs`가 가진 강제 수집을
+  커맨드라인에도 두는 것이고, 뒤는 한 줄에 하나씩 타깃을 읽어서 스케줄이 `ExecStart`에 id 서른
+  개를 싣는 대신 목록 파일을 가리키게 한다. 읽을 수 없는 목록은 빈 목록으로 취급하지 않고 거부한다.
+
 ### Fixed
 
 - **`refresh`가 이제 워커까지 닿는다.** `POST /v1/jobs`의 `"refresh": true`는 API 자신의

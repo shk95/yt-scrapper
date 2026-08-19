@@ -16,6 +16,13 @@ import pytest
 
 UNITS = Path(__file__).parent.parent / "deploy"
 
+# Read from the directory rather than listed here. A copied list is one a new
+# unit is added without, and a unit nobody checks is exactly the file these
+# tests exist for — the same argument the option check below makes for reading
+# the CLI's own help instead of a list that would rot beside it.
+SERVICES = sorted(path.name for path in UNITS.glob("*.service"))
+TIMERS = sorted(path.name for path in UNITS.glob("*.timer"))
+
 
 def unit(name: str) -> configparser.ConfigParser:
     # No interpolation: systemd's `%h` specifiers are not configparser's `%`
@@ -28,7 +35,7 @@ def unit(name: str) -> configparser.ConfigParser:
     return parser
 
 
-@pytest.mark.parametrize("name", ["tubedepth-api.service", "tubedepth-worker.service"])
+@pytest.mark.parametrize("name", SERVICES)
 def test_the_unit_runs_a_command_this_project_actually_has(name: str) -> None:
     from tubedepth.cli import application
 
@@ -42,14 +49,14 @@ def test_the_unit_runs_a_command_this_project_actually_has(name: str) -> None:
     assert subcommand in registered, f"{name} runs `tubedepth {subcommand}`, which does not exist"
 
 
-@pytest.mark.parametrize("name", ["tubedepth-api.service", "tubedepth-worker.service"])
+@pytest.mark.parametrize("name", SERVICES)
 def test_the_unit_pins_the_lock_file(name: str) -> None:
     """Without --frozen a restart may resolve a newer dependency than the one
     committed, so the running version becomes whatever the day supplies."""
     assert "--frozen" in unit(name)["Service"]["ExecStart"]
 
 
-@pytest.mark.parametrize("name", ["tubedepth-api.service", "tubedepth-worker.service"])
+@pytest.mark.parametrize("name", SERVICES)
 def test_the_sandbox_still_lets_the_data_directory_be_written(name: str) -> None:
     """`ProtectSystem=strict` makes the whole filesystem read-only, so a unit
     that sets it without a matching ReadWritePaths starts and then fails on the
@@ -86,9 +93,9 @@ def test_the_api_is_not_exposed_beyond_loopback_by_the_unit() -> None:
     assert "--host 127.0.0.1" in unit("tubedepth-api.service")["Service"]["ExecStart"]
 
 
-def test_neither_unit_carries_a_secret() -> None:
+def test_no_unit_carries_a_secret() -> None:
     """Unit files are world-readable where they live."""
-    for name in ("tubedepth-api.service", "tubedepth-worker.service"):
+    for name in SERVICES:
         body = (UNITS / name).read_text()
         assert "ytd_" not in body
         for line in body.splitlines():
@@ -96,7 +103,19 @@ def test_neither_unit_carries_a_secret() -> None:
                 raise AssertionError(f"{name} puts a secret in the unit: {line}")
 
 
-@pytest.mark.parametrize("name", ["tubedepth-api.service", "tubedepth-worker.service"])
+@pytest.mark.parametrize("name", TIMERS)
+def test_every_timer_has_the_service_it_starts(name: str) -> None:
+    """systemd pairs `foo.timer` with `foo.service` by name and says nothing
+    when the second one is absent: `systemctl --user enable` accepts the timer,
+    the schedule fires, and every firing fails to find its unit. Shipping the
+    pair is the only moment anyone would notice.
+    """
+    expected = name.removesuffix(".timer") + ".service"
+
+    assert expected in SERVICES, f"{name} fires {expected}, which is not in deploy/"
+
+
+@pytest.mark.parametrize("name", SERVICES)
 def test_every_option_the_unit_passes_actually_exists(name: str) -> None:
     """The classic unit failure: a command that no longer takes an option it
     is given, discovered on a reboot rather than on the commit that removed it.

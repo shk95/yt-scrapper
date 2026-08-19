@@ -457,6 +457,42 @@ model produces `refresh BOOLEAN DEFAULT 0 NOT NULL DEFAULT 0` and the startup
 repair fails on the statement. The two paths therefore differ in DDL, which
 nothing depends on, and agree in behaviour, which everything does.
 
+### The sampler is a timer and a text file, not a scheduler
+
+Nothing in this project ran periodically, so the artifact table was a time
+series with nothing taking samples. `tubedepth-sample.timer` fires
+`tubedepth enqueue video.metadata --from-file … --refresh` every hour and that
+is the whole mechanism.
+
+*It was built now rather than with the feature that needs it.* Trend detection
+is the difference between two observations, and observations only accumulate in
+real time — no amount of work later produces last week's view count. Everything
+else in the backlog can be built faster by adding people or agents to it; this
+one cannot, so it starts first and runs while the rest is built.
+
+*Deliberately not a scheduler.* No table of schedules, no watch-list model, no
+cadence per target. The trend work will need a real watch list, and it should
+inherit a generic worker control channel — the same one an operator pausing the
+worker from the dashboard needs — rather than a bespoke table built here that
+would then have to be replaced. A timer and a file cost nothing to throw away.
+
+*The list lives outside the repository,* at `~/.config/tubedepth/watchlist.txt`,
+next to the WireGuard config and for the same reason: which videos someone is
+watching is operator data, not project data, and a checked-in list is one every
+clone starts collecting.
+
+*A missing list is a failure, not an empty sweep.* A timer firing hourly at a
+file somebody moved would otherwise queue nothing, report success, and leave
+the series to stop moving with nothing anywhere reporting a problem — which is
+the exact shape of the `refresh` bug above, rebuilt on purpose.
+
+*Sizing is arithmetic, and it is written down so it can be checked.* One line
+is one forced collection per firing. Thirty videos hourly is 30 jobs/h against
+a measured ceiling near 2,150 jobs/h, or about one percent. Three hundred is
+ten percent, and this file is explicit elsewhere that behaviour under sustained
+load is unmeasured — a trend poller is precisely sustained load, so the watch
+list and the cadence are one decision and should move together.
+
 ### The dashboard reads the same API as everything else
 
 `/` serves one self-contained page: queue counts, per-source health, a
