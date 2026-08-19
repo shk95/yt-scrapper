@@ -101,6 +101,7 @@ registry, so it is never out of date; the copy here says what each one is for.
 | `channel.videos` | channel | youtube | cheap | 6h | a channel's uploads |
 | `playlist.items` | playlist | youtube | cheap | 6h | a playlist's entries |
 | `search.videos` | query | youtube | cheap | 6h | search results |
+| `trending.videos` | region | youtube_data_api | cheap | 15m | what YouTube itself calls popular in one region, in its order. The only kind that reports a ranking rather than an observation, and the only one that spends Google API quota instead of the per-address budget |
 
 <!-- kinds:end -->
 

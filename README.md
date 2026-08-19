@@ -34,6 +34,7 @@ Full endpoint reference: [`docs/api.md`](docs/api.md).
 | `channel.about` | join date, country, links, **exact total view count**, description, tags, avatar | mostly absent |
 | `channel.community` | community posts | absent |
 | `channel.videos` · `playlist.items` · `search.videos` | listings — fan out to per-item collection with `--then` | possible, and it spends quota |
+| `trending.videos` | what YouTube itself calls popular, in its own order | the chart endpoint, which is what this uses |
 
 <!-- kinds:end -->
 

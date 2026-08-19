@@ -20,6 +20,7 @@ from .listings import ChannelVideosSource, PlaylistItemsSource, SearchVideosSour
 from .registry import DataSource, SourceRegistry
 from .sponsorblock import SponsorBlockSource
 from .transcript import TranscriptSource
+from .trending import TrendingVideosSource
 from .video_metadata import VideoMetadataSource
 
 __all__ = ["DataSource", "SourceRegistry", "default_registry"]
@@ -40,4 +41,5 @@ def default_registry() -> SourceRegistry:
     registry.register(RelatedVideosSource())
     registry.register(CommunityPostsSource())
     registry.register(ChannelAboutSource())
+    registry.register(TrendingVideosSource())
     return registry

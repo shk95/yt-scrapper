@@ -28,6 +28,11 @@ class Lane(StrEnum):
 
     YOUTUBE = "youtube"
     SPONSORBLOCK = "sponsorblock"
+    # Google's API quota is a different budget from YouTube's tolerance for an
+    # address: 10,000 units a day, spent a unit at a time, and untouched by
+    # anything the other lanes do. Sharing a lane would make a quarantine on
+    # one throttle the other for no reason in either direction.
+    YOUTUBE_DATA_API = "youtube_data_api"
 
 
 class Verdict(StrEnum):

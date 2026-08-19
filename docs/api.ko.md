@@ -93,6 +93,7 @@ POST /v1/jobs  ─┬─→ 200 + 결과                 이미 신선한 artifa
 | `channel.videos` | channel | youtube | cheap | 6시간 | 채널 업로드 목록 |
 | `playlist.items` | playlist | youtube | cheap | 6시간 | 재생목록 항목 |
 | `search.videos` | query | youtube | cheap | 6시간 | 검색 결과 |
+| `trending.videos` | region | youtube_data_api | cheap | 15분 | YouTube 자신이 인기라고 부르는 것을, 그 순서대로. 관측이 아니라 순위를 보고하는 유일한 kind이고, per-address 예산 대신 Google API 쿼터를 쓰는 유일한 kind다 |
 
 <!-- kinds:end -->
 

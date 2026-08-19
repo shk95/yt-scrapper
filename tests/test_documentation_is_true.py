@@ -181,7 +181,13 @@ def test_the_capability_tables_list_exactly_the_kinds_that_are_registered(docume
     assert region is not None, f"{document.name} has no <!-- kinds:start --> region"
 
     registered = set(default_registry().kinds())
-    listed = set(re.findall(r"`((?:video|channel|playlist|search)\.[a-z_]+)`", region.group(1)))
+    # The prefixes are listed rather than matched loosely, so a stray backticked
+    # word in the region is not mistaken for a kind. A new target family — the
+    # chart endpoint brought `trending` — has to be added here, which is a
+    # deliberate speed bump on inventing one.
+    listed = set(
+        re.findall(r"`((?:video|channel|playlist|search|trending)\.[a-z_]+)`", region.group(1))
+    )
 
     assert registered <= listed, f"{document.name} omits: {sorted(registered - listed)}"
     assert listed <= registered, (

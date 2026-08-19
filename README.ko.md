@@ -32,6 +32,7 @@ curl -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
 | `channel.about` | 가입일, 국가, 외부 링크, **정확한 총 조회수**, 설명, 태그, 아바타 | 대부분 없음 |
 | `channel.community` | 커뮤니티 게시물 | 없음 |
 | `channel.videos` · `playlist.items` · `search.videos` | 목록 — `--then`으로 항목별 수집까지 팬아웃 | 가능하나 쿼터 소모 |
+| `trending.videos` | YouTube 자신이 인기라고 부르는 것을, 그 순서 그대로 | chart 엔드포인트이고, 이 소스가 쓰는 것이 그것이다 |
 
 <!-- kinds:end -->
 
