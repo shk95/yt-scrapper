@@ -76,23 +76,6 @@ writing inside a transaction it opened by reading.
 
 ## Third-party services
 
-### A third-party service answers 403 to one agent and 200 to a browser one
-
-Both entries that used to be here described Return YouTube Dislike, which this
-project no longer calls. The finding is worth keeping even though the service
-is gone: it answered 403 to urllib's default `User-Agent` and 200 to a browser
-one, verified 2026-08-18, which is why every non-yt-dlp request takes its agent
-from the egress it was leased rather than from whatever httpx defaults to.
-
-Nothing that remains has been measured to require it, so treat it as a posture
-rather than a rule with evidence. If you meet a 403 from a service that is not
-YouTube, check the agent first; if the agent is present and it is still 403,
-the **address** is blocked, not the request.
-
-Every non-yt-dlp request gets its agent from the egress, so seeing a default
-agent means something constructed an `httpx.Client` outside
-`src/tubedepth/egress/`. The architecture test exists to catch exactly that.
-
 ## `table jobs has no column named api_key_id`
 
 The database file predates the column. `create_all` never alters a table it
