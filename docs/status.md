@@ -20,7 +20,7 @@ Last updated: 2026-08-18.
 | M6 — discovery | done (channel.videos, search.videos, playlist.items) |
 | worker concurrency + AIMD wired | done |
 | caching + dedup + retention | done |
-| M4 — dislikes, SponsorBlock | done |
+| M4 — SponsorBlock | done (dislikes removed, see below) |
 | M7 — InnerTube trio | done |
 | M3 — HTTP API and auth | done |
 | M4.5 — egress pool | deferred; see "decisions" below |
@@ -137,17 +137,13 @@ non-zero rather than silently evicting. What `--max-age-days` buys is a bounded
 window of history: how a video's counts moved over the last month is a free
 by-product of caching, and older than that is not kept.
 
-**Third-party sources are on their own lanes, and that is the point.**
-Neither `video.dislikes` nor `video.sponsor_segments` touches YouTube, so their
-cost comes out of somebody else's budget and the per-address YouTube tolerance
-— which is what actually caps this project — is untouched by them. Return
-YouTube Dislike documents 100 requests a minute and 10,000 a day; SponsorBlock
-publishes no figure.
+**`video.sponsor_segments` is on its own lane, and that is the point.** It
+never touches YouTube, so its cost comes out of somebody else's budget and the
+per-address YouTube tolerance — which is what actually caps this project — is
+untouched by it. SponsorBlock publishes no rate figure, so the lane's limits
+are discovered by the controller rather than configured.
 
-Dislike numbers are labelled estimates in the model itself (`is_estimate`,
-`source`), not only in the documentation. They are reconstructed from an
-archive plus extension telemetry, and a field called `dislikes` sitting beside
-a real `likes` invites exactly the wrong reading.
+It was one of two. See "Dislikes were removed" below for the other.
 
 **The InnerTube surfaces are the fragile half, and the tests are shaped
 around that.** Nothing reads a fixed path: YouTube reshuffles the containers
@@ -216,6 +212,59 @@ Direct egress is a residential KT line in KR.
 ---
 
 ## Decisions that are expensive to reverse
+
+### Dislikes were removed, and deleted rather than archived
+
+`video.dislikes` and the Return YouTube Dislike source it called are gone as of
+2026-08-19. Restore with `git log -- src/tubedepth/sources/dislikes.py`; the
+last commit holding it is the one before this line was written.
+
+**Why it went.** Every other source in this project either returns what a
+service actually knows or fails. RYD is the only one that answered confidently
+about things it did not know, and the shape of that answer could not be
+distinguished from real data:
+
+| queried | rawLikes | rawDislikes | likes | dislikes | views |
+| --- | --- | --- | --- | --- | --- |
+| Never Gonna Give You Up | 127,979 | 6,606 | 19,341,010 | 517,520 | 1.81 bn |
+| a one-day-old news clip | 1 | 0 | 334 | **0** | 7,502 |
+| an id that does not exist | null | null | 0 | **0** | 0 |
+
+The two zeros in that column are not the same claim. The middle row means "our
+sample is one person and that person did not press dislike"; the bottom row
+means "we have never heard of this video, and we created a row for it because
+you asked". Both arrive as `dislikes: 0` next to a `likes` figure that *is*
+real — measured against YouTube's own numbers, RYD's `likes` and `viewCount`
+match to within a refresh lag (19,341,010 vs 19,341,061). A true number sitting
+beside a fabricated one, in the same object, with no field to tell them apart.
+
+We dropped `rawLikes`, `rawDislikes` and `deleted` at
+`sources/dislikes.py:55`, which is what made it undecidable downstream too: the
+evidence a client would need to judge the number was discarded before storage.
+That was fixable. What was not fixable is that separating "no data" from "no
+video" requires asking YouTube, and this source's entire reason to exist was
+that it spends none of the YouTube budget.
+
+So the choice was between shipping a number nobody can qualify and not shipping
+it. Not shipping it.
+
+**Why deleted and not moved to an attic.** The archive already exists and it is
+git. A second copy in the tree gets no type checking and no tests while
+`DataSource` keeps moving, so within a couple of months it is code that no
+longer applies, still answering greps, still read by people. That is the
+definition of the debt the removal was meant to avoid. The plan's own claim —
+that a source is one module, one registration line and one import — is what
+makes deletion cheap to undo, and this is the first real test of it: the
+removal touched exactly those three places plus tests and prose.
+
+**What went with it.** `Lane.RYD` (no production user left), `DislikeEstimate`,
+the recorded fixture, and the 25 stored artifacts with their payload files. The
+browser `User-Agent` stayed but its evidence left with the source — see
+`troubleshooting.md`; it is now a posture rather than a measured requirement.
+
+**What this costs elsewhere.** The proxy pool's only quantified justification
+was RYD's documented 10,000/day. It no longer has one. That is recorded under
+"Proxying is deferred" rather than left for someone to rediscover.
 
 ### A transcript is the video's own words, or it is nothing
 
@@ -289,12 +338,18 @@ comment payload out of the API process's heap. The cost is ~0.5 s of interpreter
 startup, which is free next to the harvest. Undo if yt-dlp ever grows a real
 abort hook.
 
-**Proxying is deferred, not forgotten.** Proton VPN exits are datacenter
-address space, which is what YouTube's bot check targets, and the direct line
-here is a residential KT connection that currently works. The pool's real case
-is Return YouTube Dislike's documented 10,000/day, and that source does not
-exist yet. Revisit when collection actually starts getting blocked, or when
-the third-party sources land.
+**Proxying is deferred, and its case has since evaporated.** Proton VPN exits
+are datacenter address space, which is what YouTube's bot check targets, and
+the direct line here is a residential KT connection that currently works. The
+pool's one quantified case was Return YouTube Dislike's documented 10,000/day
+— roughly 400 an hour per address, times however many exits — and that source
+has been removed. SponsorBlock publishes no figure to argue from, and the
+caption-translation budget that briefly looked like a second case stopped
+applying when transcripts stopped requesting translations.
+
+So the honest position: **nothing currently measured gets better by adding
+egresses.** Revisit if collection starts getting blocked, which would be a
+measurement rather than a plan.
 
 **Retention protects nothing on the grounds of being the last of its kind.**
 An earlier design kept the newest observation of each question regardless of
@@ -317,11 +372,12 @@ target normalization entirely.
 
 **Egress rate control is keyed on `lane`, not on `backend`.** What rate-limits
 us is a *service*, not our internal taxonomy: yt-dlp, InnerTube and caption
-`json3` GETs all draw on the same per-IP Google tolerance, while RYD and
-SponsorBlock each have their own budget and their own 429. Routing eligibility
-is still keyed on backend. Collapsing the two axes would let RYD's documented
-100/min throttle SponsorBlock, and would leak caption fetches out of the YouTube
-budget so the measurement stops being true.
+`json3` GETs all draw on the same per-IP Google tolerance, while SponsorBlock
+has its own budget and its own 429. Routing eligibility is still keyed on
+backend. Collapsing the two axes would let a third party's limit throttle
+YouTube work, and would leak caption fetches out of the YouTube budget so the
+measurement stops being true. That mattered more when there were two third
+parties; the axis is kept because the next one will not be free either.
 
 **stdlib `logging` in the worker, sources and services — a deliberate departure
 from the house style.** No sibling repository uses a logging library; output is
@@ -360,8 +416,8 @@ Everything that has already cost time lives in
 [`troubleshooting.md`](troubleshooting.md). **This file holds state and
 decisions; that one holds findings**, so updating the state does not delete them.
 
-Already seeded there, from measurements taken while planning: the RYD browser
-User-Agent requirement, RYD's documented daily cap, YouTube's bot check, the
+Already seeded there: the third-party browser User-Agent finding, YouTube's
+bot check, the
 drvfs WAL problem, and the pysqlite deferred-transaction lock upgrade.
 
 ---

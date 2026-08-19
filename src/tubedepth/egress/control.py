@@ -7,8 +7,8 @@ multiplicative decrease leaves it fast.
 
 The key is (egress, lane) rather than (egress, backend) because the thing that
 rate-limits us is a service, not our internal taxonomy. yt-dlp, InnerTube and a
-caption fetch all draw on the same per-address Google tolerance; Return YouTube
-Dislike and SponsorBlock each have their own budget and their own 429.
+caption fetch all draw on the same per-address Google tolerance; SponsorBlock
+has its own budget and its own 429.
 """
 
 from __future__ import annotations
@@ -27,7 +27,6 @@ class Lane(StrEnum):
     """A rate-limit domain — a service, not a backend."""
 
     YOUTUBE = "youtube"
-    RYD = "ryd"
     SPONSORBLOCK = "sponsorblock"
 
 

@@ -10,7 +10,6 @@ from __future__ import annotations
 from functools import cache
 
 from .comments import CommentsSource
-from .dislikes import DislikesSource
 from .innertube_sources import (
     ChannelAboutSource,
     CommunityPostsSource,
@@ -34,7 +33,6 @@ def default_registry() -> SourceRegistry:
     registry.register(ChannelVideosSource())
     registry.register(SearchVideosSource())
     registry.register(PlaylistItemsSource())
-    registry.register(DislikesSource())
     registry.register(SponsorBlockSource())
     registry.register(RelatedVideosSource())
     registry.register(CommunityPostsSource())

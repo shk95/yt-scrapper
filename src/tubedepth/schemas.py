@@ -152,25 +152,6 @@ class VideoListing(BaseModel):
     skipped_count: int = 0
 
 
-class DislikeEstimate(BaseModel):
-    """Not YouTube's dislike count, and named so it cannot be mistaken for one.
-
-    Return YouTube Dislike reconstructs this from an archive of the counts that
-    were public before YouTube hid them, plus telemetry from its extension
-    users. `is_estimate` and `source` travel with the numbers because a field
-    called `dislikes` sitting next to a real `likes` invites exactly the wrong
-    reading.
-    """
-
-    video_id: str
-    likes: int | None = None
-    dislikes: int | None = None
-    rating: float | None = None
-    view_count: int | None = None
-    is_estimate: bool = True
-    source: str = "returnyoutubedislike"
-
-
 class SponsorSegment(BaseModel):
     category: str
     action_type: str | None = None

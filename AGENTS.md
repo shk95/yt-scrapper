@@ -59,7 +59,7 @@ Python + FastAPI + SQLAlchemy + SQLite, 패키지는 `tubedepth`, 실행은 전�
   (유저스페이스 WireGuard, root 불필요): `nix profile install nixpkgs#wireproxy`.
 - Windows 절전/복귀 후 **벽시계가 점프한다.** 간격·윈도우·격리 기한은 전부 `time.monotonic()`을 쓴다.
 - 직결 회선은 가정용 IP(KT)라 **YouTube 상대로는 이게 가장 좋은 egress다.** VPN exit은 데이터센터
-  주소라 봇 검사 1순위이며, 기본적으로 서드파티(RYD·SponsorBlock) lane 전용이다.
+  주소라 봇 검사 1순위이며, 기본적으로 서드파티(SponsorBlock) lane 전용이다.
 
 ## 병렬 세션
 

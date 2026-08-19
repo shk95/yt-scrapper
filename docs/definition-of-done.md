@@ -70,7 +70,7 @@ gh issue create --label blocked --label blocked/<what-is-missing> \
       failed and is not selectable
 - [ ] Killing a wireproxy process causes a restart with backoff; five crashes in
       ten minutes disables the egress and `/healthz` says so
-- [ ] Dislike jobs alternate across every ready egress
+- [ ] Third-party jobs alternate across every ready egress
 - [ ] An injected bot-check quarantines only the egress that saw it, and the
       retry runs on a different one
 - [ ] A SponsorBlock 404 leaves egress health unchanged
@@ -83,7 +83,7 @@ gh issue create --label blocked --label blocked/<what-is-missing> \
       linked to their parents and the pinned/hearted/verified flags present
 - [ ] Cancelling a running harvest terminates its subprocess within five seconds
       and the job reports `cancelled`
-- [ ] A dislike lookup queued behind three running harvests starts within one
+- [ ] A segment lookup queued behind three running harvests starts within one
       second — measured, not assumed
 - [ ] The payload is a gzip file on disk and no multi-megabyte row exists in
       SQLite

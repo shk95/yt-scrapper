@@ -21,9 +21,14 @@ import httpx
 
 from ..errors import UpstreamError
 
-# Measured, not chosen for taste: returnyoutubedislikeapi.com answers 403 to
-# urllib's default agent and 200 to a browser one. Setting it on the client
-# means no source can forget it.
+# Set on the client so no source can forget it.
+#
+# The measurement that put it here is gone with the source that produced it —
+# returnyoutubedislikeapi.com answered 403 to urllib's default agent and 200 to
+# a browser one — so treat this as unproven for the services that remain rather
+# than as a rule with evidence behind it. It stays because being unremarkable
+# in someone's logs is this project's whole posture, and because finding out
+# the hard way costs a blocked address.
 BROWSER_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36"

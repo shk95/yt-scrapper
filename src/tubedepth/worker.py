@@ -7,7 +7,7 @@ what lets a new kind of data arrive without this file changing.
 Three limits compose here, in this order, and they are different limits:
 
   * a reserved slot for the job's cost, so a queue full of comment harvests
-    cannot starve a sub-second dislike lookup;
+    cannot starve a sub-second segment lookup;
   * a permit from the rate controller, which is the measured ceiling for that
     (egress, lane) pair rather than a number anyone chose;
   * the thread pool itself.

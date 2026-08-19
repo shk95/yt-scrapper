@@ -304,7 +304,7 @@ def test_a_cheap_job_is_not_starved_by_a_queue_full_of_expensive_ones(
 ) -> None:
     # The failure this prevents is the common one in a system built for
     # throughput: eight comment harvests take every slot and a sub-second
-    # dislike lookup waits minutes behind them.
+    # segment lookup waits minutes behind them.
     slow = SlowSource(seconds=0.4, cost=SourceCost.EXPENSIVE)
     quick = EchoSource()
     database, _, payloads = build(tmp_path, slow, quick)

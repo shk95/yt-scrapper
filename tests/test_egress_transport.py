@@ -17,7 +17,8 @@ from tubedepth.egress.transport import BROWSER_USER_AGENT, DirectEgress, Proxied
 
 @respx.mock
 def test_every_request_carries_a_browser_user_agent() -> None:
-    # Not decoration. returnyoutubedislikeapi.com answers 403 to urllib's
+    # Not decoration, though the measurement behind it left with the Return
+    # YouTube Dislike source: that service answered 403 to urllib's
     # default agent and 200 to a browser one — measured on this machine.
     # Setting it on the client is what stops any one source forgetting it.
     route = respx.get("https://example.invalid/thing").respond(200, json={})

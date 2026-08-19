@@ -52,8 +52,9 @@ class DataSource(Protocol):
     # channel one is accepted and then fails inside the extractor minutes later.
     target_type: TargetType
     # Which budget this draws on. yt-dlp, InnerTube and caption fetches all
-    # come out of the same per-address Google tolerance; Return YouTube Dislike
-    # and SponsorBlock each have their own.
+    # come out of the same per-address Google tolerance; SponsorBlock has its
+    # own. The distinction is the point: a source put on the wrong lane spends
+    # a budget it was chosen to avoid.
     lane: Lane
     cost: SourceCost
     # Bumped when this source's normalization changes shape. It is part of the

@@ -76,26 +76,22 @@ writing inside a transaction it opened by reading.
 
 ## Third-party services
 
-### `403 Client Error: Forbidden for url: https://returnyoutubedislikeapi.com/votes`
+### A third-party service answers 403 to one agent and 200 to a browser one
 
-The request went out without a browser `User-Agent`. RYD answers 403 to
-urllib's default agent and 200 to a browser one — verified 2026-08-18.
+Both entries that used to be here described Return YouTube Dislike, which this
+project no longer calls. The finding is worth keeping even though the service
+is gone: it answered 403 to urllib's default `User-Agent` and 200 to a browser
+one, verified 2026-08-18, which is why every non-yt-dlp request takes its agent
+from the egress it was leased rather than from whatever httpx defaults to.
 
-Every non-yt-dlp request gets its `User-Agent` from the egress it was leased,
-so if you are seeing this, something constructed an `httpx.AsyncClient` outside
+Nothing that remains has been measured to require it, so treat it as a posture
+rather than a rule with evidence. If you meet a 403 from a service that is not
+YouTube, check the agent first; if the agent is present and it is still 403,
+the **address** is blocked, not the request.
+
+Every non-yt-dlp request gets its agent from the egress, so seeing a default
+agent means something constructed an `httpx.Client` outside
 `src/tubedepth/egress/`. The architecture test exists to catch exactly that.
-
-If the UA is present and it is still 403, the **address** is blocked, not the
-request.
-
-### `429 Too Many Requests` from `returnyoutubedislikeapi.com`
-
-RYD documents **100 requests per minute and 10,000 per day, per client**. The
-daily figure is the one you hit: one address sustains roughly 400 dislike
-lookups an hour averaged over a day.
-
-`[lane.ryd] daily_budget` exists to stop before this happens. Seeing it means
-the budget is set too high, or more egresses are needed. It is not a bug.
 
 ## `table jobs has no column named api_key_id`
 

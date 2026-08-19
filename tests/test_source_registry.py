@@ -93,9 +93,10 @@ def test_every_source_the_project_ships_declares_a_kind() -> None:
 def test_every_shipped_source_declares_a_lane_and_a_cost() -> None:
     """Both are what the scheduler reads, and neither has a safe default.
 
-    A missing lane would put a Return YouTube Dislike request on YouTube's
-    budget; a missing cost would let a comment harvest take a slot reserved for
-    the sub-second jobs it would otherwise starve.
+    A missing lane would put a SponsorBlock lookup on YouTube's budget, which
+    is the one budget this project actually runs out of; a missing cost would
+    let a comment harvest take a slot reserved for the sub-second jobs it would
+    otherwise starve.
     """
     from tubedepth.egress.control import Lane
     from tubedepth.sources import default_registry

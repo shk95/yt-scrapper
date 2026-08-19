@@ -78,17 +78,17 @@ def test_the_window_never_falls_below_one_slot() -> None:
 
 def test_throttling_one_lane_leaves_another_lane_on_the_same_egress_untouched() -> None:
     # This is the reason the key is (egress, lane) and not (egress, backend).
-    # Return YouTube Dislike documents 100 requests per minute; YouTube
-    # documents nothing and tolerates far more. One address hitting RYD's limit
-    # says nothing whatsoever about what that address may still do against
-    # YouTube, and collapsing the two would throw away most of the throughput.
+    # SponsorBlock and YouTube are different services with different limits,
+    # and one address exhausting SponsorBlock's says nothing whatsoever about
+    # what that address may still do against YouTube. Collapsing the two would
+    # throw away most of the throughput for no reason.
     controller = RateController()
     controller.record("vpn-jp1", Lane.YOUTUBE, Verdict.OK)  # 1.0 -> 2.0
 
-    controller.record("vpn-jp1", Lane.RYD, Verdict.THROTTLED)
+    controller.record("vpn-jp1", Lane.SPONSORBLOCK, Verdict.THROTTLED)
 
     assert controller.window("vpn-jp1", Lane.YOUTUBE) == pytest.approx(2.0)
-    assert controller.window("vpn-jp1", Lane.RYD) == pytest.approx(1.0)
+    assert controller.window("vpn-jp1", Lane.SPONSORBLOCK) == pytest.approx(1.0)
 
 
 def test_a_bot_check_makes_the_egress_unavailable_immediately() -> None:
@@ -126,16 +126,16 @@ def test_a_sustained_run_of_successes_resets_the_quarantine_streak() -> None:
     # and the pool slowly loses every route it ever had a bad hour with.
     clock = FakeClock()
     controller = RateController(clock=clock)
-    controller.record("vpn-jp1", Lane.RYD, Verdict.BLOCKED)
+    controller.record("vpn-jp1", Lane.SPONSORBLOCK, Verdict.BLOCKED)
     clock.advance(300.0)
 
     for _ in range(20):
-        controller.record("vpn-jp1", Lane.RYD, Verdict.OK)
+        controller.record("vpn-jp1", Lane.SPONSORBLOCK, Verdict.OK)
 
-    controller.record("vpn-jp1", Lane.RYD, Verdict.BLOCKED)
+    controller.record("vpn-jp1", Lane.SPONSORBLOCK, Verdict.BLOCKED)
     clock.advance(300.0)
 
-    assert controller.is_available("vpn-jp1", Lane.RYD) is True
+    assert controller.is_available("vpn-jp1", Lane.SPONSORBLOCK) is True
 
 
 def test_a_permit_is_refused_once_the_window_is_full() -> None:
@@ -182,25 +182,27 @@ def test_a_minimum_interval_spaces_out_consecutive_permits() -> None:
     clock = FakeClock()
     controller = RateController(clock=clock, minimum_interval_seconds=2.0)
 
-    assert controller.acquire("direct", Lane.RYD) is True
-    controller.release("direct", Lane.RYD, Verdict.OK)
-    assert controller.acquire("direct", Lane.RYD) is False
+    assert controller.acquire("direct", Lane.SPONSORBLOCK) is True
+    controller.release("direct", Lane.SPONSORBLOCK, Verdict.OK)
+    assert controller.acquire("direct", Lane.SPONSORBLOCK) is False
 
     clock.advance(2.0)
-    assert controller.acquire("direct", Lane.RYD) is True
+    assert controller.acquire("direct", Lane.SPONSORBLOCK) is True
 
 
 def test_a_throttle_lengthens_the_interval_as_well_as_narrowing_the_window() -> None:
     clock = FakeClock()
     controller = RateController(clock=clock, minimum_interval_seconds=1.0)
-    controller.acquire("direct", Lane.RYD)
+    controller.acquire("direct", Lane.SPONSORBLOCK)
 
-    controller.release("direct", Lane.RYD, Verdict.THROTTLED)
+    controller.release("direct", Lane.SPONSORBLOCK, Verdict.THROTTLED)
     clock.advance(1.0)
 
-    assert controller.acquire("direct", Lane.RYD) is False, "the interval should have doubled"
+    assert controller.acquire("direct", Lane.SPONSORBLOCK) is False, (
+        "the interval should have doubled"
+    )
     clock.advance(1.0)
-    assert controller.acquire("direct", Lane.RYD) is True
+    assert controller.acquire("direct", Lane.SPONSORBLOCK) is True
 
 
 def test_concurrent_callers_never_exceed_the_window() -> None:
