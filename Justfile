@@ -56,13 +56,12 @@ contract:
 #
 ############################################################################
 
-# API plus an in-process worker. For demos and development only; production
-# runs the two as separate units so a yt-dlp crash cannot take the API down.
-
-# Run the API with an in-process worker (development only)
-[group('run')]
-dev port="8080":
-    uv run tubedepth serve --with-worker --port {{port}}
+# The API and the worker are two processes here for the same reason they are
+# two units in production: yt-dlp extraction blocks and holds memory, and a
+# crash in it must not take the API with it. Run them in two terminals.
+#
+# There used to be a `dev` recipe here promising `serve --with-worker`. That
+# option has never existed, so the recipe has never run.
 
 [group('run')]
 serve port="8080":
@@ -70,33 +69,7 @@ serve port="8080":
 
 [group('run')]
 worker:
-    uv run tubedepth worker
-
-############################################################################
-#
-#  egress pool
-#
-############################################################################
-
-# The check that matters: an egress reporting the SAME public address as
-# `direct` has no tunnel and is silently leaking the origin IP.
-
-# Show each egress's public address, country and health
-[group('egress')]
-egress-probe:
-    uv run tubedepth egress probe
-
-[group('egress')]
-egress-status:
-    uv run tubedepth egress status
-
-# Reads egress_attempt. This is the answer to "what does one IP actually
-# sustain against YouTube", which nobody can tell you in advance.
-
-# Report measured per-egress throughput and block rates
-[group('egress')]
-egress-report since="24h":
-    uv run tubedepth egress report --since {{since}}
+    uv run tubedepth work
 
 ############################################################################
 #
@@ -108,10 +81,13 @@ egress-report since="24h":
 # the fixtures are pretty-printed and stripped of tracking noise, that diff is
 # a readable list of what YouTube changed.
 
-# Re-record the InnerTube and yt-dlp fixtures
+# Record one yt-dlp fixture. There is no way to re-record them all, and no
+# way to record an InnerTube one at all — see issue #10.
+
+# Record a yt-dlp fixture for one video
 [group('data')]
-fixtures-refresh:
-    uv run tubedepth capture-fixture --all
+fixture-capture target name:
+    uv run tubedepth capture-fixture {{target}} --name {{name}}
 
 ############################################################################
 #
