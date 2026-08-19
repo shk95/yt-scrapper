@@ -40,7 +40,7 @@ from .repositories import JobRepository
 from .retrying import backoff_for_attempt, is_retryable
 from .schemas import VideoListing
 from .sources import SourceRegistry, default_registry
-from .sources.registry import SourceCost
+from .sources.registry import SourceCost, attempts_for
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime, YtdlpRuntime
 from .webhooks import WebhookSender
 
@@ -136,8 +136,8 @@ class Worker:
         with self._database.session() as session:
             return JobRepository(session).reap_expired_leases()
 
-    def drain(self) -> int:
-        """Run until the queue is empty. Returns how many jobs ran.
+    def drain(self, *, limit: int | None = None) -> int:
+        """Run until the queue is empty, or until `limit` jobs have run.
 
         Reaps first: a previous run killed mid-job left rows in `running` that
         nothing else will ever release, and starting without collecting them
@@ -147,6 +147,13 @@ class Worker:
         down when a previous run finished is retried; on exit, so jobs this run
         finished are announced without waiting for the next one — which for a
         `--once` invocation would be never.
+
+        `limit` is what makes that last sentence true. `--once` used to call
+        `run_once` directly, which is the primitive and does none of this
+        bookkeeping — so the one invocation the paragraph above is about was
+        the one invocation that skipped it, and a job it finished was never
+        announced at all. One path with a bound rather than two paths, because
+        two paths are how they came to disagree.
         """
         self.deliver_webhooks()
         reaped = self.reap()
@@ -155,19 +162,30 @@ class Worker:
 
         if self._concurrency == 1:
             completed = 0
-            while self.run_once():
+            while (limit is None or completed < limit) and self.run_once():
                 completed += 1
             self.deliver_webhooks()
             return completed
 
         completed = 0
+        # Reserved rather than completed, and taken before the claim. Checking
+        # the count and then claiming lets every thread pass the check at once
+        # and overshoot the bound by the width of the pool — which for
+        # `--once` means eight jobs where one was asked for.
+        reserved = 0
         counted = threading.Lock()
 
         def pump() -> None:
-            nonlocal completed
+            nonlocal completed, reserved
             while True:
+                with counted:
+                    if limit is not None and reserved >= limit:
+                        return
+                    reserved += 1
                 claimed = self._claim()
                 if claimed is None:
+                    with counted:
+                        reserved -= 1
                     return
                 self._execute(*claimed)
                 with counted:
@@ -392,10 +410,16 @@ class Worker:
         undecided on purpose rather than settled by whichever behaviour fell
         out; the watch list in the trend work is what should settle it.
         """
-        self._registry.get(kind)
+        source = self._registry.get(kind)
         with self._database.session() as session:
             for video in listing.videos:
-                session.add(Job(kind=kind, target=video.video_id))
+                session.add(
+                    Job(
+                        kind=kind,
+                        target=video.video_id,
+                        max_attempts=attempts_for(source),
+                    )
+                )
         return len(listing.videos)
 
     def _fail_or_retry(self, identifier: str, kind: str, error: TubedepthError) -> None:

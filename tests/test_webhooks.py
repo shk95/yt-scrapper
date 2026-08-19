@@ -234,3 +234,42 @@ def test_a_worker_with_no_secret_configured_sends_nothing(tmp_path: Path) -> Non
     )
 
     assert worker.deliver_webhooks() == 0
+
+
+@respx.mock
+def test_taking_one_job_and_stopping_still_delivers_its_callback(tmp_path: Path) -> None:
+    """`--once` is the invocation with no next run to catch up.
+
+    `drain` says so itself — it delivers on exit "so jobs this run finished are
+    announced without waiting for the next one, which for a `--once`
+    invocation would be never" — and then `--once` did not go through `drain`.
+    The mitigation written for this case was in the method this case does not
+    call, which is the shape `decisions/003` is about.
+    """
+    from test_worker import EchoSource, _registry
+
+    from tubedepth.payload_store import PayloadStore
+    from tubedepth.worker import Worker
+
+    route = respx.post("https://example.invalid/hook").respond(200)
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    with database.session() as session:
+        session.add(
+            Job(
+                kind="video.echo",
+                target="video000001",
+                webhook_url="https://example.invalid/hook",
+            )
+        )
+
+    completed = Worker(
+        database=database,
+        registry=_registry(EchoSource()),
+        payloads=PayloadStore(tmp_path / "payloads"),
+        name="worker-1",
+        webhook_secret="shh",
+    ).drain(limit=1)
+
+    assert completed == 1
+    assert route.called, "a job finished by --once was never announced"

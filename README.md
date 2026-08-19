@@ -203,16 +203,16 @@ What this project **cannot** do, and what has **not been checked**.
   turn the VPN off and use a residential line. YouTube's bot checks target
   datacenter ranges, and every commercial VPN exit is in one. The machine this
   was developed on **has a residential IP that currently works, and a VPN exit
-  probably would not.** Hence `TUBEDEPTH_EGRESS_ALLOW_VPN_FOR_YOUTUBE`
-  defaulting to `0`. Turning it on is a *measurement*, not a fix.
+  probably would not.** No configuration turns this on, because nothing has
+  been built to turn on; when something is, treating it as a *measurement*
+  rather than a fix is the point.
 - **The proxy pool has no measured case behind it.** The original quantitative
   argument was Return YouTube Dislike's documented daily cap; **removing that
   source removed the argument with it.** The one remaining third party is
   SponsorBlock, whose limits are undisclosed. Nothing has been measured that
   more exits would definitely improve. Measure it before building the pool.
 - **Only residential or mobile proxies actually raise YouTube throughput**, at
-  roughly $5–15/GB. `ExternalProxyEgress` makes that a configuration change
-  rather than a code change.
+  roughly $5–15/GB. `ProxiedEgress` is the seam for it.
 - **Check your ProtonVPN concurrent-connection quota.** Each wireproxy process
   takes a slot, so a pool competes with your phone and laptop. The free plan is
   unsuitable.

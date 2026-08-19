@@ -23,7 +23,7 @@ from tubedepth.egress.transport import DirectEgress
 from tubedepth.payload_store import PayloadStore
 from tubedepth.sources import SourceRegistry
 from tubedepth.sources.comments import CommentsSource
-from tubedepth.sources.transcript import select_caption_track
+from tubedepth.sources.transcript import caption_track_candidates
 from tubedepth.sources.ytdlp_runtime import LibraryYtdlpRuntime
 
 pytestmark = pytest.mark.live
@@ -74,7 +74,7 @@ def test_live_a_korean_video_yields_its_own_transcription_not_a_translation(
     dump = LibraryYtdlpRuntime().extract("9bZkp7q19f0", egress=DirectEgress())
     assert not dump.get("subtitles"), "this video gained manual captions; pick another"
 
-    track = select_caption_track(dump)
+    track = caption_track_candidates(dump)[0]
 
     assert track.language == "ko"
     assert "tlang=" not in track.url, "took a translation where the original exists"

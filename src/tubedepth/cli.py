@@ -28,6 +28,7 @@ from .repositories import JobRepository
 from .retention import RetentionPolicy, RetentionService
 from .services.keys import ApiKeyService
 from .sources import default_registry
+from .sources.registry import attempts_for
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime
 from .worker import Worker
 
@@ -170,6 +171,7 @@ def enqueue(
                 target=normalize_target(source.target_type, target),
                 follow_up_kind=then,
                 refresh=refresh,
+                max_attempts=attempts_for(source),
             )
             session.add(job)
             session.flush()
@@ -252,7 +254,7 @@ def work(
             window_ceiling=float(os.environ.get("TUBEDEPTH_WINDOW_CEILING", "6"))
         ),
     )
-    completed = 1 if (once and worker.run_once()) else (0 if once else worker.drain())
+    completed = worker.drain(limit=1 if once else None)
     typer.echo(f"✓ {completed} job(s) completed")
 
 

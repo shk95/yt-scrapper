@@ -34,8 +34,27 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
   carrying thirty ids on its `ExecStart`. A list that cannot be read is refused
   rather than treated as empty.
 
+### Added
+
+- **`TUBEDEPTH_COOKIES_FILE` now does what the troubleshooting guide said it
+  did.** Point it at a Netscape-format cookie jar and the worker carries it
+  into every extraction. A path that is not there is refused at startup rather
+  than dropped, because silently ignoring a typo behaves exactly like the
+  version that read nothing at all.
+
 ### Fixed
 
+- **An expensive kind is queued with fewer attempts than a cheap one.**
+  `Job.max_attempts` documented itself as set when a job is queued and nothing
+  set it, so every kind took the column default of three — and three failed
+  comment harvests against one target spend around a hundred requests of the
+  one per-address budget everything here competes for. Expensive kinds now get
+  two; cheap and standard keep the three they had.
+- **`tubedepth work --once` delivers its callbacks and reaps stale leases.**
+  It called `run_once`, which is the primitive and does neither, so the one
+  invocation with no next run to catch up was the one that skipped the
+  bookkeeping — a job it finished was never announced. `--once` is now
+  `drain(limit=1)`: one path with a bound rather than two paths that disagree.
 - **Retention no longer unlinks a payload a current observation still uses.**
   The store is content-addressed, so two observations that collected identical
   bytes are one file — which `GET /v1/artifacts` teaches readers to expect,

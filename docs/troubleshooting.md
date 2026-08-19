@@ -132,10 +132,18 @@ than the video, and it is deliberately raised as a `RateLimitedError` so the
 rate controller quarantines that lane instead of treating it as a bad video.
 
 Before doing anything else, upgrade: `just update-ytdlp`. That fixes this more
-often than any other step. After that the ladder is cookies
-(`TUBEDEPTH_COOKIES_FILE`), then `--impersonate`, then a different egress. Do
-not raise concurrency to make up the lost throughput — that is the input that
-produced the check.
+often than any other step. After that, export a cookie jar in Netscape format
+and point `TUBEDEPTH_COOKIES_FILE` at it; the worker carries it into every
+extraction, and refuses to start if the path is wrong rather than quietly
+sending nothing. Use an account you can afford to lose — a jar is a session.
+
+`--impersonate` is the rung after that and **is not implemented**: it needs a
+`curl_cffi` dependency nobody has taken. This line used to name it as though
+it were available, alongside the cookie variable that nothing read.
+
+A different egress is last and on this host is probably backwards — see the
+proxy section of the README. Do not raise concurrency to make up the lost
+throughput either; that is the input that produced the check.
 
 ## `video cannot be watched from here: <id>`
 

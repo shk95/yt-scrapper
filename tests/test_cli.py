@@ -207,3 +207,57 @@ def test_cancelling_a_job_that_does_not_exist_says_so_without_a_traceback(
     assert completed.returncode == 1
     assert "no such job" in completed.stderr
     assert "Traceback" not in completed.stderr
+
+
+def test_work_once_takes_one_job_and_leaves_the_rest(tmp_path: Path) -> None:
+    """`--once` had no test at all, which is how it kept its own code path.
+
+    Rows are inserted rather than enqueued so the kinds are ones no source is
+    registered for: the worker then fails them on the row without reaching the
+    network, which is enough to count how many it took.
+    """
+    runner.invoke(
+        application, ["enqueue", "video.transcript", "dQw4w9WgXcQ", "--data-dir", str(tmp_path)]
+    )
+    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
+        connection.execute(
+            "UPDATE jobs SET kind = 'video.notregistered'",
+        )
+        connection.execute(
+            "INSERT INTO jobs (identifier, kind, target, state, attempt_count, max_attempts,"
+            " scheduled_at, created_at, webhook_attempts, refresh)"
+            " SELECT '0' * 32, kind, 'second', state, attempt_count, max_attempts,"
+            " scheduled_at, created_at, webhook_attempts, refresh FROM jobs"
+        )
+
+    result = runner.invoke(application, ["work", "--once", "--data-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
+        states = dict(connection.execute("SELECT state, count(*) FROM jobs GROUP BY state"))
+    assert states == {"failed": 1, "queued": 1}, f"--once did not stop after one job: {states}"
+
+
+def test_an_expensive_kind_is_queued_with_fewer_attempts_than_a_standard_one(
+    tmp_path: Path,
+) -> None:
+    """`Job.max_attempts` says it is "set when the job is queued". Nothing set it.
+
+    So a comment harvest — dozens of requests and minutes of wall clock by its
+    own docstring — got the same three tries as a two-second metadata fetch,
+    and an upstream failure spent three full harvests against one target out
+    of the single per-address budget that caps this system.
+    """
+    runner.invoke(
+        application, ["enqueue", "video.comments", "dQw4w9WgXcQ", "--data-dir", str(tmp_path)]
+    )
+    runner.invoke(
+        application, ["enqueue", "video.metadata", "dQw4w9WgXcQ", "--data-dir", str(tmp_path)]
+    )
+
+    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
+        attempts = dict(connection.execute("SELECT kind, max_attempts FROM jobs"))
+
+    assert attempts["video.comments"] < attempts["video.metadata"], (
+        f"an expensive kind was queued with as many tries as a standard one: {attempts}"
+    )
