@@ -20,6 +20,22 @@ import pytest
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 
 
+def pytest_addoption(parser: pytest.Parser) -> None:
+    """`--record-payload-shapes` updates the payload shape lock.
+
+    An option rather than a command, because the thing being recorded is what
+    the tests compare against and it has no runtime caller — a canonicalizer in
+    `src/` would be a capability nothing in production calls, which is the
+    failure `decisions/003` is about.
+    """
+    parser.addoption(
+        "--record-payload-shapes",
+        action="store_true",
+        default=False,
+        help="Append the current payload shapes to tests/payload_shapes.json",
+    )
+
+
 @pytest.fixture(autouse=True)
 def refuse_outbound_network(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch

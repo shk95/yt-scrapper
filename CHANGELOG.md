@@ -36,6 +36,14 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Added
 
+- **CI refuses a payload model change that does not bump `schema_version`.**
+  `tests/test_migrations.py` has always caught the database half of this; there
+  was no payload-side equivalent, and one bump was already missed in the
+  history. The check records a pruned shape per kind and version in an
+  append-only lock, so the only way to make it pass is the bump it is asking
+  for — a blind regenerate is refused. Composite kinds expand their parts, so
+  a change to `video.metadata` correctly moves `video.bundle` too. Green means
+  no shape change went unrecorded; it never means no bump was needed.
 - **`GET /v1/artifacts/{digest}`.** The list route has always handed out
   digests and nothing could dereference them; reaching an old payload meant
   having kept the job id that produced it, and retention deletes artifacts

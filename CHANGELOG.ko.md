@@ -29,6 +29,12 @@
 
 ### Added
 
+- **payload 모델을 바꾸고 `schema_version`을 안 올리면 CI가 거부한다.** DB 쪽 절반은
+  `tests/test_migrations.py`가 늘 잡아왔지만 payload 쪽에는 대응물이 없었고, 실제로 이미 한 번
+  놓쳤다. kind와 버전별로 다듬은 모양을 append-only lock에 기록하므로, 통과시키는 유일한 방법은
+  요구받은 bump다 — 그냥 다시 기록하는 것은 거부된다. 복합 kind는 parts를 펼치므로
+  `video.metadata` 변경이 `video.bundle`도 올바르게 움직인다. 초록은 기록되지 않은 모양 변경이
+  없다는 뜻이지, bump가 필요 없었다는 뜻이 아니다.
 - **`GET /v1/artifacts/{digest}`.** 목록 라우트는 늘 digest를 내줬는데 그걸 실제 데이터로 바꿀
   방법이 없었다. 옛 payload에 닿으려면 그것을 만든 잡 id를 계속 갖고 있어야 했고, retention은
   artifact를 지우면서 잡 행은 건드리지 않으므로 둘은 서로 다른 속도로 늙는다. payload는 **그대로**
