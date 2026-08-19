@@ -81,8 +81,8 @@ worker:
 # the fixtures are pretty-printed and stripped of tracking noise, that diff is
 # a readable list of what YouTube changed.
 
-# Record one yt-dlp fixture. There is no way to re-record them all, and no
-# way to record an InnerTube one at all — see issue #10.
+# Record one fixture at a time. There is still no way to re-record them all;
+# the InnerTube recipe below is what closed the other half of issue #10.
 
 # Record a yt-dlp fixture for one video
 [group('data')]

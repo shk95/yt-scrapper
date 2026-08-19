@@ -237,3 +237,26 @@ def test_the_source_listing_reports_the_caps_actually_in_effect(
 
     assert described["channel.videos"]["cache_parameters"] == {"limit": 750}
     assert described["video.metadata"]["cache_parameters"] == {}
+
+
+def test_the_trending_chart_size_is_configurable_like_every_other_cap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`TrendingVideosSource` took a `limit` and declared it in its cache key,
+    and nothing could set it.
+
+    So the parameter separated a top-50 chart from a top-200 one while only one
+    of those could ever be asked for — a knob with no caller, in a source that
+    also happens to be the only one spending Google quota rather than the
+    per-address budget, where four requests versus one is the whole difference.
+    """
+    from tubedepth.sources import default_registry
+    from tubedepth.sources.registry import cache_parameters_of
+
+    monkeypatch.setenv("TUBEDEPTH_TRENDING_LIMIT", "50")
+    default_registry.cache_clear()
+
+    try:
+        assert cache_parameters_of(default_registry().get("trending.videos")) == {"limit": 50}
+    finally:
+        default_registry.cache_clear()
