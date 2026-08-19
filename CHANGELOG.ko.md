@@ -17,27 +17,7 @@
 
 ## [Unreleased]
 
-### Added
-
-- REST API 레퍼런스 [`docs/api.ko.md`](docs/api.ko.md) — 전체 엔드포인트, 잡 수명주기,
-  커서 페이지네이션, 오류 코드 표, 서명 웹훅 계약.
-- 바깥용 문서의 한국어 번역 — `README.ko.md`, `docs/api.ko.md`, `CHANGELOG.ko.md`.
-  영어 파일이 정본이다.
-- 이 변경 기록과 [`docs/releasing.md`](docs/releasing.md).
-
-### Changed
-
-- 패키지 버전을 한 곳에서만 정의한다. `pyproject.toml`이 `dynamic`으로 선언하고
-  `src/tubedepth/__init__.py`를 읽으므로, 릴리스는 절반만 성공할 수 없는 편집 한 번이 된다.
-- `README.md`가 영어가 되었고, 한국어 본문은 `README.ko.md`로 옮겼다.
-- `tests/test_documentation_is_true.py`의 문서 검사가 번역본에도 적용된다. 수집 목록 표를
-  제목이 아니라 HTML 마커로 찾고, 서빙되는 모든 라우트와 모든 오류 코드가 API 레퍼런스에
-  있는지 확인하며, 패키지 버전과 두 CHANGELOG가 일치하는지 확인한다.
-
-### Fixed
-
-- 라우트 검사가 영숫자 8자 이상을 전부 경로 파라미터로 치환하던 것을 고쳤다. 실제로 서빙되는
-  `/v1/artifacts`를 존재하지 않는 라우트로 읽고 있었다. 이제 진짜 라우트 템플릿과 대조한다.
+아직 없음.
 
 ## [0.1.0] - 2026-08-19
 
@@ -66,6 +46,14 @@
   기록해 둔 전송을 나중에 재생할 수 없다.
 - **배포**: root가 필요 없는 API·워커 systemd 유저 유닛, 그리고 Alembic 마이그레이션.
 - 영상·채널·재생목록·검색어가 들어올 수 있는 모든 URL 형태의 식별자 정규화.
+
+- **문서.** [`docs/api.ko.md`](docs/api.ko.md)의 REST 레퍼런스 — 전체 엔드포인트,
+  잡 수명주기, 커서 페이지네이션, 오류 코드, 서명 웹훅 계약. `README.md`·`docs/api.md`·
+  이 변경 기록은 영어가 정본이고 옆에 한국어 번역이 있으며, 기여자용 문서는 한국어로만 둔다.
+  기계가 확인할 수 있는 주장(라우트·kind·오류 코드·버전)은 모든 사본에 대해 검사된다.
+- **버전은 한 곳에.** `pyproject.toml`이 `src/tubedepth/__init__.py`에서 읽고, 패키지와
+  이 변경 기록이 어긋난 상태를 테스트가 거부한다. 절차는
+  [`docs/releasing.md`](docs/releasing.md).
 
 ### Removed
 
