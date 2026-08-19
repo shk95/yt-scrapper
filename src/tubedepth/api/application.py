@@ -44,7 +44,7 @@ from ..errors import (
 )
 from ..health import SourceHealthService
 from ..identifiers import normalize_target
-from ..models import Artifact, Job
+from ..models import Artifact, Job, LaneHealth
 from ..payload_store import PayloadStore
 from ..repositories import JobRepository, JobState
 from ..services.keys import ApiKeyService, VerifiedKey
@@ -201,12 +201,33 @@ class ArtifactListView(BaseModel):
     cursor: str | None = None
 
 
+class LaneHealthView(BaseModel):
+    """What the rate controller currently allows on one route.
+
+    `window` is a measured ceiling rather than a setting — it halves when the
+    upstream refuses and grows back — so a window well under one is the number
+    that explains why a queue is draining slowly.
+    """
+
+    egress: str
+    lane: str
+    window: float
+    in_flight: int
+    quarantine_streak: int
+    # Null when the lane is open. Present means nothing on this route will be
+    # attempted until then, which from outside is indistinguishable from an
+    # empty queue unless something says so.
+    quarantined_until: datetime | None = None
+    observed_at: datetime | None = None
+
+
 class HealthView(BaseModel):
     status: str
     version: str
     queued: int = Field(default=0)
     running: int = Field(default=0)
     sources: list[SourceHealthView] = Field(default_factory=list)
+    lanes: list[LaneHealthView] = Field(default_factory=list)
 
 
 # Dependencies live at module level, not inside the factory.
@@ -368,11 +389,26 @@ def create_application(
         # read by things that restart processes, and one broken parser is not a
         # reason to cycle an API whose other nine kinds are still collecting.
         # The bad news travels in the detail, where a person reads it.
+        lanes = open_session.scalars(
+            select(LaneHealth).order_by(LaneHealth.egress, LaneHealth.lane)
+        ).all()
         return HealthView(
             status="ok",
             version=__version__,
             queued=counts[JobState.QUEUED],
             running=counts[JobState.RUNNING],
+            lanes=[
+                LaneHealthView(
+                    egress=row.egress,
+                    lane=row.lane,
+                    window=row.window,
+                    in_flight=row.in_flight,
+                    quarantine_streak=row.quarantine_streak,
+                    quarantined_until=row.quarantined_until,
+                    observed_at=row.observed_at,
+                )
+                for row in lanes
+            ],
             sources=[
                 SourceHealthView(
                     kind=entry.kind,

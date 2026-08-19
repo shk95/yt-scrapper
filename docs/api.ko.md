@@ -133,6 +133,30 @@ curl -s localhost:8080/healthz
 }
 ```
 
+`lanes`는 rate controller가 각 경로에 현재 허용하는 것이다. 워커가 기록한다 — 컨트롤러의
+상태는 워커 메모리의 dict이고 프로세스와 함께 죽기 때문이다.
+
+```json
+{
+  "lanes": [
+    {
+      "egress": "direct",
+      "lane": "youtube",
+      "window": 3.5,
+      "in_flight": 1,
+      "quarantine_streak": 0,
+      "quarantined_until": null,
+      "observed_at": "2026-08-20T09:12:44Z"
+    }
+  ]
+}
+```
+
+`window`는 설정이 아니라 **측정된** 상한이다. 업스트림이 거부하면 절반이 되고 성공하면 다시
+자란다. 그래서 1보다 한참 작은 window가 큐가 느리게 빠지는 이유를 설명하는 숫자다.
+`quarantined_until`은 경로가 열려 있으면 null이고, 값이 있으면 그때까지 그 경로로 아무것도
+시도하지 않는다는 뜻이다 — 밖에서 보면 빈 큐와 구분되지 않으므로, 누군가 말해주지 않으면 모른다.
+
 개별 소스가 성치 않아도 `status`는 `"ok"`로 남는다. 이 엔드포인트는 프로세스를 재시작하는
 것들이 읽고, 파서 하나가 깨진 것은 나머지 열 종류가 여전히 수집 중인 API를 재기동할 이유가
 아니기 때문이다. 나쁜 소식은 사람이 읽는 `sources`에 실린다.

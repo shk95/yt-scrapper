@@ -33,7 +33,7 @@ from .database import Database
 from .egress.control import RateController, Verdict, verdict_for_error
 from .egress.transport import DirectEgress, Egress
 from .errors import TubedepthError, UpstreamError
-from .health import SourceHealthService
+from .health import LaneHealthService, SourceHealthService
 from .models import Job, JobState, utcnow
 from .payload_store import PayloadStore
 from .repositories import JobRepository
@@ -92,6 +92,7 @@ class Worker:
         # about consecutive attempts, and reconstructing that from rows means
         # scanning them in order every time anyone asks.
         self._health = health or SourceHealthService(database=database)
+        self._lanes = LaneHealthService(database=database)
         # Absent by default, and silence is the safer default: an unsigned
         # callback is one a receiver cannot tell from anyone else who learned
         # the URL, and a callback URL travels in a job submission rather than
@@ -298,6 +299,15 @@ class Worker:
                 return
             finally:
                 self._controller.release(self._egress.name, source.lane, verdict)
+                # Written on the same tick as source health and for the same
+                # reason: the controller's state is a dict in this process and
+                # dies with it, while "is this route being refused" is asked
+                # from the API. Without it a quarantined lane is indis-
+                # tinguishable from an empty queue.
+                state, monotonic = self._controller.observed(self._egress.name, source.lane)
+                self._lanes.observe(
+                    self._egress.name, source.lane.value, state=state, monotonic=monotonic
+                )
         finally:
             self._leave(source.cost)
 

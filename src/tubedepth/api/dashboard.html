@@ -123,6 +123,11 @@
   </section>
 
   <section>
+    <h2>Routes <span class="pill">what the rate controller currently allows</span></h2>
+    <div class="body"><table id="lanes"></table></div>
+  </section>
+
+  <section>
     <h2>Completed per hour <span class="pill" id="throughput-note"></span></h2>
     <div class="body"><div class="bars" id="bars"></div></div>
   </section>
@@ -227,6 +232,25 @@ async function loadHealth() {
       <td>${ago(source.last_success_at)}</td>
       <td class="err">${escape(source.last_error_code || "")}</td>
     </tr>`).join("");
+
+  // A quarantined route and an empty queue look identical from here unless
+  // this says otherwise, which is the whole reason the worker writes it down.
+  $("lanes").innerHTML = health.lanes.length
+    ? "<tr><th>egress</th><th>lane</th><th>window</th><th>in flight</th><th>state</th><th>seen</th></tr>" +
+      health.lanes.map((lane) => {
+        const held = lane.quarantined_until && new Date(lane.quarantined_until) > new Date();
+        return `<tr>
+          <td class="mono">${escape(lane.egress)}</td>
+          <td class="mono">${escape(lane.lane)}</td>
+          <td>${lane.window.toFixed(2)}</td>
+          <td>${lane.in_flight}</td>
+          <td class="status ${held ? "blocked" : "healthy"}">${held
+            ? "quarantined, " + ago(lane.quarantined_until).replace(" ago", " left")
+            : "open"}${lane.quarantine_streak ? ` (streak ${lane.quarantine_streak})` : ""}</td>
+          <td>${ago(lane.observed_at)}</td>
+        </tr>`;
+      }).join("")
+    : '<tr><td class="note">no route has been used yet</td></tr>';
 
   if (!$("kind").dataset.filled) {
     const options = health.sources.map((source) => `<option>${escape(source.kind)}</option>`).join("");

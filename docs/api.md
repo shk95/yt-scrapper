@@ -143,6 +143,33 @@ curl -s localhost:8080/healthz
 }
 ```
 
+`lanes` is what the rate controller currently allows on each route, written by
+the worker because the controller's state is a dict in the worker's memory and
+dies with the process.
+
+```json
+{
+  "lanes": [
+    {
+      "egress": "direct",
+      "lane": "youtube",
+      "window": 3.5,
+      "in_flight": 1,
+      "quarantine_streak": 0,
+      "quarantined_until": null,
+      "observed_at": "2026-08-20T09:12:44Z"
+    }
+  ]
+}
+```
+
+`window` is a **measured** ceiling rather than a setting: it halves when an
+upstream refuses and grows back on success, so a window well under one is the
+number that explains a queue draining slowly. `quarantined_until` is null while
+the route is open, and present means nothing will be attempted on it until then
+— which from outside is indistinguishable from an empty queue unless something
+says so.
+
 `status` stays `"ok"` while individual sources are not, because this endpoint is
 read by things that restart processes and one broken parser is not a reason to
 cycle an API whose other ten kinds are still collecting. The bad news is in
