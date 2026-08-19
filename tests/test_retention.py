@@ -9,6 +9,7 @@ reported rather than quietly absorbed.
 from __future__ import annotations
 
 import json
+import os
 import random
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -59,6 +60,12 @@ def store(
             )
         )
     return stored.digest
+
+
+def _age(path: Path, by: timedelta) -> None:
+    """Backdate a file, because the orphan sweep reads its mtime and not a clock."""
+    when = path.stat().st_mtime - by.total_seconds()
+    os.utime(path, (when, when))
 
 
 def test_an_artifact_past_its_retention_age_is_removed(tmp_path: Path) -> None:
@@ -166,10 +173,17 @@ def test_a_blob_with_no_artifact_row_is_swept(tmp_path: Path) -> None:
     removed them: `prune` walks artifact rows and deletes *their* payloads, so
     a file without a row is unreachable by construction.
     """
-    clock = FakeClock(datetime(2026, 8, 19, tzinfo=UTC))
+    # Real time, not the usual fixed instant. The sweep compares `self._clock()`
+    # against the file's `st_mtime`, so it is the one place in this service that
+    # mixes an injectable clock with the filesystem's real one — a fake clock
+    # parked in the past makes every file look like it is from the future.
+    # This test used to pass by accident: START happened to sit a day behind
+    # real time, and it began failing the day the calendar caught up.
+    clock = FakeClock(datetime.now(UTC))
     database, payloads, service = build(tmp_path, RetentionPolicy(), clock)
     stored = payloads.put("video.metadata", b'{"orphan": true}')
-    clock.advance(timedelta(days=1))
+    # Age the file rather than the clock, for the same reason.
+    _age(stored.path, timedelta(hours=2))
     assert payloads.path_for("video.metadata", stored.digest) is not None
 
     outcome = service.prune()

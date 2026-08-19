@@ -75,6 +75,12 @@ class RetentionService:
         the system could ever have removed them — `prune` walks rows and
         deletes *their* payloads, so a file without a row is unreachable.
 
+        **This is the one place here that mixes two clocks.** The age is
+        `self._clock()` against the file's `st_mtime`, and only the first of
+        those is injectable — a test that moves the fake clock alone moves
+        nothing this measures, and one that sets it far from real time gets a
+        meaningless age. Age the file, not the clock.
+
         The grace period is the part that matters. Payloads are written before
         their row, deliberately, so that a crash leaves an orphan rather than a
         row pointing at nothing. Every successful collection is therefore
