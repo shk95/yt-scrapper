@@ -120,6 +120,47 @@ proving the expensive-lane cap. Twelve harvests would.
 A mixed sweep the same day — 25 dislikes, 25 sponsor-segment lookups and 3
 harvests — completed 53 jobs in 38 s with nothing failed.
 
+**The API under a working worker, measured 2026-08-19 — and it found a bug.**
+Twelve concurrent clients against a worker running 22 transcript jobs at
+concurrency 8:
+
+| endpoint | p99 before | p99 after | |
+| --- | --- | --- | --- |
+| `GET /healthz` (one COUNT) | 1,434 ms | **19.9 ms** | 72× |
+| `GET /v1/sources` (no database) | 335 ms | 539 ms | unchanged, run-to-run noise |
+| `POST /v1/jobs` (a write) | 936 ms | 1,466 ms | still serialises, correctly |
+
+The engine emits `BEGIN IMMEDIATE` for **every** transaction, which is what
+makes claiming safe — and it made every API read a writer. A route that only
+counted rows took the write lock and queued behind the worker. WAL exists
+precisely so readers never block writers, and one event handler was opting out
+of it on every route.
+
+The comparison against `/v1/sources` is what identified it: that route touches
+no database at all and was four times *faster* at the same concurrency, so the
+cost was in the database access rather than in the process.
+
+`Database.session(readonly=True)` uses a second engine with no IMMEDIATE hook
+and `PRAGMA query_only=ON`, and the read routes take it. Separate engine rather
+than a flag so the guarantee is structural: there is no hook to forget, and a
+read-only session that tried to write would be refused rather than silently
+becoming a writer — which is the one shape that must not exist, since two of
+those interleave exactly the way IMMEDIATE was added to prevent.
+
+Writes still serialise against the worker and always will: there is one write
+lock in SQLite and no flag changes that. A submission under a busy worker costs
+around a second at p99, which is a job-submission endpoint behaving as a job
+queue rather than a problem to optimise away. If it ever becomes one, the fix
+is Postgres, not tuning.
+
+**The expensive-cost cap, proven 2026-08-19.** Twelve comment harvests queued
+*ahead* of twenty-five sponsor-segment lookups, concurrency 8, so the harvests
+alone could saturate the worker: `comments ×3 → sponsor_segments ×25 →
+comments ×9`. The cheap work went through the middle of the harvest backlog
+rather than behind it. The earlier lane test could only show interleaving
+because three harvests cannot fill eight slots; this one exceeds the cap
+(`int(8 × 0.5) = 4`) and holds.
+
 **Caching, measured 2026-08-18.** The same channel sweep, twice:
 
 | sweep | wall clock | YouTube requests |

@@ -15,6 +15,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import select
+from sqlalchemy.exc import OperationalError
 
 from tubedepth.database import Database
 from tubedepth.models import Job
@@ -161,3 +162,51 @@ def test_a_transaction_holds_the_write_lock_from_its_very_first_statement(tmp_pa
                 outsider.execute("UPDATE jobs SET kind = 'stolen'")
         finally:
             outsider.close()
+
+
+def test_a_read_only_session_does_not_take_the_write_lock(tmp_path: Path) -> None:
+    """The other half of the guarantee above, and it was missing.
+
+    The engine emits BEGIN IMMEDIATE for *every* transaction, which is what
+    makes the claim safe. It also made every API read a writer: a route that
+    only counts queued jobs took RESERVED and queued behind the worker.
+
+    Measured before this existed — 12 concurrent clients against a worker
+    running 22 transcript jobs — `GET /healthz`, which runs one COUNT, had a
+    p99 of 1,434 ms while `GET /v1/sources`, which touches no database at all,
+    had 335 ms at the same concurrency. WAL exists so readers never block; we
+    were opting out of it on every route.
+    """
+    database = queued_database(tmp_path, "static.echo")
+
+    with database.session(readonly=True) as session:
+        session.scalars(select(Job.identifier)).all()
+
+        outsider = sqlite3.connect(tmp_path / "tubedepth.db", timeout=0)
+        try:
+            outsider.execute("UPDATE jobs SET kind = 'written-while-read'")
+            outsider.commit()
+        finally:
+            outsider.close()
+
+
+def test_a_read_only_session_refuses_to_write(tmp_path: Path) -> None:
+    """Otherwise `readonly` is a performance hint that silently lies.
+
+    A session that takes no write lock but accepts writes is the one shape
+    that must not exist: it would let two of them interleave exactly the way
+    IMMEDIATE was added to prevent.
+    """
+    database = queued_database(tmp_path, "static.echo")
+
+    # OperationalError specifically, and the SQLite message: a plain `Exception`
+    # match passed against the TypeError from the missing keyword while this was
+    # being written, which is a green test proving nothing.
+    with (
+        pytest.raises(OperationalError, match="readonly database"),
+        database.session(readonly=True) as session,
+    ):
+        job = session.scalars(select(Job)).first()
+        assert job is not None
+        job.kind = "changed"
+        session.flush()

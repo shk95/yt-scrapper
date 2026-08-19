@@ -33,8 +33,24 @@ class Database:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._engine = create_engine(f"sqlite+pysqlite:///{path}")
+        # A second engine, and it earns its keep. The BEGIN IMMEDIATE below is
+        # what makes claiming safe, but it applies to every transaction the
+        # engine opens — so a route that only counts rows took the write lock
+        # and queued behind the worker. WAL exists precisely so readers never
+        # block writers, and one event handler was opting out of it everywhere.
+        #
+        # Measured before this existed: 12 concurrent clients against a worker
+        # running 22 transcript jobs put `GET /healthz` — one COUNT — at a p99
+        # of 1,434 ms, while `GET /v1/sources`, which touches no database, sat
+        # at 335 ms under the same load.
+        #
+        # Separate rather than a flag on the same engine because the guarantee
+        # is then structural: this engine has no IMMEDIATE hook to forget, and
+        # `query_only` is set once per connection instead of per transaction.
+        self._read_engine = create_engine(f"sqlite+pysqlite:///{path}")
 
         @event.listens_for(self._engine, "connect")
+        @event.listens_for(self._read_engine, "connect")
         def _configure(dbapi_connection: object, record: object) -> None:
             cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
             # WAL so the API can read job state while a worker writes, and a
@@ -46,11 +62,22 @@ class Database:
             cursor.execute("PRAGMA foreign_keys=ON")
             cursor.close()
 
+        @event.listens_for(self._read_engine, "connect")
+        def _refuse_writes(dbapi_connection: object, record: object) -> None:
+            # Without this, `readonly=True` would be a performance hint that
+            # silently lies: a session taking no write lock but accepting
+            # writes is the one shape that must not exist, since two of them
+            # can interleave exactly the way IMMEDIATE was added to prevent.
+            cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
+            cursor.execute("PRAGMA query_only=ON")
+            cursor.close()
+
         @event.listens_for(self._engine, "begin")
         def _begin_immediate(connection: Connection) -> None:
             connection.exec_driver_sql("BEGIN IMMEDIATE")
 
         self._sessions = sessionmaker(bind=self._engine, expire_on_commit=False)
+        self._read_sessions = sessionmaker(bind=self._read_engine, expire_on_commit=False)
 
     def create_schema(self) -> None:
         Base.metadata.create_all(self._engine)
@@ -93,8 +120,15 @@ class Database:
         connection.exec_driver_sql(f"ALTER TABLE {table.name} ADD COLUMN {definition}")
 
     @contextmanager
-    def session(self) -> Iterator[Session]:
-        session = self._sessions()
+    def session(self, *, readonly: bool = False) -> Iterator[Session]:
+        """A unit of work. `readonly=True` for anything that only reads.
+
+        The default takes the write lock on its first statement, which is what
+        the claim needs and what every writer should have. A read-only session
+        takes none, so it never queues behind the worker — and is refused if it
+        tries to write, so the choice cannot quietly become wrong.
+        """
+        session = (self._read_sessions if readonly else self._sessions)()
         try:
             yield session
             session.commit()
