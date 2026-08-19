@@ -99,6 +99,11 @@ class JobView(BaseModel):
     attempt_count: int
     error_code: str | None = None
     error_message: str | None = None
+    # Which key submitted this, and which worker holds it. Both were written on
+    # every job and readable from nowhere, so "identify the runaway client" and
+    # "which worker is stuck on this" meant opening SQLite by hand.
+    api_key_id: str | None = None
+    claimed_by: str | None = None
     payload_bytes: int | None = None
     created_at: datetime | None = None
     finished_at: datetime | None = None
@@ -145,6 +150,11 @@ class SourceHealthView(BaseModel):
     last_success_at: datetime | None = None
     last_failure_at: datetime | None = None
     last_error_code: str | None = None
+    # The actionable half. The code says what kind of failure; the message
+    # names the renderer that changed, which is what a `broken` source needs
+    # someone to look at. It was recorded from the day this table existed and
+    # read by nothing.
+    last_error_message: str | None = None
 
 
 class JobListView(BaseModel):
@@ -291,6 +301,8 @@ def _job_view(job: Job) -> JobView:
         attempt_count=job.attempt_count,
         error_code=job.error_code,
         error_message=job.error_message,
+        api_key_id=job.api_key_id,
+        claimed_by=job.claimed_by,
         payload_bytes=job.payload_bytes,
         created_at=job.created_at,
         finished_at=job.finished_at,
@@ -430,6 +442,7 @@ def create_application(
                     last_success_at=entry.last_success_at,
                     last_failure_at=entry.last_failure_at,
                     last_error_code=entry.last_error_code,
+                    last_error_message=entry.last_error_message,
                 )
                 for entry in SourceHealthService(database=database).snapshot().values()
             ],

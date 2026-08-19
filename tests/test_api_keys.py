@@ -93,3 +93,36 @@ def test_two_keys_are_not_the_same(tmp_path: Path) -> None:
     keys, _ = service(tmp_path)
 
     assert keys.mint(label="a").secret != keys.mint(label="b").secret
+
+
+def test_keys_can_be_listed_before_anyone_decides_to_revoke_one(tmp_path: Path) -> None:
+    """`last_used_at` was written on every request and readable from nowhere.
+
+    So "is this key still in use" could not be answered before revoking it,
+    which is the one question anyone asks first — and the secret is shown once,
+    so there is no way to work it out afterwards either.
+    """
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    service = ApiKeyService(database)
+    minted = service.mint(label="ingest")
+    service.verify(minted.secret)
+
+    listed = service.listed()
+
+    assert [entry.label for entry in listed] == ["ingest"]
+    assert listed[0].identifier == minted.identifier
+    assert listed[0].last_used_at is not None
+    assert listed[0].revoked is False
+
+
+def test_a_revoked_key_is_still_listed_and_says_so(tmp_path: Path) -> None:
+    """Revocation is not deletion — the jobs it submitted still name it, and a
+    row that vanished would make those unattributable."""
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    service = ApiKeyService(database)
+    minted = service.mint(label="gone")
+    service.revoke(minted.identifier)
+
+    assert [entry.revoked for entry in service.listed()] == [True]

@@ -259,7 +259,8 @@ async function loadHealth() {
       <td class="status ${source.status}">${source.status}</td>
       <td>${source.consecutive_failures || ""}</td>
       <td>${ago(source.last_success_at)}</td>
-      <td class="err">${escape(source.last_error_code || "")}</td>
+      <td class="err" title="${escape(source.last_error_message || "")}">${escape(source.last_error_code || "")}${
+        source.last_error_message ? ": " + escape(source.last_error_message.slice(0, 90)) : ""}</td>
     </tr>`).join("");
 
   // A quarantined route and an empty queue look identical from here unless
@@ -330,7 +331,7 @@ async function loadRecords() {
   $("records").innerHTML = table === "jobs"
     ? "<tr><th>id</th><th>kind</th><th>target</th><th>state</th><th>try</th><th>size</th><th>created</th><th>error</th><th></th></tr>" +
       rows.map((job) => `<tr>
-        <td class="mono">${escape(job.job_id.slice(0, 8))}</td>
+        <td class="mono" title="${escape(job.job_id)}${job.api_key_id ? "\nsubmitted by key " + escape(job.api_key_id) : ""}${job.claimed_by ? "\nheld by " + escape(job.claimed_by) : ""}">${escape(job.job_id.slice(0, 8))}</td>
         <td class="mono">${escape(job.kind)}</td>
         <td class="mono">${escape(job.target)}</td>
         <td class="status ${job.state}">${job.state}</td>

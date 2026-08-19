@@ -321,3 +321,19 @@ def test_the_backfill_command_reports_what_it_attributed(tmp_path: Path) -> None
     assert result.exit_code == 0, result.output
     with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
         assert next(connection.execute("SELECT schema_version FROM artifacts"))[0] == "1"
+
+
+def test_the_key_list_says_when_each_key_was_last_used(tmp_path: Path) -> None:
+    """The one question asked before revoking, which had no answer."""
+    from tubedepth.database import Database
+    from tubedepth.services.keys import ApiKeyService
+
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    ApiKeyService(database).mint(label="ingest")
+
+    result = runner.invoke(application, ["key", "list", "--data-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "ingest" in result.output
+    assert "never used" in result.output
