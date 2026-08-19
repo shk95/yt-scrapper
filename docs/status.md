@@ -346,6 +346,54 @@ browser `User-Agent` stayed but its evidence left with the source — see
 was RYD's documented 10,000/day. It no longer has one. That is recorded under
 "Proxying is deferred" rather than left for someone to rediscover.
 
+### `channel.about` returned a video's description as the channel's
+
+Found 2026-08-19 while answering what `channel.profile` would add, and it is
+the worst failure shape this project has had: not an error, not an empty
+result, but a plausible wrong answer that every check passed.
+
+The source called `browse` with **no `params` at all**, so YouTube returned the
+channel *home* tab. The parser searches by renderer name — correct policy, and
+the reason this bit — and took the first `description` in the payload, which on
+a channel with a featured video is that video's description. `country`,
+`joined_text`, `links` and `name` came back null every time, which is the
+entire reason this source exists rather than yt-dlp. Only the subscriber count
+was right, because it appears on every tab.
+
+Nothing caught it. The recorded fixture was named `browse-channel-home` and the
+regression test asserted only `channel_id` and the subscriber string — the
+limitation was written into the test instead of being recorded as a defect.
+
+**What YouTube actually does now:** there is no About tab in the tab list at
+all. The plan anticipated stale about-tab `params`; what happened instead is
+that the surface moved into an engagement panel, reachable only by following a
+`continuationCommand` token from the first response. So the source makes two
+calls and reads the token at runtime — a hardcoded token would be a
+credential-shaped string that expires, which is the failure it already had.
+
+`parse_channel_about` now requires `aboutChannelViewModel` and raises
+`ExtractionError` naming the renderers it saw instead. The home fixture is kept
+deliberately as the negative case: it proves the refusal rather than a parse.
+
+**`channel.profile` is cancelled as a separate kind.** The plan gave it its own
+source and its own yt-dlp extraction for the channel description, tags, avatar
+and follower count. All of those are in `channelMetadataRenderer`, which sits
+in the *first* of the two responses `channel.about` already makes. Spending a
+second extraction per channel to fetch fields we have already been handed is a
+YouTube request bought for nothing, and YouTube requests are the one budget
+that caps this system. `ChannelAbout` gained `name`, `tags`, `avatar_url`,
+`view_count`, `video_count` and `handle`; the plan's thirteenth kind is not
+coming.
+
+`view_count` is worth noting on its own: the channel's lifetime view total,
+exact rather than rounded. The plan recorded it as unavailable — yt-dlp reports
+`None` — and it is sitting in this panel.
+
+**Handles now resolve.** `@RickAstleyYT` passes identifier validation because
+YouTube URLs use handles, and `browse` answered 400 for it: an error about a
+request the caller never made. `browse_id_for` spends one `navigation/
+resolve_url` round trip, and only when the target is a handle.
+
 ### A transcript is the video's own words, or it is nothing
 
 `video.transcript` takes the video's own language and no other:

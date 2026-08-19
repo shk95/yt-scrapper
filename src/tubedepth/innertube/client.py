@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping
-from typing import Any
+from typing import Any, Protocol, runtime_checkable
 
 import httpx
 
@@ -28,6 +28,18 @@ CLIENT_CONTEXT: dict[str, Any] = {
         "gl": "US",
     }
 }
+
+
+@runtime_checkable
+class InnerTubeCaller(Protocol):
+    """What a source needs from InnerTube, which is one method.
+
+    Named separately from the client so a test can hand over a recorded
+    response without a socket — the same seam `YtdlpRuntime` provides for the
+    other backend.
+    """
+
+    def call(self, endpoint: str, body: Mapping[str, Any]) -> Mapping[str, Any]: ...
 
 
 class InnerTubeClient:

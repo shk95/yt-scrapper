@@ -211,4 +211,15 @@ class ChannelAbout(BaseModel):
     subscriber_count_text: str | None = None
     country: str | None = None
     joined_text: str | None = None
+    # Exact, unlike the subscriber count: YouTube publishes the real figure for
+    # a channel's lifetime views and the official Data API does not expose it.
+    view_count: int | None = None
+    video_count: int | None = None
+    handle: str | None = None
+    # From the channel's own metadata rather than the about panel. These are
+    # what a separate `channel.profile` source would have cost a second
+    # YouTube request to fetch, and they arrive in a response this source
+    # already makes.
+    tags: list[str] = []
+    avatar_url: str | None = None
     links: list[str] = []
