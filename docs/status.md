@@ -533,6 +533,56 @@ yt-dlp forwards one. That is a different and larger job than the "cheapest
 change in this issue by a wide margin" the issue estimated, and it should be
 re-estimated before it is scheduled.
 
+### The complete enumeration of a channel already existed and nobody used it
+
+Measured 2026-08-20 on `@director_pihyunjung`, flat extractions, direct line:
+
+| surface | items | requests |
+| --- | --- | --- |
+| `playlist.items` on the uploads playlist (`UU…`) | **698** | **8** |
+| `channel.videos` (the `/videos` tab) | 474 | 16 |
+| `/shorts` tab | 216 | 5 |
+| `/streams` tab | 3 | ~2 |
+
+The three tabs are pairwise disjoint and all strict subsets of the uploads
+playlist. `UU − /videos` is 224: **216 Shorts, 3 past live streams, and 5
+entries that carry titles and view counts in the grid and cannot be watched at
+all.** yt-dlp reports 698 against the Data API's 697; the extra one is an
+offline live entry, so the playlist is complete.
+
+**The uploads playlist is wider *and* cheaper.** It pages a hundred at a time
+where the tab pages thirty, so it reaches more with half the requests. That
+was the surprise — the assumption going in was that completeness would cost
+something.
+
+*No new kind was built, and that is the finding.* `playlist.items` collects
+this today with no change at all: `normalize_playlist_identifier` passes a
+`UU…` through untouched and `_extraction_target` builds the right URL. Issue
+#2 left "the uploads playlist is the wider enumeration" as an open question;
+the answer is that it was never closed, only unwritten.
+
+*Tab-stitching was measured and rejected.* `/videos + /shorts + /streams` is 23
+requests for 693 items against 8 for 698, and the `/shorts` tab returns
+`duration: null` for every entry — throwing away one of the two fields
+`ListedVideo` exists to carry.
+
+**What was deliberately not done.** Making `channel.videos` silently *be* the
+uploads playlist when handed a `UC…` is strictly wider and strictly cheaper,
+and the payload shape does not change — so `just record-payload-shapes` would
+pass and CI would say nothing. It would also widen every existing sweep of
+every channel by roughly half and start queueing the unwatchable entries. That
+is a decision with a record, not a patch, and it has not been taken.
+
+**And the cost is on the other side.** The listing is 8 requests either way;
+the fan-out goes from 474 jobs to 698, and at roughly three requests per
+metadata job that is about 670 more YouTube requests per sweep. 96% of what it
+buys is Shorts: 31% of that channel's catalogue and 9% of its views, median 47k
+against 305k, and a fifty-second video has no chapters, a one-sentence
+transcript and thin comments. For this channel the answer is no. `--then` has
+no predicate, so "enumerate everything, collect metadata for the long ones" is
+not currently expressible — that, not a listing kind, is what would make this
+worth revisiting.
+
 ### The listing cap is a deployment setting, and both units must agree
 
 `channel.videos`, `search.videos` and `playlist.items` stopped at 100 and

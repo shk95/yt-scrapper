@@ -168,18 +168,23 @@ class Worker:
         announced at all. One path with a bound rather than two paths, because
         two paths are how they came to disagree.
         """
-        if self.paused():
-            logger.info("worker is paused; claiming nothing")
-            return 0
-
+        # Above the pause check on purpose. Pausing means claim nothing; it
+        # does not mean stop talking. A job that succeeded moments before is
+        # owed its callback, and a receiver waiting on one cannot tell "the
+        # operator paused collection" from "my job has not finished". Rows a
+        # killed worker left in `running` are not the operator's doing either.
         self.deliver_webhooks()
         reaped = self.reap()
         if reaped:
             logger.info("returned %s job(s) whose lease had expired", reaped)
 
+        if self.paused():
+            logger.info("worker is paused; claiming nothing")
+            return 0
+
         if self._concurrency == 1:
             completed = 0
-            while (limit is None or completed < limit) and self.run_once():
+            while (limit is None or completed < limit) and not self.paused() and self.run_once():
                 completed += 1
             self.deliver_webhooks()
             return completed
@@ -195,6 +200,13 @@ class Worker:
         def pump() -> None:
             nonlocal completed, reserved
             while True:
+                # Re-read rather than trusting the check at the top. A drain
+                # was a handful of jobs when that was written; a batch is up to
+                # 500 targets and one listing fans out to the whole cap, so
+                # "it takes effect on the next restart" had come to mean "not
+                # until the sweep it is trying to stop has finished".
+                if self.paused():
+                    return
                 with counted:
                     if limit is not None and reserved >= limit:
                         return

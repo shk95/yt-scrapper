@@ -30,7 +30,13 @@ class SourceCost(StrEnum):
     reserved per cost so the slow ones cannot occupy every worker.
     """
 
-    CHEAP = "cheap"  # sub-second, one request
+    # These describe the shape of a job, not a fixed price, and a listing's
+    # price moved when its cap became configurable: `channel.videos` at 700 is
+    # sixteen requests and about seven seconds, measured. It is still CHEAP
+    # because what this enum reserves slots against is how long a job holds a
+    # worker, and seven seconds does not starve anything the way a comment
+    # harvest does.
+    CHEAP = "cheap"  # under a few seconds, a handful of requests
     STANDARD = "standard"  # seconds, a handful of requests
     EXPENSIVE = "expensive"  # minutes, dozens of requests
 

@@ -21,7 +21,7 @@ from tubedepth.egress.control import Lane, RateController, Verdict
 from tubedepth.egress.transport import Egress
 from tubedepth.errors import NotFoundError, UpstreamError
 from tubedepth.identifiers import TargetType
-from tubedepth.models import Job, JobState
+from tubedepth.models import Job, JobState, utcnow
 from tubedepth.payload_store import PayloadStore
 from tubedepth.schemas import ListedVideo, VideoListing
 from tubedepth.sources import SourceRegistry
@@ -759,3 +759,84 @@ def test_resuming_lets_the_queue_move_again(tmp_path: Path) -> None:
 
     assert completed == 1
     assert source.calls == ["dQw4w9WgXcQ"]
+
+
+def test_pausing_partway_through_stops_the_drain(tmp_path: Path) -> None:
+    """A pause has to bite during a sweep, which is the only time it is wanted.
+
+    The check used to run once, at the top of the drain. That was defensible
+    when a drain was a handful of jobs and the unit restarted the process every
+    ten seconds — but a batch is up to 500 targets, `--from-file` points at a
+    watch list, and one listing fans out to the whole listing cap. A drain is
+    now long enough that "it takes effect on the next restart" means "not until
+    the sweep it is trying to stop has finished".
+    """
+    from tubedepth.models import WorkerControl
+
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+
+    class PausesItself(EchoSource):
+        kind = "video.pauses"
+
+        def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
+            with database.session() as session:
+                session.add(WorkerControl(identifier="worker", paused=True))
+            return super().collect(target, egress, runtime)
+
+    source = PausesItself()
+    worker = Worker(
+        database=database,
+        registry=_registry(source),
+        payloads=PayloadStore(tmp_path / "payloads"),
+        name="worker-1",
+        concurrency=1,
+    )
+    for index in range(4):
+        enqueue(database, "video.pauses", f"video{index:06d}")
+
+    completed = worker.drain()
+
+    assert completed == 1, f"the pause was ignored for the rest of the drain: {completed} ran"
+    with database.session() as session:
+        assert session.query(Job).filter(Job.state == JobState.QUEUED).count() == 3
+
+
+def test_a_paused_worker_still_announces_what_it_already_finished(tmp_path: Path) -> None:
+    """Pause means claim nothing. It does not mean stop talking.
+
+    A job that succeeded moments before the pause is owed a callback, and a
+    receiver waiting on one cannot tell "the operator paused collection" from
+    "my job has not finished". Reaping is the same argument: rows a killed
+    worker left in `running` are not the operator's doing and should not wait
+    for a resume.
+    """
+    import respx
+
+    from tubedepth.models import WorkerControl
+
+    with respx.mock:
+        route = respx.post("https://example.invalid/hook").respond(200)
+        database = Database(tmp_path / "tubedepth.db")
+        database.create_schema()
+        with database.session() as session:
+            session.add(
+                Job(
+                    kind="video.echo",
+                    target="video000001",
+                    state=JobState.SUCCEEDED,
+                    finished_at=utcnow(),
+                    webhook_url="https://example.invalid/hook",
+                )
+            )
+            session.add(WorkerControl(identifier="worker", paused=True))
+
+        Worker(
+            database=database,
+            registry=_registry(EchoSource()),
+            payloads=PayloadStore(tmp_path / "payloads"),
+            name="worker-1",
+            webhook_secret="shh",
+        ).drain()
+
+        assert route.called, "a pause silenced a callback the job had already earned"

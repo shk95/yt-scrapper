@@ -162,7 +162,14 @@ class CollectionService:
         """
         if self._database is None:
             return None
-        with self._database.session() as session:
+        # A reader, and it has to say so. `decisions/002` is about exactly this:
+        # every session that is not `readonly=True` opens BEGIN IMMEDIATE and
+        # takes SQLite's write lock, so a pure lookup was serialising against
+        # the worker for no reason — and once `POST /v1/jobs/batch` called this
+        # from inside its own write transaction, the second target deadlocked
+        # the request against a lock it was already holding. That decision file
+        # records the same shape happening once before, in the schema repair.
+        with self._database.session(readonly=True) as session:
             artifact = ArtifactRepository(session).fresh(question)
             if artifact is None:
                 return None
