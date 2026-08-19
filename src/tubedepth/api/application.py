@@ -532,9 +532,21 @@ def create_application(
             # those apart is the difference between "wait" and "you asked for
             # something that does not exist".
             raise ConflictError(f"job has not finished: {job_id} is {job.state.value}")
-        return PlainTextResponse(
-            payloads.read(job.payload_digest).decode(), media_type="application/json"
-        )
+        try:
+            body = payloads.read(job.payload_digest).decode()
+        except FileNotFoundError as error:
+            # Retention deletes artifacts and never touches job rows, so this
+            # is the ordinary end state of every job older than the retention
+            # window rather than a corner case. Letting it raise reaches
+            # FastAPI's default handler as a 500, which sends whoever is on
+            # call into our tracebacks to find that retention did exactly what
+            # it is configured to do. 404 is the honest answer: the job is
+            # real, what it collected is not here, and it is not coming back.
+            raise NotFoundError(
+                f"the result of {job_id} is no longer stored: it was collected and has "
+                "since aged out of retention"
+            ) from error
+        return PlainTextResponse(body, media_type="application/json")
 
     application.include_router(versioned)
     return application

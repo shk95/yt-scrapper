@@ -36,6 +36,18 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Fixed
 
+- **Retention no longer unlinks a payload a current observation still uses.**
+  The store is content-addressed, so two observations that collected identical
+  bytes are one file — which `GET /v1/artifacts` teaches readers to expect,
+  since equal digests are how "nothing changed" is read. Pruning unlinked on
+  every expiring row without checking, so the older of two identical
+  observations took the payload of the newer one with it. The surviving row
+  then served a silent cache miss and its job answered 500. Nothing had aged
+  out yet on any store built so far, so this had not fired.
+- **A job whose result has aged out answers 404 instead of 500.** Retention
+  removes artifacts and never touches job rows, so this is the ordinary end
+  state of an old job. It reached FastAPI's default handler as an unhandled
+  `FileNotFoundError`.
 - **`refresh` now reaches the worker.** `"refresh": true` on `POST /v1/jobs`
   skipped the API's own cache check and was then discarded, so the job it
   created was served from the cache anyway: it succeeded, pointed at the

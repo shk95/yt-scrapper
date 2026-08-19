@@ -350,6 +350,46 @@ def test_a_forced_collection_records_a_second_observation(
         )
 
 
+def test_a_job_whose_payload_has_aged_out_says_so_instead_of_raising(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    """Retention deletes artifacts and never touches job rows.
+
+    So this is the ordinary state of every job older than the retention
+    window, not a corner case: the row still names a digest and the bytes are
+    gone. `payloads.read` raises `FileNotFoundError`, which is not a
+    `TubedepthError` and therefore reaches FastAPI's default handler — an
+    unhandled traceback and a 500 for the most predictable outcome this
+    endpoint has. A 500 sends whoever is on call into our tracebacks to
+    discover that retention did exactly what it was configured to do.
+    """
+    from tubedepth.worker import Worker
+
+    client, key, database = api
+    registry = SourceRegistry()
+    registry.register(EchoSource())  # type: ignore[arg-type]
+    job_id = client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+        headers={"X-API-Key": key},
+    ).json()["job_id"]
+    payloads = PayloadStore(tmp_path / "payloads")
+    Worker(
+        database=database, payloads=payloads, registry=registry, name="test", concurrency=1
+    ).drain()
+    with database.session() as session:
+        job = session.get(Job, job_id)
+        assert job is not None and job.payload_digest is not None
+        digest = job.payload_digest
+    # What retention does, without waiting thirty days for it.
+    payloads.delete("video.echo", digest)
+
+    response = client.get(f"/v1/jobs/{job_id}/result", headers={"X-API-Key": key})
+
+    assert response.status_code == 404, "an aged-out payload answered as though it were our bug"
+    assert response.json()["error"]["code"] == "not_found"
+
+
 def test_the_openapi_document_is_served(api: tuple[TestClient, str, Database]) -> None:
     client, _, _ = api
 
