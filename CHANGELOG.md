@@ -42,7 +42,10 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
   payload collected hours earlier, and recorded no new observation. Anything
   polling faster than a kind's freshness window was collecting nothing while
   reporting success. The flag is a column on the job now, so it survives the
-  queue and a retry. Databases that already exist need `tubedepth migrate`.
+  queue and a retry. A database that already exists gains the column from the
+  startup repair, so a running deployment does not break — but run `tubedepth
+  migrate` anyway, or Alembic's version table stays behind and the next
+  migration tries to add a column that is already there.
 
 ## [0.1.0] - 2026-08-19
 
