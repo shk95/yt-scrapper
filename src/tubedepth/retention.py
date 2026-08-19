@@ -116,15 +116,27 @@ class RetentionService:
             # What maximum_age therefore buys is a bounded window of history:
             # how a video's counts moved over the last month is free, and older
             # than that is not kept.
-            live: set[str] = set()
-            for artifact in artifacts:
-                if artifact.fetched_at >= cutoff:
-                    live.add(artifact.digest)
-                    continue
-                self._payloads.delete(artifact.kind, artifact.digest)
+            live: set[str] = {a.digest for a in artifacts if a.fetched_at >= cutoff}
+            expiring = [a for a in artifacts if a.fetched_at < cutoff]
+            for artifact in expiring:
                 session.delete(artifact)
                 removed += 1
                 freed += artifact.byte_count
+
+            # A blob can have more than one row pointing at it, so the unlink
+            # is decided after every row has been judged rather than while they
+            # are being judged. The store is content-addressed, which means two
+            # observations that collected identical bytes *are* one file — and
+            # `docs/api.md` teaches readers to expect exactly that, since equal
+            # digests across two `fetched_at` values are how "nothing changed"
+            # is read. Unlinking on the older row therefore took the payload of
+            # a current one: a cache entry that could never be served again,
+            # and a job result that raised instead of answering.
+            #
+            # Deduplicated because two expiring rows can share a blob too, and
+            # the second unlink of one file is an error rather than a no-op.
+            for kind, digest in {(a.kind, a.digest) for a in expiring if a.digest not in live}:
+                self._payloads.delete(kind, digest)
 
         orphans, total = self._sweep_orphans(live)
         over = total > self._policy.maximum_bytes

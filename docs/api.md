@@ -273,6 +273,13 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB/result
 difference between "wait" and "you asked for something that does not exist" is
 the difference between a client that retries and one that gives up.
 
+**404 `not_found`** if the job finished and its result has since aged out of
+retention. This is the ordinary end state of an old job rather than an error —
+retention removes artifacts and never touches the job ledger, so a job stays
+answerable about what it did long after what it collected is gone. **Results
+are not permanent; the job ledger is.** A client that needs the data beyond the
+retention window has to store it when it fetches it.
+
 Every payload carries a `degradations` list. It is empty on a clean collection
 and names what could not be had otherwise — a `video.bundle` whose comments
 were disabled, or a surface whose renderer no longer matches, which appears as

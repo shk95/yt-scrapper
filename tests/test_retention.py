@@ -216,3 +216,35 @@ def test_the_store_size_is_measured_on_disk_and_not_from_the_rows(tmp_path: Path
     assert stored_path is not None
     assert outcome.total_bytes == stored_path.stat().st_size
     assert outcome.total_bytes < len(body) / 2, "gzip is why the blob store exists"
+
+
+def test_an_expiring_observation_does_not_take_a_payload_a_current_one_shares(
+    tmp_path: Path,
+) -> None:
+    """Two identical observations are one blob, and the older one expires first.
+
+    Content addressing makes this the ordinary case rather than a corner:
+    `docs/api.md` tells readers that equal digests across two `fetched_at`
+    values mean nothing changed, so a video whose counts have not moved has
+    exactly this shape. Unlinking on the expiring row leaves the surviving row
+    pointing at nothing — a cache entry that can never be served and a job
+    result that raises instead of answering.
+    """
+    clock = FakeClock()
+    database, payloads, service = build(
+        tmp_path, RetentionPolicy(maximum_age=timedelta(days=30)), clock
+    )
+    unchanged = b'{"view_count": 100}'
+    digest = store(database, payloads, clock, unchanged, "same-video")
+    clock.advance(timedelta(days=29))
+    assert store(database, payloads, clock, unchanged, "same-video") == digest
+
+    clock.advance(timedelta(days=2))
+    outcome = service.prune()
+
+    assert outcome.artifacts_removed == 1
+    with database.session() as session:
+        assert session.query(Artifact).count() == 1
+    assert payloads.read(digest) == unchanged, (
+        "the surviving observation's payload was unlinked along with the expiring one"
+    )
