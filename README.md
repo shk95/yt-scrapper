@@ -1,110 +1,231 @@
 # tubedepth
 
-YouTube Data API가 주지 않는 영상·채널 데이터를 수집하는 자체 호스팅 API.
+A self-hosted API that collects the YouTube video and channel data the official
+Data API does not expose.
 
-챕터, "가장 많이 본 구간" 히트맵, 태그, 정확한 업로드 시각, 자막 본문, 댓글 전량, 싫어요 추정치,
-SponsorBlock 구간, 관련 영상, 채널 About, 커뮤니티 게시물. 클라이언트가 API 키로 **작업(job)을 등록**하고
-정규화된 JSON을 받아간다.
+*[한국어](README.ko.md)*
+
+Chapters, the "most replayed" heatmap, tags, exact publish times, caption text,
+whole comment threads, SponsorBlock segments, related videos, channel About
+panels, community posts. A client submits a **job** with an API key and
+collects normalised JSON.
 
 ```sh
-curl -H "X-API-Key: $KEY" -X POST localhost:8080/v1/videos/dQw4w9WgXcQ/metadata
-# 202 → 폴링 → chapters, most_replayed(100버킷), tags, published_at …
+curl -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+     -d '{"kind":"video.metadata","target":"dQw4w9WgXcQ"}' localhost:8080/v1/jobs
+# 202 + job_id → poll → chapters, most_replayed (100 buckets), tags, published_at …
+# a fresh result already stored answers 200 with the data, and no job is created
 ```
 
-## 왜 필요한가
+Full endpoint reference: [`docs/api.md`](docs/api.md).
 
-Data API v3는 공개 영상에 대해서도 많은 것을 감춘다. `snippet.tags`는 영상 소유자에게만 반환되고,
-자막 본문은 소유자 OAuth 없이 못 받으며, 챕터·히트맵·싫어요·관련 영상·커뮤니티 게시물은 필드 자체가 없다.
-댓글은 있지만 쿼터 소모가 커서 대량 수집에 못 쓴다.
+## What it collects
 
-## 시작하기
+<!-- kinds:start -->
+
+| kind | what you get | via the official API |
+| --- | --- | --- |
+| `video.metadata` | chapters, a 100-bucket heatmap, tags, exact publish time, licence, caption track list | tags for the owner only; the rest has no field |
+| `video.transcript` | caption text, in the video's own language, human-written preferred | not without the owner's OAuth |
+| `video.comments` | every comment, threaded by `parent_id`, with pinned, hearted and verified flags | possible, but the quota does not survive it |
+| `video.sponsor_segments` | SponsorBlock segments (community data, CC BY-NC-SA 4.0) | absent |
+| `video.related` | the related-videos rail | absent |
+| `video.bundle` | four of the above in one job; anything missing is named in `degradations` | — |
+| `channel.about` | join date, country, links, **exact total view count**, description, tags, avatar | mostly absent |
+| `channel.community` | community posts | absent |
+| `channel.videos` · `playlist.items` · `search.videos` | listings — fan out to per-item collection with `--then` | possible, and it spends quota |
+
+<!-- kinds:end -->
+
+`tubedepth sources` and `GET /v1/sources` always report the real list.
+
+## Why it exists
+
+Data API v3 withholds a great deal about videos that are public. `snippet.tags`
+comes back only to the video's owner, caption text needs the owner's OAuth, and
+chapters, the heatmap, related videos and community posts have no field at all.
+Comments are available and cost more quota than bulk collection can afford.
+
+## Getting started
 
 ```sh
-git config core.hooksPath .githooks   # 클론은 훅이 꺼진 상태로 온다
-tool/doctor.sh                        # 툴체인·SQLite·훅 확인
+git config core.hooksPath .githooks   # a fresh clone arrives with hooks off
+tool/doctor.sh                        # toolchain, SQLite, hooks
 uv sync --extra dev
-just check                            # format + lint + 오프라인 테스트
+just check                            # format + lint + the offline suite
 
-uv run tubedepth key create --label local   # 키는 이때 한 번만 출력된다
-uv run tubedepth worker &
+uv run tubedepth key create --label local   # the secret is printed once
+uv run tubedepth serve --port 8080 &        # the API, on 127.0.0.1 by default
+uv run tubedepth work --concurrency 6       # the worker, a separate process
+```
+
+```sh
+KEY=ytd_...
+curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+     -d '{"kind":"video.metadata","target":"https://youtu.be/dQw4w9WgXcQ"}' \
+     localhost:8080/v1/jobs                  # 202 + job_id, or 200 with a cached result
+curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$ID/result
+```
+
+**A key's rate limit is counted inside one process.** Run two API processes and
+each grants the same key its own allowance — this is written for a single
+instance, and anywhere else the number means nothing.
+
+## Dashboard
+
+```sh
 uv run tubedepth serve --port 8080
 ```
 
-작업 방식은 [`AGENTS.md`](AGENTS.md)에, 현재 상태는 [`docs/status.md`](docs/status.md)에 있다.
+`http://localhost:8080/` shows queue state, per-source health, a 24-hour
+completion trend, and a record browser over jobs and artifacts. The page itself
+needs no key; you type one into the browser and it rides along as `X-API-Key`
+on every read after that. Keys come from `tubedepth key create`.
 
-## 마일스톤
+It references no external resource, so it loads on a private network with no
+route to the internet.
 
-| # | 내용 | 상태 |
-| --- | --- | --- |
-| M0 | 저장소 스캐폴딩, 훅, CI, doctor | 진행 중 |
-| M1 | 도메인 코어 + egress 골격 (네트워크 0) | |
-| M2 | 첫 yt-dlp 소스 — 영상 메타 | |
-| M3 | HTTP API + API 키 인증 | |
-| M4 | 자막 · 싫어요 · SponsorBlock | |
-| M4.5 | egress 풀 (wireproxy) + 적응 라우팅 | |
-| M5 | 댓글 수집 | |
-| M6 | 채널 · 재생목록 · 검색 | |
-| M7 | InnerTube — 관련영상 · About · 커뮤니티 | |
-| M8 | 합성 · 웹훅 · 보존 · systemd | |
-| M9 | 확장 지점 증명 (라이브 채팅 추가) | |
+## Deployment
+
+Two systemd **user** units live in `deploy/`. Neither needs root, and neither
+can quietly acquire it.
+
+```sh
+cp deploy/tubedepth-*.service ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now tubedepth-api tubedepth-worker
+loginctl enable-linger $USER    # or a reboot looks exactly like a crash
+```
+
+Splitting the API from the worker is not a matter of taste. yt-dlp extraction
+blocks and holds memory; run them together and one comment harvest sets the p99
+of `GET /v1/jobs/{job_id}`, while a yt-dlp crash takes the API with it.
+
+The API binds to **loopback** by default. Authentication here is a header,
+which is not a substitute for TLS, so put a reverse proxy in front before
+exposing it.
+
+## Documentation
+
+| | |
+| --- | --- |
+| [`docs/api.md`](docs/api.md) | REST reference — every endpoint, error code and the webhook contract |
+| [`docs/status.md`](docs/status.md) | where things stand, and the decisions behind them |
+| [`docs/troubleshooting.md`](docs/troubleshooting.md) | errors that have already cost someone an afternoon — grep it, do not read it |
+| [`CHANGELOG.md`](CHANGELOG.md) | what changed in each release |
+| [`docs/releasing.md`](docs/releasing.md) | how a release is cut |
+| [`AGENTS.md`](AGENTS.md) | how to work in this repository |
+
+`README.md`, `docs/api.md` and `CHANGELOG.md` are the originals; the `.ko.md`
+files beside them are translations. Everything else is Korean.
+
+## Versioning
+
+The package version is written in exactly one place,
+`src/tubedepth/__init__.py`, and `pyproject.toml` reads it from there.
+`tubedepth version`, `GET /healthz` and the OpenAPI document all report it.
+
+`/v1` versions the HTTP contract, separately and on its own schedule: it moves
+only when a change would break a client written against
+[`docs/api.md`](docs/api.md). The package version moves for reasons no client
+notices.
+
+Releases follow [semantic versioning](https://semver.org) and are recorded in
+[`CHANGELOG.md`](CHANGELOG.md), tagged `vX.Y.Z` on `master`. The procedure is
+[`docs/releasing.md`](docs/releasing.md). Until 1.0, a minor bump may change
+collected payload shapes; `schema_version` on each source is what a stored
+artifact is keyed by.
+
+## Status
+
+Every stage of the plan (M0–M9) is built, plus a dashboard the plan never asked
+for. **Two things the plan specified were deliberately not built**, each with
+its reason on record: `video.dislikes` was removed, because nobody can
+adjudicate the numbers, and `channel.profile` was cancelled, because its
+contents turned out to arrive in a response `channel.about` already makes.
+
+What has been verified and what has not is in
+[`docs/status.md`](docs/status.md). Where that file and
+[`docs/plan.md`](docs/plan.md) disagree, status.md is right — the plan is a
+record, not an instruction.
 
 ## Honest limits
 
-이 절은 이 프로젝트가 **할 수 없는 것**과 **아직 확인하지 않은 것**을 적는다.
+What this project **cannot** do, and what has **not been checked**.
 
-**원천적으로 불가능한 것**
+**Impossible in principle**
 
-- **정확한 구독자 수.** YouTube가 반올림 값만 공개한다 — InnerTube 응답 자체가 `"4.53M subscribers"`
-  문자열이고 yt-dlp의 정수는 그것을 파싱한 값이다. Data API와 같은 한계이고 스크래핑으로도 우회할 수 없어서,
-  **정확한 값을 약속하는 필드를 아예 두지 않았다.** `subscriber_count_approximate`와 원본 문자열만 준다.
-- **트렌딩(인기 급상승).** YouTube가 피드를 폐지했다(`/feed/trending`은 홈으로 리다이렉트된다).
-  빠뜨린 게 아니라 없는 것이므로 비슷한 것으로 흉내내지 않는다.
+- **Exact subscriber counts.** YouTube publishes a rounded value and nothing
+  else — the InnerTube response is literally the string `"4.53M subscribers"`,
+  and yt-dlp's integer is that string parsed. The Data API has the same limit
+  and scraping does not get around it, so **no field here promises an exact
+  number.** You get `subscriber_count_approximate` and the original string.
+- **Trending.** YouTube retired the feed; `/feed/trending` redirects to the
+  home page. This is an absence, not an omission, so nothing here imitates it.
 
-**깨지기 쉬운 것**
+**Fragile**
 
-- **관련 영상·채널 About·커뮤니티 게시물은 InnerTube 렌더러 파싱에 의존한다.** 이름이 예고 없이 바뀐다 —
-  `compactVideoRenderer`가 이미 `lockupViewModel`로 바뀌었다. `tests/fixtures/innertube/`의 날짜가 각 표면이
-  마지막으로 동작한 시점이다. 응답의 `degradations`에 `parse_mismatch`가 있으면 그중 하나가 깨진 것이다.
-  CI의 fixture 회귀는 **우리 코드가 퇴행하지 않았음**을 증명할 뿐, YouTube가 지금 무엇을 보내는지에 대해서는
-  아무것도 증명하지 못한다. 그건 `just contract`가 한다.
-- **차단될 수 있다.** 요청량에 따라 로그인·PO token을 요구받을 수 있다. 고장 났을 때 첫 수순은
-  `just update-ytdlp`이고, 두 번째는 yt-dlp 이슈 트래커이며, 이 코드 디버깅은 세 번째다.
+- **Related videos, channel About and community posts depend on parsing
+  InnerTube renderers**, whose names change without notice —
+  `compactVideoRenderer` has already become `lockupViewModel`. The dates in
+  `tests/fixtures/innertube/` are when each surface last worked. A
+  `parse_mismatch` in a response's `degradations` means one of them has broken.
+  The fixture regressions in CI prove **our code has not regressed**; they
+  prove nothing about what YouTube is sending today. That is what `just
+  contract` is for.
+- **You can be blocked.** Volume can earn a login or PO-token challenge. When
+  extraction breaks the first move is `just update-ytdlp`, the second is the
+  yt-dlp issue tracker, and debugging this code is the third.
 
-**프록시에 대해 — 기대와 반대다**
+**On proxies — the opposite of what you would expect**
 
-- **ProtonVPN으로 YouTube 트래픽을 보내지 마라.** yt-dlp의 공식 권고 자체가 "VPN을 끄고 레지덴셜 회선을
-  쓰라"이다. YouTube의 봇 검사는 데이터센터 주소 대역을 표적으로 하고, 상용 VPN exit은 전부 그 대역이다.
-  이 프로젝트를 개발한 머신의 **직결 회선은 가정용 IP라 현재 잘 동작하며, VPN exit은 아마 그렇지 않을 것이다.**
-  `TUBEDEPTH_EGRESS_ALLOW_VPN_FOR_YOUTUBE`의 기본값이 `0`인 이유다. 켜는 것은 고침이 아니라 *측정*이고,
-  안 통하면 컨트롤러가 물어보기 전에 이미 강등해 놨을 것이다.
-- **VPN 풀의 진짜 용도는 RYD다.** Return YouTube Dislike는 **클라이언트당 100 req/분, 10,000 req/일**을
-  문서화한다. 일일 한도가 벽이라 한 주소가 시간당 약 400건, exit 10개면 약 4,000건이다. 그게 프록시 풀의
-  근거 전부이고 YouTube와는 무관하다. SponsorBlock에도 같은 논리가 (한도가 비공개라 덜 정밀하게) 적용된다.
-- **YouTube 처리량을 실제로 올리는 것은 레지덴셜/모바일 프록시뿐**이며 대략 $5–15/GB다.
-  `ExternalProxyEgress`가 그걸 코드 변경이 아니라 설정 한 줄로 만들어 둔다.
-- **ProtonVPN 동시 접속 수를 확인하라.** wireproxy 프로세스 하나가 한 자리를 먹으므로, 풀이 당신의 휴대폰·
-  노트북과 같은 할당량을 놓고 경쟁한다. 무료 플랜은 풀 용도로 부적합하다.
+- **Do not send YouTube traffic through ProtonVPN.** yt-dlp's own advice is to
+  turn the VPN off and use a residential line. YouTube's bot checks target
+  datacenter ranges, and every commercial VPN exit is in one. The machine this
+  was developed on **has a residential IP that currently works, and a VPN exit
+  probably would not.** Hence `TUBEDEPTH_EGRESS_ALLOW_VPN_FOR_YOUTUBE`
+  defaulting to `0`. Turning it on is a *measurement*, not a fix.
+- **The proxy pool has no measured case behind it.** The original quantitative
+  argument was Return YouTube Dislike's documented daily cap; **removing that
+  source removed the argument with it.** The one remaining third party is
+  SponsorBlock, whose limits are undisclosed. Nothing has been measured that
+  more exits would definitely improve. Measure it before building the pool.
+- **Only residential or mobile proxies actually raise YouTube throughput**, at
+  roughly $5–15/GB. `ExternalProxyEgress` makes that a configuration change
+  rather than a code change.
+- **Check your ProtonVPN concurrent-connection quota.** Each wireproxy process
+  takes a slot, so a pool competes with your phone and laptop. The free plan is
+  unsuitable.
 
-**처리량 — 종류마다 두 자릿수 차이가 난다**
+**Throughput differs by two orders of magnitude between kinds**
 
-| 종류 | 시간당 수천 건? |
+| kind | thousands per hour? |
 | --- | --- |
-| 싫어요 · SponsorBlock · 캐시 히트 | 가능. 풀이 실제로 도움 되는 유일한 구간 |
-| 영상 메타 · 관련영상 · 검색 | 아마도 (직결 IP 하나로 900–1,800/시간이 계획용 밴드) |
-| 댓글 전량 수집 | **불가능.** 1,000댓글 = 50+ 요청 = 1–3분. 게다가 그 요청들이 메타 수집이 써야 할 IP 예산을 갉아먹는다 |
+| SponsorBlock · cache hits | yes — cache hits are the only axis fully under our control |
+| video metadata · related · search | measured 8,417/hour (40 jobs, concurrency 8). Sustained load unmeasured |
+| whole comment threads | **no.** 1,000 comments = 50+ requests = 1–3 minutes, and those requests eat the IP budget metadata collection needs |
 
-**법적 위치.** YouTube 이용약관은 공개 API 외의 자동화 접근을 금지한다. 데이터가 공개적으로 보인다는 사실이나
-요청률이 낮다는 사실이 이를 허용됨으로 바꾸지 않는다. 사설망에서 소수 클라이언트가 쓰는 것을 전제로 하며
-공개 서비스로 제공하지 않는다. 수집물(자막·댓글)은 제3자 저작물이고, 댓글 작성자 정보는 저장되는 순간
-개인정보다. SponsorBlock 데이터는 CC BY-NC-SA 4.0이라 재배포에 출처 표시와 비상업 조건이 따른다.
-RYD 수치는 YouTube의 싫어요 수가 아니라 **추정치**이며 응답에서 항상 그렇게 라벨링된다.
+**Where this stands legally.** YouTube's terms prohibit automated access
+outside the public API. That the data is publicly visible, or that the request
+rate is low, does not make it permitted. This assumes a private network and a
+handful of clients; it is not offered as a public service. What it collects —
+captions, comments — is third-party copyrighted work, and comment author
+details are personal data the moment they are stored. SponsorBlock data is CC
+BY-NC-SA 4.0, so redistributing it carries attribution and non-commercial
+conditions. **Dislike counts are not provided.** YouTube made them private in
+late 2021, no original exists, and the source that served reconstructed
+estimates was removed on purpose — the reasons are in
+[`docs/status.md`](docs/status.md).
 
-**검증된 것과 아닌 것.** 계획 단계에서 이 머신에서 직접 확인: yt-dlp 78키, 자막 json3 취득, 댓글 20건 6.7초,
-RYD의 브라우저 UA 요구와 일일 한도 문서, SponsorBlock 200/404 양쪽, InnerTube `/next`·`/browse` 도달,
-SQLite 3.46.1, wireproxy 1.1.3 가용, 메타 추출 병렬 4건 3.11초.
-**아직 확인하지 않음**: 지속 부하에서의 봇 검사 임계, PO token 조건, **실제 VPN egress를 통한 요청**
-(config가 아직 없어 한 번도 프록시로 나가본 적 없다), AIMD의 실부하 수렴 거동, 장시간 다중 워커 운용.
+**Checked and unchecked.** Verified by hand on this machine during planning: 78
+yt-dlp keys, caption json3 retrieval, 20 comments in 6.7s, SponsorBlock 200 and
+404 both, InnerTube `/next` and `/browse` reachable, SQLite 3.46.1, wireproxy
+1.1.3 available, four parallel metadata extractions in 3.11s. **Not yet
+checked**: the bot-check threshold under sustained load, what triggers a PO
+token, **a request that actually leaves through a VPN egress** (no config
+exists, so nothing has ever gone out through a proxy), how AIMD converges under
+real load, and long multi-worker operation.
 
-## 라이선스
+## License
 
-MIT. [`LICENSE`](LICENSE) 참조.
+MIT. See [`LICENSE`](LICENSE).

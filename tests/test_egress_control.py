@@ -12,7 +12,14 @@ from __future__ import annotations
 
 import pytest
 
-from tubedepth.egress.control import Lane, RateController, Verdict
+from tubedepth.egress.control import Lane, RateController, Verdict, verdict_for_error
+from tubedepth.errors import (
+    ExtractionError,
+    NotFoundError,
+    RateLimitedError,
+    UpstreamError,
+    ValidationError,
+)
 
 
 class FakeClock:
@@ -71,17 +78,17 @@ def test_the_window_never_falls_below_one_slot() -> None:
 
 def test_throttling_one_lane_leaves_another_lane_on_the_same_egress_untouched() -> None:
     # This is the reason the key is (egress, lane) and not (egress, backend).
-    # Return YouTube Dislike documents 100 requests per minute; YouTube
-    # documents nothing and tolerates far more. One address hitting RYD's limit
-    # says nothing whatsoever about what that address may still do against
-    # YouTube, and collapsing the two would throw away most of the throughput.
+    # SponsorBlock and YouTube are different services with different limits,
+    # and one address exhausting SponsorBlock's says nothing whatsoever about
+    # what that address may still do against YouTube. Collapsing the two would
+    # throw away most of the throughput for no reason.
     controller = RateController()
     controller.record("vpn-jp1", Lane.YOUTUBE, Verdict.OK)  # 1.0 -> 2.0
 
-    controller.record("vpn-jp1", Lane.RYD, Verdict.THROTTLED)
+    controller.record("vpn-jp1", Lane.SPONSORBLOCK, Verdict.THROTTLED)
 
     assert controller.window("vpn-jp1", Lane.YOUTUBE) == pytest.approx(2.0)
-    assert controller.window("vpn-jp1", Lane.RYD) == pytest.approx(1.0)
+    assert controller.window("vpn-jp1", Lane.SPONSORBLOCK) == pytest.approx(1.0)
 
 
 def test_a_bot_check_makes_the_egress_unavailable_immediately() -> None:
@@ -119,13 +126,142 @@ def test_a_sustained_run_of_successes_resets_the_quarantine_streak() -> None:
     # and the pool slowly loses every route it ever had a bad hour with.
     clock = FakeClock()
     controller = RateController(clock=clock)
-    controller.record("vpn-jp1", Lane.RYD, Verdict.BLOCKED)
+    controller.record("vpn-jp1", Lane.SPONSORBLOCK, Verdict.BLOCKED)
     clock.advance(300.0)
 
     for _ in range(20):
-        controller.record("vpn-jp1", Lane.RYD, Verdict.OK)
+        controller.record("vpn-jp1", Lane.SPONSORBLOCK, Verdict.OK)
 
-    controller.record("vpn-jp1", Lane.RYD, Verdict.BLOCKED)
+    controller.record("vpn-jp1", Lane.SPONSORBLOCK, Verdict.BLOCKED)
     clock.advance(300.0)
 
-    assert controller.is_available("vpn-jp1", Lane.RYD) is True
+    assert controller.is_available("vpn-jp1", Lane.SPONSORBLOCK) is True
+
+
+def test_a_permit_is_refused_once_the_window_is_full() -> None:
+    # The window is a concurrency limit, not a number the controller merely
+    # remembers. Until something asks it for permission it controls nothing.
+    controller = RateController(clock=FakeClock())
+
+    assert controller.acquire("direct", Lane.YOUTUBE) is True
+    assert controller.acquire("direct", Lane.YOUTUBE) is False
+
+
+def test_releasing_a_permit_frees_the_slot() -> None:
+    controller = RateController(clock=FakeClock())
+    controller.acquire("direct", Lane.YOUTUBE)
+
+    controller.release("direct", Lane.YOUTUBE, Verdict.OK)
+
+    assert controller.acquire("direct", Lane.YOUTUBE) is True
+
+
+def test_a_successful_release_widens_the_window_for_the_next_caller() -> None:
+    clock = FakeClock()
+    controller = RateController(clock=clock)
+    controller.acquire("direct", Lane.YOUTUBE)
+    controller.release("direct", Lane.YOUTUBE, Verdict.OK)  # window 1.0 -> 2.0
+    clock.advance(60.0)
+
+    assert controller.acquire("direct", Lane.YOUTUBE) is True
+    assert controller.acquire("direct", Lane.YOUTUBE) is True
+
+
+def test_a_quarantined_egress_refuses_permits(sleep_free: None = None) -> None:
+    controller = RateController(clock=FakeClock())
+    controller.acquire("vpn-jp1", Lane.YOUTUBE)
+    controller.release("vpn-jp1", Lane.YOUTUBE, Verdict.BLOCKED)
+
+    assert controller.acquire("vpn-jp1", Lane.YOUTUBE) is False
+
+
+def test_a_minimum_interval_spaces_out_consecutive_permits() -> None:
+    # Concurrency and rate are different limits. A window of four with no
+    # spacing is four requests in the same millisecond, which is the shape
+    # that gets an address flagged even when the count is modest.
+    clock = FakeClock()
+    controller = RateController(clock=clock, minimum_interval_seconds=2.0)
+
+    assert controller.acquire("direct", Lane.SPONSORBLOCK) is True
+    controller.release("direct", Lane.SPONSORBLOCK, Verdict.OK)
+    assert controller.acquire("direct", Lane.SPONSORBLOCK) is False
+
+    clock.advance(2.0)
+    assert controller.acquire("direct", Lane.SPONSORBLOCK) is True
+
+
+def test_a_throttle_lengthens_the_interval_as_well_as_narrowing_the_window() -> None:
+    clock = FakeClock()
+    controller = RateController(clock=clock, minimum_interval_seconds=1.0)
+    controller.acquire("direct", Lane.SPONSORBLOCK)
+
+    controller.release("direct", Lane.SPONSORBLOCK, Verdict.THROTTLED)
+    clock.advance(1.0)
+
+    assert controller.acquire("direct", Lane.SPONSORBLOCK) is False, (
+        "the interval should have doubled"
+    )
+    clock.advance(1.0)
+    assert controller.acquire("direct", Lane.SPONSORBLOCK) is True
+
+
+def test_concurrent_callers_never_exceed_the_window() -> None:
+    """The controller is shared across worker threads, so it needs a lock.
+
+    Without one, two threads both read an in-flight count of zero against a
+    window of one and both proceed — which is precisely the over-sending the
+    controller exists to prevent, and it would appear only under load.
+    """
+    import threading
+
+    controller = RateController(clock=FakeClock())
+    granted: list[bool] = []
+    lock = threading.Lock()
+    start = threading.Barrier(16)
+
+    def contend() -> None:
+        start.wait()
+        outcome = controller.acquire("direct", Lane.YOUTUBE)
+        with lock:
+            granted.append(outcome)
+
+    threads = [threading.Thread(target=contend) for _ in range(16)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=30)
+
+    assert sum(granted) == 1
+
+
+def test_a_failure_that_says_nothing_about_the_route_leaves_it_alone() -> None:
+    """The safety property: an unknown result must not burn a healthy address.
+
+    A video with captions turned off, a bad id, a parser that no longer matches
+    — none of these are evidence about the line the request went out on, and
+    treating them as evidence is how a working address gets throttled to a
+    standstill by videos it fetched perfectly well.
+    """
+    assert verdict_for_error(NotFoundError("the video has no caption tracks at all")) is (
+        Verdict.NEUTRAL
+    )
+    assert verdict_for_error(ValidationError("video identifier is not valid: x")) is Verdict.NEUTRAL
+    assert verdict_for_error(ExtractionError("no known renderer")) is Verdict.NEUTRAL
+
+
+def test_being_told_to_slow_down_is_evidence_about_the_route() -> None:
+    assert verdict_for_error(RateLimitedError("429")) is Verdict.BLOCKED
+    assert verdict_for_error(UpstreamError("connection reset")) is Verdict.THROTTLED
+
+
+def test_a_neutral_verdict_changes_neither_the_window_nor_the_interval() -> None:
+    controller = RateController(window_ceiling=6)
+    for _ in range(8):
+        controller.record("direct", Lane.YOUTUBE, Verdict.OK)
+    widened = controller.window("direct", Lane.YOUTUBE)
+
+    for _ in range(5):
+        controller.record("direct", Lane.YOUTUBE, Verdict.NEUTRAL)
+
+    assert controller.window("direct", Lane.YOUTUBE) == widened
+    assert controller.is_available("direct", Lane.YOUTUBE)

@@ -1,0 +1,574 @@
+"""The HTTP surface, over the same services the CLI uses.
+
+No live server and no port: httpx drives the ASGI app directly. Everything the
+API does goes through CollectionService and JobService, so there is one
+implementation of what a kind means rather than two.
+"""
+
+from __future__ import annotations
+
+import json
+from datetime import UTC, datetime, timedelta
+from pathlib import Path
+
+import pytest
+from fastapi.testclient import TestClient
+from pydantic import BaseModel
+
+from tubedepth.api.application import create_application
+from tubedepth.database import Database
+from tubedepth.egress.control import Lane
+from tubedepth.egress.transport import Egress
+from tubedepth.identifiers import TargetType
+from tubedepth.models import Job, JobState
+from tubedepth.payload_store import PayloadStore
+from tubedepth.services.keys import ApiKeyService
+from tubedepth.sources import SourceRegistry
+from tubedepth.sources.registry import SourceCost
+from tubedepth.sources.ytdlp_runtime import YtdlpRuntime
+
+
+class EchoPayload(BaseModel):
+    target: str
+
+
+class EchoSource:
+    kind = "video.echo"
+    target_type = TargetType.VIDEO
+    lane = Lane.YOUTUBE
+    cost = SourceCost.STANDARD
+    schema_version = "1"
+    payload_model: type[BaseModel] = EchoPayload
+    default_freshness = timedelta(hours=6)
+
+    def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
+        return EchoPayload(target=target)
+
+
+def build_api(tmp_path: Path) -> tuple[TestClient, str, Database]:
+    """The fixture's body as a plain function.
+
+    Other test modules need the same client and were reaching into the
+    fixture's `__wrapped__`, which is an implementation detail of pytest and
+    not a seam anyone should rely on.
+    """
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    registry = SourceRegistry()
+    registry.register(EchoSource())  # type: ignore[arg-type]
+    application = create_application(
+        database=database,
+        payloads=PayloadStore(tmp_path / "payloads"),
+        registry=registry,
+    )
+    minted = ApiKeyService(database).mint(label="test")
+    # TestClient rather than an ASGITransport: the transport is async-only, and
+    # every service under here is synchronous.
+    return TestClient(application), minted.secret, database
+
+
+@pytest.fixture
+def api(tmp_path: Path) -> tuple[TestClient, str, Database]:
+    return build_api(tmp_path)
+
+
+def test_health_needs_no_key(api: tuple[TestClient, str, Database]) -> None:
+    # Something has to be reachable before you have a key, or a broken deploy
+    # cannot be diagnosed from outside.
+    client, _, _ = api
+
+    response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json()["status"] in {"ok", "degraded"}
+
+
+def test_a_request_without_a_key_is_refused(api: tuple[TestClient, str, Database]) -> None:
+    client, _, database = api
+
+    response = client.post("/v1/jobs", json={"kind": "video.echo", "target": "dQw4w9WgXcQ"})
+
+    assert response.status_code == 401
+    # And nothing was queued: authentication happens before any work exists.
+    with database.session() as session:
+        assert session.query(Job).count() == 0
+
+
+def test_an_unknown_key_gets_the_same_answer_as_a_missing_one(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    # Not an oracle for whether a key exists.
+    client, _, _ = api
+
+    missing = client.get("/v1/sources")
+    unknown = client.get("/v1/sources", headers={"X-API-Key": "ytd_deadbeef_nope"})
+
+    assert missing.status_code == unknown.status_code == 401
+    assert missing.json() == unknown.json()
+
+
+def test_a_valid_key_reaches_the_registry(api: tuple[TestClient, str, Database]) -> None:
+    client, key, _ = api
+
+    response = client.get("/v1/sources", headers={"X-API-Key": key})
+
+    assert response.status_code == 200
+    assert "video.echo" in response.json()
+
+
+def test_submitting_a_job_returns_it_with_a_location(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    client, key, _ = api
+
+    response = client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+        headers={"X-API-Key": key},
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert body["state"] == "queued"
+    assert response.headers["location"] == f"/v1/jobs/{body['job_id']}"
+
+
+def test_a_submitted_job_can_be_read_back(api: tuple[TestClient, str, Database]) -> None:
+    client, key, _ = api
+    job_id = client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+        headers={"X-API-Key": key},
+    ).json()["job_id"]
+
+    response = client.get(f"/v1/jobs/{job_id}", headers={"X-API-Key": key})
+
+    assert response.status_code == 200
+    assert response.json()["kind"] == "video.echo"
+
+
+def test_a_malformed_target_is_rejected_before_it_is_queued(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    client, key, database = api
+
+    response = client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "not a video"},
+        headers={"X-API-Key": key},
+    )
+
+    assert response.status_code == 422
+    with database.session() as session:
+        assert session.query(Job).count() == 0
+
+
+def test_an_unknown_kind_is_a_not_found(api: tuple[TestClient, str, Database]) -> None:
+    client, key, _ = api
+
+    response = client.post(
+        "/v1/jobs",
+        json={"kind": "video.nonexistent", "target": "dQw4w9WgXcQ"},
+        headers={"X-API-Key": key},
+    )
+
+    assert response.status_code == 404
+
+
+def test_asking_for_a_result_before_the_job_finishes_says_so(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    # 409 rather than 404: the job exists, it simply has not finished, and
+    # telling those apart is the difference between "wait" and "you asked for
+    # something that does not exist".
+    client, key, _ = api
+    job_id = client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+        headers={"X-API-Key": key},
+    ).json()["job_id"]
+
+    response = client.get(f"/v1/jobs/{job_id}/result", headers={"X-API-Key": key})
+
+    assert response.status_code == 409
+
+
+def test_a_finished_job_hands_over_its_payload(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    from tubedepth.worker import Worker
+
+    client, key, database = api
+    registry = SourceRegistry()
+    registry.register(EchoSource())  # type: ignore[arg-type]
+    job_id = client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+        headers={"X-API-Key": key},
+    ).json()["job_id"]
+
+    Worker(
+        database=database,
+        payloads=PayloadStore(tmp_path / "payloads"),
+        registry=registry,
+        name="test",
+        concurrency=1,
+    ).drain()
+
+    response = client.get(f"/v1/jobs/{job_id}/result", headers={"X-API-Key": key})
+
+    assert response.status_code == 200
+    assert json.loads(response.text)["target"] == "dQw4w9WgXcQ"
+
+
+def test_a_job_that_does_not_exist_is_a_not_found(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    client, key, _ = api
+
+    response = client.get("/v1/jobs/nosuchjob", headers={"X-API-Key": key})
+
+    assert response.status_code == 404
+
+
+def test_every_versioned_route_requires_a_key(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """The mechanically-checkable version of "auth is on".
+
+    Walks the OpenAPI document rather than app.routes: this FastAPI version
+    keeps an included router as one opaque entry rather than flattening it,
+    and the document is what a client actually sees anyway.
+
+    Wiring the dependency on the router rather than per handler means a route
+    added later is protected by construction; this asserts nobody has added one
+    outside it.
+    """
+    client, _, _ = api
+    paths = client.get("/openapi.json").json()["paths"]
+
+    versioned = {path: spec for path, spec in paths.items() if path.startswith("/v1/")}
+    assert versioned, "no versioned routes found to check"
+
+    for path, spec in versioned.items():
+        for method in spec:
+            response = client.request(method.upper(), path.replace("{job_id}", "someid"), json={})
+            assert response.status_code == 401, f"{method.upper()} {path} did not require a key"
+
+
+def test_a_job_records_which_key_submitted_it(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    # How a runaway client gets identified rather than guessed at.
+    client, key, database = api
+    client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+        headers={"X-API-Key": key},
+    )
+
+    with database.session() as session:
+        assert session.query(Job).one().api_key_id is not None
+
+
+def test_a_cached_result_comes_back_without_a_job(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    """The fast path. A fresh answer should not cost a poll cycle."""
+    from tubedepth.worker import Worker
+
+    client, key, database = api
+    registry = SourceRegistry()
+    registry.register(EchoSource())  # type: ignore[arg-type]
+    client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+        headers={"X-API-Key": key},
+    )
+    Worker(
+        database=database,
+        payloads=PayloadStore(tmp_path / "payloads"),
+        registry=registry,
+        name="test",
+        concurrency=1,
+    ).drain()
+
+    response = client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+        headers={"X-API-Key": key},
+    )
+
+    assert response.status_code == 200
+    assert json.loads(response.text)["target"] == "dQw4w9WgXcQ"
+
+
+def test_the_openapi_document_is_served(api: tuple[TestClient, str, Database]) -> None:
+    client, _, _ = api
+
+    response = client.get("/openapi.json")
+
+    assert response.status_code == 200
+    assert "/v1/jobs" in response.json()["paths"]
+
+
+def test_cancelling_a_queued_job_over_http_reports_it_cancelled(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    client, key, _ = api
+    job_id = client.post(
+        "/v1/jobs",
+        headers={"X-API-Key": key},
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+    ).json()["job_id"]
+
+    cancelled = client.delete(f"/v1/jobs/{job_id}", headers={"X-API-Key": key})
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["state"] == "cancelled"
+    read_back = client.get(f"/v1/jobs/{job_id}", headers={"X-API-Key": key})
+    assert read_back.json()["state"] == "cancelled"
+
+
+def test_cancelling_a_finished_job_is_a_conflict_and_not_a_silent_success(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """Reporting success would tell a client it prevented work already done."""
+    client, key, database = api
+    job_id = client.post(
+        "/v1/jobs",
+        headers={"X-API-Key": key},
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+    ).json()["job_id"]
+    with database.session() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.state = JobState.FAILED
+        job.error_message = "nothing came back"
+
+    cancelled = client.delete(f"/v1/jobs/{job_id}", headers={"X-API-Key": key})
+
+    assert cancelled.status_code == 409
+
+
+def test_cancelling_needs_a_key_like_every_other_versioned_route(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    client, _, _ = api
+
+    assert client.delete("/v1/jobs/whatever").status_code == 401
+
+
+def test_health_reports_every_source_and_not_just_the_queue(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """What an operator asking "why is nothing arriving" needs to see.
+
+    Queue depth answers "is there work"; it cannot answer "is anything still
+    able to do it". A source that has started failing every call looks
+    identical to an idle system from the counts alone.
+    """
+    client, key, _ = api
+
+    body = client.get("/healthz").json()
+
+    assert "sources" in body, "the queue counts alone cannot say what is broken"
+    assert body["sources"], "every registered source is reported, including untried ones"
+    statuses = {entry["status"] for entry in body["sources"]}
+    assert statuses <= {"unknown", "healthy", "degraded", "broken", "blocked", "stale"}
+
+
+def test_health_names_the_broken_source_and_its_last_error(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    client, key, database = api
+    from tubedepth.errors import ExtractionError
+    from tubedepth.health import SourceHealthService
+
+    health = SourceHealthService(database=database)
+    for _ in range(3):
+        health.record("video.echo", succeeded=False, error=ExtractionError("no renderer named x"))
+
+    entries = {entry["kind"]: entry for entry in client.get("/healthz").json()["sources"]}
+
+    assert entries["video.echo"]["status"] == "broken"
+    assert entries["video.echo"]["last_error_code"] == "ExtractionError"
+    assert entries["video.echo"]["consecutive_failures"] == 3
+
+
+def test_an_unhealthy_source_does_not_make_the_whole_service_unhealthy(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """`/healthz` is read by things that restart processes.
+
+    One broken parser is not a reason to cycle the API — the other nine kinds
+    are still collecting. The status stays `ok` and the detail carries the bad
+    news.
+    """
+    client, _, database = api
+    from tubedepth.errors import ExtractionError
+    from tubedepth.health import SourceHealthService
+
+    health = SourceHealthService(database=database)
+    for _ in range(5):
+        health.record("video.echo", succeeded=False, error=ExtractionError("gone"))
+
+    response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"
+
+
+def test_jobs_can_be_listed_newest_first(api: tuple[TestClient, str, Database]) -> None:
+    client, key, _ = api
+    for index in range(3):
+        client.post(
+            "/v1/jobs",
+            headers={"X-API-Key": key},
+            json={"kind": "video.echo", "target": f"vid{index:08d}"},
+        )
+
+    listed = client.get("/v1/jobs", headers={"X-API-Key": key}).json()
+
+    assert len(listed["jobs"]) == 3
+    assert listed["jobs"][0]["target"] == "vid00000002", "newest first"
+    assert "cursor" in listed
+
+
+def test_jobs_can_be_filtered_by_state_and_kind(api: tuple[TestClient, str, Database]) -> None:
+    client, key, database = api
+    first = client.post(
+        "/v1/jobs",
+        headers={"X-API-Key": key},
+        json={"kind": "video.echo", "target": "vid00000001"},
+    ).json()["job_id"]
+    client.post(
+        "/v1/jobs",
+        headers={"X-API-Key": key},
+        json={"kind": "video.echo", "target": "vid00000002"},
+    )
+    with database.session() as session:
+        job = session.get(Job, first)
+        assert job is not None
+        job.state = JobState.FAILED
+        job.error_code = "ExtractionError"
+
+    failed = client.get("/v1/jobs?state=failed", headers={"X-API-Key": key}).json()
+
+    assert [job["target"] for job in failed["jobs"]] == ["vid00000001"]
+    assert failed["jobs"][0]["error_code"] == "ExtractionError"
+
+
+def test_jobs_can_be_narrowed_to_a_time_range(api: tuple[TestClient, str, Database]) -> None:
+    """The range selection this exists for — 'show me what ran last night'."""
+    client, key, database = api
+    job_id = client.post(
+        "/v1/jobs",
+        headers={"X-API-Key": key},
+        json={"kind": "video.echo", "target": "vid00000001"},
+    ).json()["job_id"]
+    with database.session() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.created_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+    within = client.get(
+        "/v1/jobs?since=2025-12-31T00:00:00Z&until=2026-01-02T00:00:00Z", headers={"X-API-Key": key}
+    ).json()
+    outside = client.get("/v1/jobs?since=2026-06-01T00:00:00Z", headers={"X-API-Key": key}).json()
+
+    assert len(within["jobs"]) == 1
+    assert outside["jobs"] == []
+
+
+def test_the_job_list_pages_rather_than_returning_everything(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """A browser pointed at a hundred thousand rows must not fetch them."""
+    client, key, _ = api
+    for index in range(5):
+        client.post(
+            "/v1/jobs",
+            headers={"X-API-Key": key},
+            json={"kind": "video.echo", "target": f"vid{index:08d}"},
+        )
+
+    first = client.get("/v1/jobs?limit=2", headers={"X-API-Key": key}).json()
+    second = client.get(
+        f"/v1/jobs?limit=2&cursor={first['cursor']}", headers={"X-API-Key": key}
+    ).json()
+
+    assert len(first["jobs"]) == 2
+    assert len(second["jobs"]) == 2
+    assert {job["job_id"] for job in first["jobs"]}.isdisjoint(
+        {job["job_id"] for job in second["jobs"]}
+    )
+
+
+def test_artifacts_can_be_listed_and_filtered(api: tuple[TestClient, str, Database]) -> None:
+    """The other half of "show me the records": what was actually collected."""
+    client, key, database = api
+    from tubedepth.models import Artifact
+
+    with database.session() as session:
+        session.add(
+            Artifact(
+                kind="video.echo",
+                target="vid00000001",
+                fingerprint="fp-1",
+                digest="d" * 64,
+                byte_count=123,
+                fetched_at=datetime(2026, 8, 19, tzinfo=UTC),
+                fresh_until=datetime(2026, 9, 19, tzinfo=UTC),
+            )
+        )
+
+    listed = client.get("/v1/artifacts?kind=video.echo", headers={"X-API-Key": key}).json()
+
+    assert len(listed["artifacts"]) == 1
+    assert listed["artifacts"][0]["target"] == "vid00000001"
+    assert listed["artifacts"][0]["byte_count"] == 123
+
+
+def test_the_dashboard_is_served_and_needs_no_key_to_load(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """The page itself carries no data, so it is not what the key protects.
+
+    It is an empty shell that asks the browser for a key and then calls the
+    same `/v1` endpoints every other client uses. Putting the key requirement
+    on the HTML would mean putting a secret in a URL or a cookie, and the whole
+    auth design here is a header.
+    """
+    client, _, _ = api
+
+    response = client.get("/")
+
+    assert response.status_code == 200
+    assert "text/html" in response.headers["content-type"]
+    assert "<title>" in response.text
+
+
+def test_the_dashboard_ships_no_external_references(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """A private tool on a private network cannot assume the internet.
+
+    An external stylesheet or script would also hand a third party the pattern
+    of when this instance is being looked at, which is a needless disclosure
+    for an operator page.
+    """
+    client, _, _ = api
+
+    page = client.get("/").text
+
+    for marker in ("http://", "https://", "//cdn", "<script src="):
+        assert marker not in page, f"the dashboard reaches outside itself: {marker}"
+
+
+def test_the_dashboard_never_embeds_a_key(api: tuple[TestClient, str, Database]) -> None:
+    """The page is served to anyone who can reach the port."""
+    client, key, _ = api
+
+    assert key not in client.get("/").text
+    assert "ytd_" not in client.get("/").text
