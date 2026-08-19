@@ -36,6 +36,14 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Added
 
+- **`TUBEDEPTH_LISTING_LIMIT` and `TUBEDEPTH_COMMENT_LIMIT`.** The 100-item
+  listing cap was a constructor default frozen at registration, so a channel
+  with more videos than that could not be collected in full without editing the
+  source. Safe to raise now only because the cap is in the cache key: doing it
+  before that would have served a cached 100-item listing for a request that
+  asked for 1,000. **Set them identically in the API and worker units** — each
+  process reads them once, and `GET /v1/sources` reports the effective values
+  so the two can be compared.
 - **The schema answers the questions it was already recording.** Four columns
   were written on every relevant operation and read by nothing.
   `last_error_message` now reaches `/healthz` and the dashboard — the code says

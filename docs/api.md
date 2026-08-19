@@ -244,7 +244,8 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/sources
     "target": "video",
     "lane": "youtube",
     "cost": "standard",
-    "freshness_seconds": 21600
+    "freshness_seconds": 21600,
+    "cache_parameters": {}
   }
 }
 ```
@@ -433,6 +434,15 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/jobs?state=failed&limit=20'
 ```
 
 ---
+
+`cache_parameters` is what, besides kind and target, makes a source's answer a
+different answer: a listing's cap, a comment harvest's sort and cap, a
+transcript's language preference. **These are the values in effect in the
+process that answered.** `tubedepth serve` and `tubedepth work` read the
+environment once each in separate processes, and if they disagree the API
+computes a different cache key than the worker records — so it stops matching
+what the worker writes while still matching rows from before the change.
+Comparing this route between the two is how that is caught.
 
 ## `GET /v1/artifacts`
 
