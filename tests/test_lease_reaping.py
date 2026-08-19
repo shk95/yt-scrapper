@@ -7,12 +7,18 @@ the only symptom is a queue that quietly stops shrinking.
 
 from __future__ import annotations
 
+import threading
+import time
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from tubedepth.database import Database
+from tubedepth.egress.transport import Egress
 from tubedepth.models import Job, JobState
+from tubedepth.payload_store import PayloadStore
 from tubedepth.repositories import JobRepository
+from tubedepth.sources.ytdlp_runtime import YtdlpRuntime
+from tubedepth.worker import Worker
 
 LEASE = timedelta(minutes=15)
 START = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
@@ -129,3 +135,55 @@ def test_renewing_a_lease_keeps_a_long_job_out_of_the_reaper(tmp_path: Path) -> 
     clock.advance(timedelta(minutes=2))
     with database.session() as session:
         assert JobRepository(session, clock=clock).reap_expired_leases() == 0
+
+
+def test_a_job_that_outlives_its_lease_keeps_it_alive_while_it_runs(tmp_path: Path) -> None:
+    """`renew_lease` existed and nothing called it.
+
+    A comment harvest runs for tens of minutes against the default fifteen
+    minute lease, so the reaper would return it to the queue while it was still
+    running and a second worker would start the same harvest against the same
+    address. Two harvests, one result, double the requests — the exact failure
+    the lease was introduced to prevent.
+    """
+    from test_worker import EchoPayload, EchoSource, _registry, enqueue
+
+    started = threading.Event()
+    release = threading.Event()
+
+    class SlowSource(EchoSource):
+        def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
+            started.set()
+            release.wait(timeout=5)
+            return super().collect(target, egress, runtime)
+
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    identifier = enqueue(database, "video.echo", "video000001")
+    worker = Worker(
+        database=database,
+        registry=_registry(SlowSource()),
+        payloads=PayloadStore(tmp_path / "payloads"),
+        name="worker-1",
+        lease=timedelta(seconds=1),
+    )
+
+    running = threading.Thread(target=worker.drain, daemon=True)
+    running.start()
+    assert started.wait(timeout=5), "the source never ran"
+
+    with database.session(readonly=True) as session:
+        job = session.get(Job, identifier)
+        assert job is not None
+        first = job.lease_expires_at
+    time.sleep(1.2)
+    with database.session(readonly=True) as session:
+        job = session.get(Job, identifier)
+        assert job is not None
+        renewed = job.lease_expires_at
+
+    release.set()
+    running.join(timeout=10)
+
+    assert first is not None and renewed is not None
+    assert renewed > first, "the lease was never pushed out; the reaper would take this job"

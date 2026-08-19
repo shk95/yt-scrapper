@@ -21,7 +21,9 @@ from __future__ import annotations
 
 import logging
 import threading
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
 from datetime import timedelta
 
 from pydantic import BaseModel
@@ -216,7 +218,8 @@ class Worker:
             # anyone finds out. That is how this method hung the first time.
             verdict = Verdict.NEUTRAL
             try:
-                result, digest, byte_count = self._collect(kind, target)
+                with self._holding_lease(identifier):
+                    result, digest, byte_count = self._collect(kind, target)
                 verdict = Verdict.OK
             except TubedepthError as error:
                 verdict = verdict_for_error(error)
@@ -257,6 +260,41 @@ class Worker:
         if follow_up is not None and isinstance(result, VideoListing):
             queued = self._queue_follow_up(result, follow_up)
             logger.info("job %s queued %s follow-up %s jobs", identifier, queued, follow_up)
+
+    @contextmanager
+    def _holding_lease(self, identifier: str) -> Iterator[None]:
+        """Keep pushing this job's lease out for as long as it is running.
+
+        Without this the lease is a deadline rather than a heartbeat, and a
+        comment harvest that runs for tens of minutes against a fifteen minute
+        lease gets returned to the queue by the reaper while it is still
+        going — so a second worker starts the same harvest against the same
+        address. Two harvests, one result, twice the requests, which is the
+        exact failure the lease exists to prevent.
+
+        Renewed at a third of the lease so two consecutive missed beats still
+        leave a margin. A daemon thread because the work it covers is blocking
+        and in a thread of its own: nothing here can ask yt-dlp how it is
+        getting on.
+        """
+        stop = threading.Event()
+        interval = max(0.05, self._lease.total_seconds() / 3)
+
+        def beat() -> None:
+            while not stop.wait(interval):
+                try:
+                    with self._database.session() as session:
+                        JobRepository(session).renew_lease(identifier, lease=self._lease)
+                except Exception:  # pragma: no cover - a renewal failure must not kill the job
+                    logger.warning("could not renew the lease for job %s", identifier)
+
+        keeper = threading.Thread(target=beat, name=f"lease-{identifier[:8]}", daemon=True)
+        keeper.start()
+        try:
+            yield
+        finally:
+            stop.set()
+            keeper.join(timeout=1)
 
     def _cancellation_requested(self, identifier: str) -> bool:
         with self._database.session() as session:

@@ -254,6 +254,23 @@ carries no result, while the cache keeps what was fetched, keyed by video
 rather than by who asked. Wanting collected data to disappear is a retention
 and access-control problem, and those are different mechanisms.
 
+**Lease renewal was missing until 2026-08-19**, and the method to do it had
+existed since the lease did — written, tested, and never called. The reaper
+returns any `running` job whose lease has expired, so a comment harvest running
+for tens of minutes against a fifteen minute lease would be handed to a second
+worker while the first was still going: two harvests, one result, twice the
+requests against the same address. Exactly the failure the lease was introduced
+to prevent, caused by the lease.
+
+The worker now holds a heartbeat thread for the duration of each job, renewing
+at a third of the lease so two missed beats still leave margin. A thread
+because the work it covers is blocking and inside a thread of its own — nothing
+here can ask yt-dlp how it is getting on.
+
+Worth noting how it was found: not by a test, but by grepping for callers while
+looking at something else. A method with tests and no callers is invisible to
+every check this repository runs.
+
 Lease reaping and retries landed on 2026-08-18 and were verified against a
 simulated crash: a job left in `running` by a worker that never released it
 was returned to the queue by the next worker to start, and completed. `JobRepository.claim` takes a lease and counts attempts, but nothing
