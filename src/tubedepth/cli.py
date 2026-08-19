@@ -494,7 +494,15 @@ def key_list(
     for entry in listed:
         used = entry.last_used_at.strftime("%Y-%m-%d %H:%M") if entry.last_used_at else "never used"
         state = " (revoked)" if entry.revoked else ""
-        typer.echo(f"{entry.identifier}  {entry.key_prefix}…  {used:<16}  {entry.label}{state}")
+        # The allowance is here because the error a client sees names it —
+        # "over its allowance of N requests per minute" — and finding N for a
+        # key otherwise means opening SQLite. `created_at` is what this listing
+        # is ordered by, so showing it is what makes the order readable.
+        typer.echo(
+            f"{entry.identifier}  {entry.key_prefix}…  "
+            f"created {entry.created_at:%Y-%m-%d}  {used:<16}  "
+            f"{entry.requests_per_minute}/min  {entry.label}{state}"
+        )
 
 
 @keys_app.command("revoke")

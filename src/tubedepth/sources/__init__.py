@@ -24,6 +24,7 @@ from .listings import ChannelVideosSource, PlaylistItemsSource, SearchVideosSour
 from .registry import DataSource, SourceRegistry
 from .sponsorblock import SponsorBlockSource
 from .transcript import TranscriptSource
+from .trending import DEFAULT_LIMIT as TRENDING_DEFAULT_LIMIT
 from .trending import TrendingVideosSource
 from .video_metadata import VideoMetadataSource
 
@@ -34,6 +35,9 @@ __all__ = ["DataSource", "SourceRegistry", "default_registry"]
 # out of the same per-address budget everything else draws on.
 LISTING_LIMIT = LISTINGS_DEFAULT_LIMIT
 COMMENT_LIMIT = COMMENTS_DEFAULT_LIMIT
+# The chart is the one cap that costs Google quota rather than the per-address
+# budget: one request per fifty results, so 200 is four units and 50 is one.
+TRENDING_LIMIT = TRENDING_DEFAULT_LIMIT
 
 
 def _limit(variable: str, fallback: int) -> int:
@@ -65,6 +69,7 @@ def default_registry() -> SourceRegistry:
     """
     listing = _limit("TUBEDEPTH_LISTING_LIMIT", LISTING_LIMIT)
     comments = _limit("TUBEDEPTH_COMMENT_LIMIT", COMMENT_LIMIT)
+    trending = _limit("TUBEDEPTH_TRENDING_LIMIT", TRENDING_LIMIT)
 
     registry = SourceRegistry()
     registry.register(VideoMetadataSource())
@@ -79,5 +84,5 @@ def default_registry() -> SourceRegistry:
     registry.register(RelatedVideosSource())
     registry.register(CommunityPostsSource())
     registry.register(ChannelAboutSource())
-    registry.register(TrendingVideosSource())
+    registry.register(TrendingVideosSource(limit=trending))
     return registry

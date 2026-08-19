@@ -366,3 +366,26 @@ def test_resuming_from_the_command_line_says_what_changed(tmp_path: Path) -> Non
     assert result.exit_code == 0, result.output
     with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
         assert next(connection.execute("SELECT paused FROM worker_control"))[0] == 0
+
+
+def test_the_key_list_shows_the_allowance_it_is_about_to_be_asked_for(
+    tmp_path: Path,
+) -> None:
+    """`key create --rpm N` set an allowance the listing never showed back.
+
+    When a client starts getting "over its allowance of N requests per minute",
+    finding N for that key meant opening SQLite by hand — the exact complaint
+    this command's own docstring makes about `last_used_at`, reintroduced in
+    the command written to answer it.
+    """
+    from tubedepth.database import Database
+    from tubedepth.services.keys import ApiKeyService
+
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    ApiKeyService(database).mint(label="ingest", requests_per_minute=240)
+
+    result = runner.invoke(application, ["key", "list", "--data-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert "240" in result.output, result.output

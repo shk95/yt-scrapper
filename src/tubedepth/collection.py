@@ -77,10 +77,12 @@ class CollectionService:
 
         Note `default_registry()` is @cache'd, so what a source declares is
         frozen per process, and `tubedepth serve` and `tubedepth work` are
-        separate processes. Every parameter here is a module constant today so
-        they cannot disagree. The moment one becomes an env var, two units with
-        different environments compute different keys and the API answers for a
-        question the worker did not collect.
+        separate processes. Three of these caps are environment variables now
+        (`TUBEDEPTH_LISTING_LIMIT`, `_COMMENT_LIMIT`, `_TRENDING_LIMIT`), so two
+        units with different environments compute different keys and the API
+        answers for a question the worker did not collect. That is why
+        `GET /v1/sources` reports the values actually in effect and both unit
+        files carry the variables together — see `default_registry`.
         """
         return fingerprint(
             kind=source.kind,
