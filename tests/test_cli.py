@@ -261,3 +261,31 @@ def test_an_expensive_kind_is_queued_with_fewer_attempts_than_a_standard_one(
     assert attempts["video.comments"] < attempts["video.metadata"], (
         f"an expensive kind was queued with as many tries as a standard one: {attempts}"
     )
+
+
+def test_recording_an_innertube_surface_nobody_records_is_refused_before_the_network(
+    tmp_path: Path,
+) -> None:
+    """The refusal has to come before the request, not from the response.
+
+    `browse-channel-about` is the surface deliberately left out, and it is also
+    the one that has already broken once — so an operator asking for it should
+    be told, not handed a half-right fixture for it.
+    """
+    result = runner.invoke(
+        application,
+        [
+            "capture-fixture",
+            "@someone",
+            "--name",
+            "2026-08-20-browse-channel-about",
+            "--innertube",
+            "browse-channel-about",
+            "--into",
+            str(tmp_path),
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert "browse-channel-about" in str(result.exception)
+    assert list(tmp_path.iterdir()) == []

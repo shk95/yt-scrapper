@@ -269,3 +269,66 @@ def test_the_version_is_defined_in_exactly_one_place() -> None:
     assert "version" in manifest["project"].get("dynamic", []), (
         'pyproject.toml must declare `dynamic = ["version"]`'
     )
+
+
+JUSTFILE = ROOT / "Justfile"
+
+
+def _justfile_invocations() -> list[tuple[str, list[str]]]:
+    """Every `uv run tubedepth …` a recipe body runs, as (subcommand, options).
+
+    Recipe bodies only — a command named in a comment is prose, and the
+    comments here explain why a recipe exists rather than claiming it runs.
+    """
+    found: list[tuple[str, list[str]]] = []
+    for line in JUSTFILE.read_text().splitlines():
+        stripped = line.strip()
+        if not line.startswith((" ", "\t")) or "tubedepth " not in stripped:
+            continue
+        words = stripped.split("tubedepth ", 1)[1].split()
+        if not words:
+            continue
+        found.append((words[0], [word for word in words[1:] if word.startswith("--")]))
+    return found
+
+
+def test_every_command_the_justfile_runs_exists() -> None:
+    """The Justfile is a runbook, and nothing checked its claims.
+
+    `tests/test_deployment_units.py` makes exactly this assertion about
+    `deploy/*.service`, and the check above makes the subcommand half of it
+    about six `.md` files. The Justfile was in neither's scope, so five of its
+    twelve recipes drifted into naming a command and three options that do not
+    exist — including the only documented way to re-record the fixtures the
+    regression suite rests on.
+    """
+    from tubedepth.cli import application
+
+    registered = {
+        info.name or (info.callback.__name__ if info.callback else "")
+        for info in application.registered_commands
+    }
+
+    unknown = sorted({name for name, _ in _justfile_invocations() if name not in registered})
+
+    assert not unknown, f"the Justfile runs commands that do not exist: {unknown}"
+
+
+def test_every_option_the_justfile_passes_exists() -> None:
+    """The other half, and the one that catches a flag removed from a command."""
+    import subprocess
+    import sys
+
+    missing: list[str] = []
+    for subcommand, options in _justfile_invocations():
+        if not options:
+            continue
+        help_text = subprocess.run(
+            [sys.executable, "-m", "tubedepth.cli", subcommand, "--help"],
+            capture_output=True,
+            text=True,
+            env={"COLUMNS": "200", "PATH": "/usr/bin:/bin"},
+        ).stdout
+        missing += [f"{subcommand} {option}" for option in options if option not in help_text]
+
+    assert not missing, f"the Justfile passes options that do not exist: {missing}"

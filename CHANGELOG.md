@@ -36,6 +36,14 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Added
 
+- **`tubedepth capture-fixture --innertube <surface>`.** InnerTube fixtures
+  had no recording path at all, so the four in the tree were made by hand and
+  the redaction that strips session identity and signed `googlevideo` URLs ran
+  only if whoever made them remembered to call it. Recording goes through the
+  same helpers the sources use, so a fixture is what production receives.
+  `browse-channel-about` is deliberately not recordable — its data sits behind
+  a runtime continuation, and a half-right fixture for the surface that has
+  already broken once is worse than none.
 - **`TUBEDEPTH_COOKIES_FILE` now does what the troubleshooting guide said it
   did.** Point it at a Netscape-format cookie jar and the worker carries it
   into every extraction. A path that is not there is refused at startup rather
