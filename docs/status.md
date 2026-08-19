@@ -347,9 +347,22 @@ has been removed. SponsorBlock publishes no figure to argue from, and the
 caption-translation budget that briefly looked like a second case stopped
 applying when transcripts stopped requesting translations.
 
-So the honest position: **nothing currently measured gets better by adding
-egresses.** Revisit if collection starts getting blocked, which would be a
-measurement rather than a plan.
+So the honest position on **throughput**: nothing currently measured gets
+better by adding egresses, and the YouTube lane is expected to get *worse*,
+since a VPN exit is the datacenter address space the bot check targets.
+
+One argument survives, and it is a different kind. **Geo-blocked videos are a
+capability problem, not a throughput one**: a video blocked here cannot be
+collected here at any rate, so exits are the only mechanism and rate limits are
+irrelevant to it. It needs geographic diversity — two or three countries — not
+ten addresses, which is a far smaller build than the plan assumed, and it is
+measurable today because `not made this video available in your country` is
+already classified as `UnavailableError`.
+
+The conditions for revisiting all of this live in GitHub milestone 1, and the
+measurement that decides the surviving argument is issue 1. Both were written
+so the next attempt starts from evidence rather than from this plan's original
+assumptions, which have not survived contact with measurement.
 
 **Retention protects nothing on the grounds of being the last of its kind.**
 An earlier design kept the newest observation of each question regardless of
