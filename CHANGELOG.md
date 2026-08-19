@@ -36,6 +36,13 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Added
 
+- **`POST /v1/jobs/batch`.** One kind, many targets, one request — and one
+  charge against the sixty-a-minute allowance, which is the difference between
+  an API that can express a hundred-video sweep and one that can run it. All or
+  nothing: every target is normalised before anything is queued, so one bad id
+  refuses the batch rather than queueing ninety-nine and answering 202. Targets
+  already held come back named with their digest rather than their payload.
+  The dashboard uses it whenever more than one target is given.
 - **The dashboard can drive the queue, not just watch it.** Submit a
   collection, force past the freshness window, cancel a job, ask again for one
   that failed, read a result, and click a digest to read the observation behind

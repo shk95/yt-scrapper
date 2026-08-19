@@ -214,6 +214,36 @@ curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
 
 ---
 
+## `POST /v1/jobs/batch`
+
+kind 하나, 타깃 여럿, 요청 하나. 202로 답한다.
+
+```sh
+curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+     -d '{"kind":"video.metadata","targets":["dQw4w9WgXcQ","nfgdJyL-Jmg"]}' \
+     localhost:8080/v1/jobs/batch
+```
+
+```json
+{
+  "queued": [{ "job_id": "j_2f7c1d9a", "kind": "video.metadata", "target": "nfgdJyL-Jmg", "state": "queued", "attempt_count": 0 }],
+  "held": [{ "target": "dQw4w9WgXcQ", "digest": "b9f4c0e2..." }]
+}
+```
+
+**편의 기능이 아니다.** 키 하나는 분당 60요청이므로, 영상 100개짜리 스윕을 한 건씩 제출하면
+절반도 못 가서 rate limit에 걸린다. 스윕을 *표현할 수 있는* API와 *실행할 수 있는* API의 차이다.
+
+**전부 아니면 전무.** 한 줄이라도 큐에 넣기 전에 모든 타깃을 정규화하므로, 잘못된 id 하나면
+나머지 99개를 넣고 202로 답하는 대신 배치 전체를 422로 거부한다. 부분 스윕은 가능한 결과 중
+가장 나쁘다 — 호출자는 실행됐다고 믿고, 빠진 부분은 나중에 아무도 안 찾는 부재로 드러난다.
+
+타깃은 최대 500개이고 그 이상은 422. `POST /v1/jobs`와 달리 payload를 절대 돌려주지 않는다.
+이미 보유한 타깃은 `digest`로 이름만 알려주며, 그것이 `GET /v1/artifacts/{digest}`가 받는 값이다.
+본문 100개를 돌려주는 것은 제출을 대량 다운로드로 만드는 일이다.
+
+---
+
 ## `GET /v1/jobs/{job_id}`
 
 잡 하나의 현재 상태.

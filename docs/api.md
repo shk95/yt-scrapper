@@ -227,6 +227,41 @@ forever.
 
 ---
 
+## `POST /v1/jobs/batch`
+
+One kind, many targets, one request. Answers 202.
+
+```sh
+curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+     -d '{"kind":"video.metadata","targets":["dQw4w9WgXcQ","nfgdJyL-Jmg"]}' \
+     localhost:8080/v1/jobs/batch
+```
+
+```json
+{
+  "queued": [{ "job_id": "j_2f7c1d9a", "kind": "video.metadata", "target": "nfgdJyL-Jmg", "state": "queued", "attempt_count": 0 }],
+  "held": [{ "target": "dQw4w9WgXcQ", "digest": "b9f4c0e2..." }]
+}
+```
+
+**This is not a convenience.** A key is allowed sixty requests a minute, so a
+hundred-video sweep submitted one target at a time is rate-limited before it is
+half done — the difference between an API that can express a sweep and one that
+can run it.
+
+**All or nothing.** Every target is normalised before anything is queued, so one
+bad id refuses the whole batch with 422 rather than queueing the other
+ninety-nine and answering 202. A partial sweep is the worst outcome available:
+the caller believes it ran, and the gap surfaces later as an absence nobody is
+looking for.
+
+At most 500 targets; more is 422. Unlike `POST /v1/jobs` this never returns a
+payload — a target already held is named with its `digest`, which is what
+`GET /v1/artifacts/{digest}` takes. Returning a hundred bodies would make a
+submission a bulk download.
+
+---
+
 ## `GET /v1/jobs/{job_id}`
 
 One job's current state.

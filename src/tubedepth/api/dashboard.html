@@ -95,7 +95,7 @@
     <div class="body">
       <div class="row">
         <select id="new-kind"></select>
-        <input id="new-target" placeholder="video, channel, playlist, query or region" size="34">
+        <input id="new-target" placeholder="one target, or several separated by comma or newline" size="42">
         <label><input id="new-refresh" type="checkbox"> force past the freshness window</label>
         <button id="submit">collect</button>
       </div>
@@ -317,10 +317,35 @@ async function submit(kind, target, refresh) {
   }
 }
 
+async function submitMany(kind, targets, refresh) {
+  try {
+    // One request rather than one per target: a key is allowed sixty a minute,
+    // so a hundred-target sweep sent one at a time stalls before it is half
+    // done. The batch refuses all of them if one is malformed, which is why
+    // nothing here reports a partial success.
+    const answer = await api("/v1/jobs/batch", {
+      method: "POST",
+      body: { kind, targets, refresh },
+    });
+    const { queued, held } = answer.body;
+    say(`queued ${queued.length} of ${targets.length}`
+      + (held.length ? `; ${held.length} already held` : ""));
+    await load();
+  } catch (error) {
+    say(error.message, true);
+  }
+}
+
 $("submit").onclick = () => {
-  const target = $("new-target").value.trim();
-  if (!target) { say("name something to collect", true); return; }
-  submit($("new-kind").value, target, $("new-refresh").checked);
+  const targets = $("new-target").value.split(/[\n,]/).map((one) => one.trim()).filter(Boolean);
+  if (!targets.length) { say("name something to collect", true); return; }
+  const kind = $("new-kind").value;
+  const refresh = $("new-refresh").checked;
+  // A single target keeps the single-target route, because that one answers
+  // 200 with the stored payload when it is already held — which is worth
+  // showing, and which a batch deliberately does not do.
+  if (targets.length === 1) submit(kind, targets[0], refresh);
+  else submitMany(kind, targets, refresh);
 };
 $("new-target").onkeydown = (event) => { if (event.key === "Enter") $("submit").click(); };
 
