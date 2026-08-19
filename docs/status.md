@@ -457,6 +457,45 @@ model produces `refresh BOOLEAN DEFAULT 0 NOT NULL DEFAULT 0` and the startup
 repair fails on the statement. The two paths therefore differ in DDL, which
 nothing depends on, and agree in behaviour, which everything does.
 
+### Measured 2026-08-19: the trending chart is alive, `ytsearchdate` is not
+
+Issue #3 lists three routes to trend detection and says which one is real
+decides the design of the other two, so both of its unverified claims were
+checked before anything was built. Both answers are in.
+
+**`videos.list?chart=mostPopular` still returns data.** `regionCode=KR` and
+`regionCode=US` each answer 200 results. So the retirement of the `/feed/trending`
+*page* did not take the chart endpoint with it, and route C is available.
+
+That settles issue #3's fork the good way. C spends **Google API quota, not the
+per-address YouTube budget** everything else in this project competes for — 1
+unit per request against 10,000/day, so a five-minute cadence is ~288 units.
+General "what is rising on YouTube" therefore costs nothing that matters, and
+routes A and B shrink to what C cannot do: velocity inside a chosen topic.
+
+It also wants its own `Lane`. Google's quota is a different budget from
+YouTube's bot tolerance, and riding on `Lane.YOUTUBE` would make one throttle
+the other for no reason. Transport goes in `src/tubedepth/egress/` per the
+architecture rule.
+
+**`ytsearchdate{N}:` does not exist.** Issue #3 flagged this as remembered
+rather than run, and it was wrong. yt-dlp 2026.07.04 answers
+`Unsupported url scheme: "ytsearchdate5"`, and its extractor list holds only
+`youtube:search`, `youtube:search_url` and `youtube:music:search_url` — there is
+no date-sorted search extractor. Plain `ytsearch3:` works, so the failure is the
+prefix and not the mechanism.
+
+The obvious workaround does not work either: `search_url` with YouTube's
+`sp=CAI%3D` ("sort by upload date") returns the same videos as the relevance
+search, so the parameter is being dropped somewhere between us and the results.
+
+**So route B needs building, not calling.** The likely home is this project's
+own InnerTube client (`src/tubedepth/innertube/`), which already constructs
+search requests and can carry a sort parameter directly instead of hoping
+yt-dlp forwards one. That is a different and larger job than the "cheapest
+change in this issue by a wide margin" the issue estimated, and it should be
+re-estimated before it is scheduled.
+
 ### The sampler is a timer and a text file, not a scheduler
 
 Nothing in this project ran periodically, so the artifact table was a time
