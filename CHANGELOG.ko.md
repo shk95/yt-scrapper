@@ -29,6 +29,18 @@
 
 ### Added
 
+- **`trending.videos` — YouTube 자신이 인기라고 부르는 것.** 트렌딩 페이지는 사라졌고 긁어올
+  순위도 남아 있지 않지만, Data API의 `chart=mostPopular`는 살아남았다: 2026-08-20 확인,
+  지역당 200건. 관측이 아니라 순위를 보고하는 유일한 kind다 — 나머지는 전부 두 번 수집하면
+  트렌드가 되지만, YouTube 자신의 순서는 몇 번을 샘플링해도 복원할 수 없다.
+
+  자체 lane을 쓴다. 나머지가 경쟁하는 per-address 예산이 아니라 Google 쿼터를 쓰므로, 한쪽의
+  격리가 다른 쪽을 조이면 안 되기 때문이다. `TUBEDEPTH_DATA_API_KEY`를 설정한다. 없으면 그
+  kind만 설정 오류로 실패하고 나머지는 영향받지 않는다.
+
+  payload가 `VideoListing`이라 `--then`이 그대로 동작한다:
+  `tubedepth enqueue trending.videos KR --then video.metadata` 한 줄이 지역 하나를 트렌딩
+  영상별 메타데이터 잡으로 바꾼다.
 - **payload 모델을 바꾸고 `schema_version`을 안 올리면 CI가 거부한다.** DB 쪽 절반은
   `tests/test_migrations.py`가 늘 잡아왔지만 payload 쪽에는 대응물이 없었고, 실제로 이미 한 번
   놓쳤다. kind와 버전별로 다듬은 모양을 append-only lock에 기록하므로, 통과시키는 유일한 방법은

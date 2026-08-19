@@ -90,6 +90,25 @@
    ]
   }
  },
+ "trending.videos": {
+  "1": {
+   "shape": [
+    "listing_id null|string optional",
+    "skipped_count integer optional",
+    "source_kind string required",
+    "title null|string optional",
+    "videos list optional",
+    "videos[] object required",
+    "videos[].channel null|string optional",
+    "videos[].channel_id null|string optional",
+    "videos[].duration_seconds integer|null optional",
+    "videos[].published_at null|string(date-time) optional",
+    "videos[].title null|string optional",
+    "videos[].video_id string required",
+    "videos[].view_count integer|null optional"
+   ]
+  }
+ },
  "video.bundle": {
   "1": {
    "shape": [

@@ -36,6 +36,21 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Added
 
+- **`trending.videos` — what YouTube itself calls popular.** The trending page
+  was retired and there is no ranking left to scrape, but the Data API's
+  `chart=mostPopular` outlived it: verified 2026-08-20, 200 results per region.
+  This is the only kind that reports a ranking rather than an observation —
+  everything else here becomes a trend by being collected twice, and YouTube's
+  own ordering cannot be reconstructed from any number of samples.
+
+  It has its own lane because it spends Google's quota rather than the
+  per-address YouTube budget everything else competes for, so a quarantine on
+  one must not throttle the other. Set `TUBEDEPTH_DATA_API_KEY`; without it
+  that one kind fails as a configuration error and nothing else is affected.
+
+  The payload is a `VideoListing`, so `--then` already works:
+  `tubedepth enqueue trending.videos KR --then video.metadata` turns one queued
+  region into a metadata job per trending video.
 - **CI refuses a payload model change that does not bump `schema_version`.**
   `tests/test_migrations.py` has always caught the database half of this; there
   was no payload-side equivalent, and one bump was already missed in the

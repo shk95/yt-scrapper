@@ -29,6 +29,7 @@ class TargetType(StrEnum):
     CHANNEL = "channel"
     PLAYLIST = "playlist"
     QUERY = "query"
+    REGION = "region"
 
 
 # YouTube video ids are eleven characters of URL-safe base64.
@@ -103,11 +104,26 @@ def normalize_search_query(value: str) -> str:
     return query
 
 
+def normalize_region_code(value: str) -> str:
+    """An ISO 3166-1 alpha-2 region, upper-cased.
+
+    The plausible mistake is alpha-3, because ISO 3166 has both and `KOR` looks
+    more like a country than `KR` does. This endpoint takes only alpha-2 and
+    answers 400 for the other, so refusing here costs nothing while refusing
+    after the request spends a quota unit to be told the same thing.
+    """
+    code = value.strip().upper()
+    if len(code) != 2 or not code.isalpha():
+        raise ValidationError(f"not an ISO 3166-1 alpha-2 region code: {value}")
+    return code
+
+
 _NORMALIZERS = {
     TargetType.VIDEO: normalize_video_identifier,
     TargetType.CHANNEL: normalize_channel_identifier,
     TargetType.PLAYLIST: normalize_playlist_identifier,
     TargetType.QUERY: normalize_search_query,
+    TargetType.REGION: normalize_region_code,
 }
 
 
