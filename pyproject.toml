@@ -4,7 +4,14 @@ build-backend = "hatchling.build"
 
 [project]
 name = "tubedepth"
-version = "0.1.0"
+# Read from `src/tubedepth/__init__.py` rather than written here.
+#
+# The version reaches three places at runtime — `tubedepth version`, the
+# OpenAPI document and `/healthz` — all of which import it from the package.
+# Repeating it in this file made a release two edits that could half-succeed,
+# and the half that gets forgotten is the one nothing prints. A test asserts
+# this stays dynamic.
+dynamic = ["version"]
 description = "An asynchronous job API that harvests the YouTube video, channel and discovery data the official Data API does not expose"
 readme = "README.md"
 requires-python = ">=3.12"
@@ -39,6 +46,9 @@ dev = [
 
 [project.scripts]
 tubedepth = "tubedepth.cli:main"
+
+[tool.hatch.version]
+path = "src/tubedepth/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/tubedepth"]
