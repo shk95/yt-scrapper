@@ -36,6 +36,13 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Added
 
+- **The dashboard can drive the queue, not just watch it.** Submit a
+  collection, force past the freshness window, cancel a job, ask again for one
+  that failed, read a result, and click a digest to read the observation behind
+  it — the cell that used to be dead text. A submission answered 200 says so
+  rather than looking like nothing happened, and a cancelled-but-running job
+  says that the extraction is still spending requests. No server change: every
+  one of those routes already existed.
 - **`trending.videos` — what YouTube itself calls popular.** The trending page
   was retired and there is no ranking left to scrape, but the Data API's
   `chart=mostPopular` outlived it: verified 2026-08-20, 200 results per region.
