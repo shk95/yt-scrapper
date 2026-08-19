@@ -8,7 +8,7 @@ implementation of what a kind means rather than two.
 from __future__ import annotations
 
 import json
-from datetime import timedelta
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
@@ -407,3 +407,114 @@ def test_an_unhealthy_source_does_not_make_the_whole_service_unhealthy(
 
     assert response.status_code == 200
     assert response.json()["status"] == "ok"
+
+
+def test_jobs_can_be_listed_newest_first(api: tuple[TestClient, str, Database]) -> None:
+    client, key, _ = api
+    for index in range(3):
+        client.post(
+            "/v1/jobs",
+            headers={"X-API-Key": key},
+            json={"kind": "video.echo", "target": f"vid{index:08d}"},
+        )
+
+    listed = client.get("/v1/jobs", headers={"X-API-Key": key}).json()
+
+    assert len(listed["jobs"]) == 3
+    assert listed["jobs"][0]["target"] == "vid00000002", "newest first"
+    assert "cursor" in listed
+
+
+def test_jobs_can_be_filtered_by_state_and_kind(api: tuple[TestClient, str, Database]) -> None:
+    client, key, database = api
+    first = client.post(
+        "/v1/jobs",
+        headers={"X-API-Key": key},
+        json={"kind": "video.echo", "target": "vid00000001"},
+    ).json()["job_id"]
+    client.post(
+        "/v1/jobs",
+        headers={"X-API-Key": key},
+        json={"kind": "video.echo", "target": "vid00000002"},
+    )
+    with database.session() as session:
+        job = session.get(Job, first)
+        assert job is not None
+        job.state = JobState.FAILED
+        job.error_code = "ExtractionError"
+
+    failed = client.get("/v1/jobs?state=failed", headers={"X-API-Key": key}).json()
+
+    assert [job["target"] for job in failed["jobs"]] == ["vid00000001"]
+    assert failed["jobs"][0]["error_code"] == "ExtractionError"
+
+
+def test_jobs_can_be_narrowed_to_a_time_range(api: tuple[TestClient, str, Database]) -> None:
+    """The range selection this exists for — 'show me what ran last night'."""
+    client, key, database = api
+    job_id = client.post(
+        "/v1/jobs",
+        headers={"X-API-Key": key},
+        json={"kind": "video.echo", "target": "vid00000001"},
+    ).json()["job_id"]
+    with database.session() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.created_at = datetime(2026, 1, 1, tzinfo=UTC)
+
+    within = client.get(
+        "/v1/jobs?since=2025-12-31T00:00:00Z&until=2026-01-02T00:00:00Z", headers={"X-API-Key": key}
+    ).json()
+    outside = client.get("/v1/jobs?since=2026-06-01T00:00:00Z", headers={"X-API-Key": key}).json()
+
+    assert len(within["jobs"]) == 1
+    assert outside["jobs"] == []
+
+
+def test_the_job_list_pages_rather_than_returning_everything(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """A browser pointed at a hundred thousand rows must not fetch them."""
+    client, key, _ = api
+    for index in range(5):
+        client.post(
+            "/v1/jobs",
+            headers={"X-API-Key": key},
+            json={"kind": "video.echo", "target": f"vid{index:08d}"},
+        )
+
+    first = client.get("/v1/jobs?limit=2", headers={"X-API-Key": key}).json()
+    second = client.get(
+        f"/v1/jobs?limit=2&cursor={first['cursor']}", headers={"X-API-Key": key}
+    ).json()
+
+    assert len(first["jobs"]) == 2
+    assert len(second["jobs"]) == 2
+    assert {job["job_id"] for job in first["jobs"]}.isdisjoint(
+        {job["job_id"] for job in second["jobs"]}
+    )
+
+
+def test_artifacts_can_be_listed_and_filtered(api: tuple[TestClient, str, Database]) -> None:
+    """The other half of "show me the records": what was actually collected."""
+    client, key, database = api
+    from tubedepth.models import Artifact
+
+    with database.session() as session:
+        session.add(
+            Artifact(
+                kind="video.echo",
+                target="vid00000001",
+                fingerprint="fp-1",
+                digest="d" * 64,
+                byte_count=123,
+                fetched_at=datetime(2026, 8, 19, tzinfo=UTC),
+                fresh_until=datetime(2026, 9, 19, tzinfo=UTC),
+            )
+        )
+
+    listed = client.get("/v1/artifacts?kind=video.echo", headers={"X-API-Key": key}).json()
+
+    assert len(listed["artifacts"]) == 1
+    assert listed["artifacts"][0]["target"] == "vid00000001"
+    assert listed["artifacts"][0]["byte_count"] == 123

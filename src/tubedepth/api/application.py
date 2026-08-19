@@ -7,6 +7,7 @@ drifting into two different answers for the same question.
 
 from __future__ import annotations
 
+import base64
 import logging
 from collections.abc import Iterator
 
@@ -22,6 +23,7 @@ from fastapi import APIRouter, Depends, FastAPI, Request, Response, Security, st
 from fastapi.responses import JSONResponse, PlainTextResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from .. import __version__
@@ -39,7 +41,7 @@ from ..errors import (
 )
 from ..health import SourceHealthService
 from ..identifiers import normalize_target
-from ..models import Job
+from ..models import Artifact, Job
 from ..payload_store import PayloadStore
 from ..repositories import JobRepository, JobState
 from ..services.keys import ApiKeyService, VerifiedKey
@@ -83,8 +85,11 @@ class JobView(BaseModel):
     target: str
     state: str
     attempt_count: int
+    error_code: str | None = None
     error_message: str | None = None
     payload_bytes: int | None = None
+    created_at: datetime | None = None
+    finished_at: datetime | None = None
 
 
 class SourceHealthView(BaseModel):
@@ -103,6 +108,32 @@ class SourceHealthView(BaseModel):
     last_success_at: datetime | None = None
     last_failure_at: datetime | None = None
     last_error_code: str | None = None
+
+
+class JobListView(BaseModel):
+    """A page of jobs, newest first, with the cursor for the next one.
+
+    Paged rather than complete because the caller is a browser and the table
+    grows without bound. `cursor` is null when the page is the last one, so a
+    client stops by reading the response rather than by counting.
+    """
+
+    jobs: list[JobView]
+    cursor: str | None = None
+
+
+class ArtifactView(BaseModel):
+    kind: str
+    target: str
+    digest: str
+    byte_count: int
+    fetched_at: datetime
+    fresh_until: datetime
+
+
+class ArtifactListView(BaseModel):
+    artifacts: list[ArtifactView]
+    cursor: str | None = None
 
 
 class HealthView(BaseModel):
@@ -124,6 +155,32 @@ class HealthView(BaseModel):
 # entirely.
 
 
+# A page big enough to fill a screen and small enough that a careless caller
+# cannot ask for the whole table.
+MAXIMUM_PAGE = 500
+
+
+def _encode_cursor(moment: datetime, identifier: str) -> str:
+    """Opaque, and base64url because it travels in a query string.
+
+    An ISO timestamp carries a `+` for its offset, which a URL reads as a
+    space — so the plain form worked in a test client and broke against a real
+    one. Opaque also keeps clients from building their own, which would freeze
+    the ordering columns into the public contract.
+    """
+    raw = f"{moment.isoformat()}|{identifier}".encode()
+    return base64.urlsafe_b64encode(raw).decode().rstrip("=")
+
+
+def _decode_cursor(cursor: str) -> tuple[datetime, str]:
+    try:
+        padded = cursor + "=" * (-len(cursor) % 4)
+        moment, _, identifier = base64.urlsafe_b64decode(padded).decode().partition("|")
+        return datetime.fromisoformat(moment), identifier
+    except (ValueError, UnicodeDecodeError) as error:
+        raise ValidationError(f"cursor is not one this API issued: {cursor}") from error
+
+
 def _job_view(job: Job) -> JobView:
     return JobView(
         job_id=job.identifier,
@@ -131,8 +188,11 @@ def _job_view(job: Job) -> JobView:
         target=job.target,
         state=job.state.value,
         attempt_count=job.attempt_count,
+        error_code=job.error_code,
         error_message=job.error_message,
         payload_bytes=job.payload_bytes,
+        created_at=job.created_at,
+        finished_at=job.finished_at,
     )
 
 
@@ -291,6 +351,113 @@ def create_application(
             target=job.target,
             state=job.state.value,
             attempt_count=job.attempt_count,
+        )
+
+    @versioned.get("/jobs", response_model=JobListView)
+    def list_jobs(
+        open_session: Annotated[Session, Depends(get_reading_session)],
+        state: str | None = None,
+        kind: str | None = None,
+        target: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> JobListView:
+        """A page of the job ledger, newest first.
+
+        Registered before `/jobs/{job_id}` because FastAPI matches routes in
+        declaration order and a literal path has to win over a parameterised
+        one that would otherwise swallow it.
+
+        The cursor is the last row's `created_at` and identifier rather than an
+        offset. An offset re-reads what it skips and drifts when rows arrive
+        during paging, which on a table the worker is actively writing means
+        showing the same job twice and missing another.
+        """
+        query = select(Job).order_by(Job.created_at.desc(), Job.identifier.desc())
+        if state:
+            query = query.where(Job.state == state)
+        if kind:
+            query = query.where(Job.kind == kind)
+        if target:
+            query = query.where(Job.target == target)
+        if since:
+            query = query.where(Job.created_at >= since)
+        if until:
+            query = query.where(Job.created_at <= until)
+        if cursor:
+            moment, identifier = _decode_cursor(cursor)
+            # Keyset comparison spelled out rather than as a row value: SQLite
+            # supports the tuple form but the typed API wants columns on both
+            # sides, and the expanded form is what every planner optimises.
+            query = query.where(
+                or_(
+                    Job.created_at < moment,
+                    and_(Job.created_at == moment, Job.identifier < identifier),
+                )
+            )
+
+        page = max(1, min(limit, MAXIMUM_PAGE))
+        rows = list(open_session.scalars(query.limit(page + 1)).all())
+        more = rows[page:]
+        rows = rows[:page]
+        return JobListView(
+            jobs=[_job_view(job) for job in rows],
+            cursor=_encode_cursor(rows[-1].created_at, rows[-1].identifier) if more else None,
+        )
+
+    @versioned.get("/artifacts", response_model=ArtifactListView)
+    def list_artifacts(
+        open_session: Annotated[Session, Depends(get_reading_session)],
+        kind: str | None = None,
+        target: str | None = None,
+        since: datetime | None = None,
+        until: datetime | None = None,
+        limit: int = 50,
+        cursor: str | None = None,
+    ) -> ArtifactListView:
+        """What was actually collected, as opposed to what was asked for.
+
+        The artifact table appends rather than overwrites, so filtering by
+        target gives one video's history — how its counts moved — which is the
+        thing that table keeps and the job ledger cannot answer.
+        """
+        query = select(Artifact).order_by(Artifact.fetched_at.desc(), Artifact.identifier.desc())
+        if kind:
+            query = query.where(Artifact.kind == kind)
+        if target:
+            query = query.where(Artifact.target == target)
+        if since:
+            query = query.where(Artifact.fetched_at >= since)
+        if until:
+            query = query.where(Artifact.fetched_at <= until)
+        if cursor:
+            moment, identifier = _decode_cursor(cursor)
+            query = query.where(
+                or_(
+                    Artifact.fetched_at < moment,
+                    and_(Artifact.fetched_at == moment, Artifact.identifier < identifier),
+                )
+            )
+
+        page = max(1, min(limit, MAXIMUM_PAGE))
+        rows = list(open_session.scalars(query.limit(page + 1)).all())
+        more = rows[page:]
+        rows = rows[:page]
+        return ArtifactListView(
+            artifacts=[
+                ArtifactView(
+                    kind=artifact.kind,
+                    target=artifact.target,
+                    digest=artifact.digest,
+                    byte_count=artifact.byte_count,
+                    fetched_at=artifact.fetched_at,
+                    fresh_until=artifact.fresh_until,
+                )
+                for artifact in rows
+            ],
+            cursor=_encode_cursor(rows[-1].fetched_at, rows[-1].identifier) if more else None,
         )
 
     @versioned.get("/jobs/{job_id}", response_model=JobView)
