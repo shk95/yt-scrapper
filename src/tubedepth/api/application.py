@@ -9,6 +9,13 @@ from __future__ import annotations
 
 import logging
 from collections.abc import Iterator
+
+# Imported for pydantic rather than for the type checker. With
+# `from __future__ import annotations` every annotation is a string, and a
+# response model naming a type this module has not imported fails at request
+# time with "is not fully defined" — the second trap that future-annotations
+# has set in this file.
+from datetime import datetime
 from typing import Annotated, Any
 
 from fastapi import APIRouter, Depends, FastAPI, Request, Response, Security, status
@@ -30,6 +37,7 @@ from ..errors import (
     UpstreamError,
     ValidationError,
 )
+from ..health import SourceHealthService
 from ..identifiers import normalize_target
 from ..models import Job
 from ..payload_store import PayloadStore
@@ -79,11 +87,30 @@ class JobView(BaseModel):
     payload_bytes: int | None = None
 
 
+class SourceHealthView(BaseModel):
+    """One source's recent behaviour, as an operator needs to read it.
+
+    `status` distinguishes causes that need different fixes: `broken` is our
+    parser, `blocked` is the address, `degraded` is one bad call, `stale` is a
+    source nothing has exercised lately, and `unknown` is one never tried. A
+    dashboard showing green for something nobody has run is worse than one
+    admitting it does not know.
+    """
+
+    kind: str
+    status: str
+    consecutive_failures: int
+    last_success_at: datetime | None = None
+    last_failure_at: datetime | None = None
+    last_error_code: str | None = None
+
+
 class HealthView(BaseModel):
     status: str
     version: str
     queued: int = Field(default=0)
     running: int = Field(default=0)
+    sources: list[SourceHealthView] = Field(default_factory=list)
 
 
 # Dependencies live at module level, not inside the factory.
@@ -186,16 +213,34 @@ def create_application(
     # Unauthenticated on purpose: something has to be reachable before you have
     # a key, or a broken deploy cannot be diagnosed from outside.
     @application.get("/healthz", response_model=HealthView)
-    def healthz(open_session: Annotated[Session, Depends(get_reading_session)]) -> HealthView:
+    def healthz(
+        open_session: Annotated[Session, Depends(get_reading_session)],
+        database: Annotated[Database, Depends(get_database)],
+    ) -> HealthView:
         counts = {
             state: open_session.query(Job).filter(Job.state == state).count()
             for state in (JobState.QUEUED, JobState.RUNNING)
         }
+        # `status` stays "ok" while individual sources are not. This endpoint is
+        # read by things that restart processes, and one broken parser is not a
+        # reason to cycle an API whose other nine kinds are still collecting.
+        # The bad news travels in the detail, where a person reads it.
         return HealthView(
             status="ok",
             version=__version__,
             queued=counts[JobState.QUEUED],
             running=counts[JobState.RUNNING],
+            sources=[
+                SourceHealthView(
+                    kind=entry.kind,
+                    status=entry.status,
+                    consecutive_failures=entry.consecutive_failures,
+                    last_success_at=entry.last_success_at,
+                    last_failure_at=entry.last_failure_at,
+                    last_error_code=entry.last_error_code,
+                )
+                for entry in SourceHealthService(database=database).snapshot().values()
+            ],
         )
 
     # The dependency sits on the router rather than on each handler, so a route

@@ -33,6 +33,7 @@ from .database import Database
 from .egress.control import RateController, Verdict, verdict_for_error
 from .egress.transport import DirectEgress, Egress
 from .errors import TubedepthError, UpstreamError
+from .health import SourceHealthService
 from .models import Job, JobState, utcnow
 from .payload_store import PayloadStore
 from .repositories import JobRepository
@@ -72,6 +73,7 @@ class Worker:
         concurrency: int = DEFAULT_CONCURRENCY,
         lease: timedelta = DEFAULT_LEASE,
         permit_wait: timedelta = timedelta(seconds=PERMIT_WAIT_SECONDS),
+        health: SourceHealthService | None = None,
     ) -> None:
         self._database = database
         self._payloads = payloads
@@ -83,6 +85,11 @@ class Worker:
         self._concurrency = max(1, concurrency)
         self._lease = lease
         self._permit_wait = permit_wait.total_seconds()
+        # Recorded as work happens rather than derived from the job table on
+        # demand: "has this source failed three times in a row" is a question
+        # about consecutive attempts, and reconstructing that from rows means
+        # scanning them in order every time anyone asks.
+        self._health = health or SourceHealthService(database=database)
         self._lock = threading.Lock()
         self._in_flight_by_cost: dict[SourceCost, int] = {}
         self._collection = CollectionService(
@@ -223,6 +230,7 @@ class Worker:
                 verdict = Verdict.OK
             except TubedepthError as error:
                 verdict = verdict_for_error(error)
+                self._health.record(kind, succeeded=False, error=error)
                 self._fail_or_retry(identifier, kind, error)
                 return
             except Exception:
@@ -232,6 +240,7 @@ class Worker:
                 # evidence that the address is in trouble.
                 verdict = Verdict.NEUTRAL
                 logger.exception("job %s (%s) raised an unexpected error", identifier, kind)
+                self._health.record(kind, succeeded=False, error=UpstreamError("unexpected"))
                 self._settle(
                     identifier,
                     JobState.FAILED,
@@ -254,6 +263,7 @@ class Worker:
             self._settle(identifier, JobState.CANCELLED)
             return
 
+        self._health.record(kind, succeeded=True)
         logger.info("job %s (%s) collected %s bytes", identifier, kind, byte_count)
         self._settle(identifier, JobState.SUCCEEDED, digest=digest, byte_count=byte_count)
 

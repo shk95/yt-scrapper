@@ -370,6 +370,40 @@ browser `User-Agent` stayed but its evidence left with the source — see
 was RYD's documented 10,000/day. It no longer has one. That is recorded under
 "Proxying is deferred" rather than left for someone to rediscover.
 
+### Source health is recorded, because nothing could see it before
+
+The rate controller already knew when a route was in trouble, and that
+knowledge lived in the worker's memory and died with the process. Nothing
+outside the worker could read it, so an operator asking "why is nothing
+arriving" had only the job table — which says what failed, not whether
+anything is wrong *now*.
+
+`source_health` is one row per kind, written by the worker as it goes and read
+by the API. Per source rather than per lane because that is the unanswered
+question: when YouTube renames a renderer, `video.related` fails every call
+while `video.metadata` beside it is fine. The lane is healthy; the source is
+not.
+
+The statuses distinguish causes that need different fixes: `broken` is our
+parser, `blocked` is the address, `degraded` is one bad call, `stale` is a
+source nothing has exercised lately, `unknown` is one never tried. That last
+one matters more than it looks — a dashboard showing green for something nobody
+has run is worse than one admitting it does not know.
+
+**Only two failure classes count against a source**, and the reasoning is the
+one the rate controller needed: `ExtractionError` (our parser no longer
+matches) and `UpstreamError` (the other end refused). A video with captions
+turned off fails `video.transcript` legitimately and repeatedly, and counting
+it would paint a working source red during any sweep of such videos.
+
+`/healthz` stays `status: "ok"` while individual sources are not. It is read by
+things that restart processes, and one broken parser is not a reason to cycle
+an API whose other nine kinds are collecting.
+
+Verified against the running system: three kinds `healthy` after real jobs,
+seven `unknown`, and a source failed three times reports `broken` with its last
+error code.
+
 ### `channel.about` returned a video's description as the channel's
 
 Found 2026-08-19 while answering what `channel.profile` would add, and it is

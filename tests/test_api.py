@@ -347,3 +347,63 @@ def test_cancelling_needs_a_key_like_every_other_versioned_route(
     client, _, _ = api
 
     assert client.delete("/v1/jobs/whatever").status_code == 401
+
+
+def test_health_reports_every_source_and_not_just_the_queue(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """What an operator asking "why is nothing arriving" needs to see.
+
+    Queue depth answers "is there work"; it cannot answer "is anything still
+    able to do it". A source that has started failing every call looks
+    identical to an idle system from the counts alone.
+    """
+    client, key, _ = api
+
+    body = client.get("/healthz").json()
+
+    assert "sources" in body, "the queue counts alone cannot say what is broken"
+    assert body["sources"], "every registered source is reported, including untried ones"
+    statuses = {entry["status"] for entry in body["sources"]}
+    assert statuses <= {"unknown", "healthy", "degraded", "broken", "blocked", "stale"}
+
+
+def test_health_names_the_broken_source_and_its_last_error(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    client, key, database = api
+    from tubedepth.errors import ExtractionError
+    from tubedepth.health import SourceHealthService
+
+    health = SourceHealthService(database=database)
+    for _ in range(3):
+        health.record("video.echo", succeeded=False, error=ExtractionError("no renderer named x"))
+
+    entries = {entry["kind"]: entry for entry in client.get("/healthz").json()["sources"]}
+
+    assert entries["video.echo"]["status"] == "broken"
+    assert entries["video.echo"]["last_error_code"] == "ExtractionError"
+    assert entries["video.echo"]["consecutive_failures"] == 3
+
+
+def test_an_unhealthy_source_does_not_make_the_whole_service_unhealthy(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """`/healthz` is read by things that restart processes.
+
+    One broken parser is not a reason to cycle the API — the other nine kinds
+    are still collecting. The status stays `ok` and the detail carries the bad
+    news.
+    """
+    client, _, database = api
+    from tubedepth.errors import ExtractionError
+    from tubedepth.health import SourceHealthService
+
+    health = SourceHealthService(database=database)
+    for _ in range(5):
+        health.record("video.echo", succeeded=False, error=ExtractionError("gone"))
+
+    response = client.get("/healthz")
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ok"

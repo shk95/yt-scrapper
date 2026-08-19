@@ -167,3 +167,22 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+
+class SourceHealth(Base):
+    """One row per kind: what that source has been doing lately.
+
+    In the database rather than in the worker's memory because the process
+    asking is not the process that knows. The rate controller's state dies with
+    the worker; this has to outlive it and be readable by the API.
+    """
+
+    __tablename__ = "source_health"
+
+    kind: Mapped[str] = mapped_column(String(64), primary_key=True)
+    consecutive_failures: Mapped[int] = mapped_column(default=0)
+    blocked: Mapped[bool] = mapped_column(default=False)
+    last_success_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    last_failure_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    last_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
