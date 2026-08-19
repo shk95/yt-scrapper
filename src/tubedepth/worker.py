@@ -240,12 +240,28 @@ class Worker:
         finally:
             self._leave(source.cost)
 
+        if self._cancellation_requested(identifier):
+            # Asked for while this was in flight. The extraction could not be
+            # stopped, but the result can be dropped — storing it would make
+            # cancellation a lie in the other direction, leaving the work the
+            # client asked to stop sitting in the cache to be served to the
+            # next caller as though it had been wanted. The blob written by
+            # _collect is left for the retention sweep, which is what it is for.
+            logger.info("job %s (%s) finished after cancellation, discarding", identifier, kind)
+            self._settle(identifier, JobState.CANCELLED)
+            return
+
         logger.info("job %s (%s) collected %s bytes", identifier, kind, byte_count)
         self._settle(identifier, JobState.SUCCEEDED, digest=digest, byte_count=byte_count)
 
         if follow_up is not None and isinstance(result, VideoListing):
             queued = self._queue_follow_up(result, follow_up)
             logger.info("job %s queued %s follow-up %s jobs", identifier, queued, follow_up)
+
+    def _cancellation_requested(self, identifier: str) -> bool:
+        with self._database.session() as session:
+            job = session.get(Job, identifier)
+            return job is not None and job.cancel_requested_at is not None
 
     def _wait_for_permit(self, lane: object) -> bool:
         """Block until the controller allows one more request on this lane."""
@@ -305,6 +321,17 @@ class Worker:
             job = session.get(Job, identifier)
             if job is None:  # pragma: no cover - the row was deleted mid-flight
                 return
+            if job.cancel_requested_at is not None:
+                # Another go at work nobody wants. The failure is recorded so
+                # the row still says what happened, but the state is the one
+                # the client asked for.
+                logger.info("job %s (%s) failed after cancellation: %s", identifier, kind, error)
+                job.state = JobState.CANCELLED
+                job.finished_at = utcnow()
+                job.error_code = type(error).__name__
+                job.error_message = str(error)
+                return
+
             retryable = is_retryable(error)
             exhausted = job.attempt_count >= job.max_attempts
             if not retryable or exhausted:

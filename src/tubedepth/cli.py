@@ -21,9 +21,10 @@ from .egress.transport import DirectEgress
 from .errors import TubedepthError, ValidationError
 from .fixture_capture import redact_for_fixture
 from .identifiers import normalize_target, normalize_video_identifier
-from .models import Job
+from .models import Job, JobState
 from .observability import configure_logging
 from .payload_store import PayloadStore
+from .repositories import JobRepository
 from .retention import RetentionPolicy, RetentionService
 from .services.keys import ApiKeyService
 from .sources import default_registry
@@ -127,6 +128,33 @@ def enqueue(
             session.flush()
             suffix = f" → {then}" if then else ""
             typer.echo(f"→ queued {job.identifier[:8]}  {kind}  {job.target}{suffix}")
+
+
+@application.command()
+def cancel(
+    job_id: Annotated[str, typer.Argument(help="The job to stop; see `tubedepth jobs`")],
+    data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
+        "var"
+    ),
+) -> None:
+    """Stop a job that is no longer wanted.
+
+    A queued job is cancelled outright. A running one is only marked: its
+    extraction is inside yt-dlp and cannot be interrupted, so what this buys is
+    that it will not be retried and will not hand back a result. The line this
+    prints says which of the two happened, because the difference is whether
+    requests are still going out.
+    """
+    database = _database(data_directory)
+    with database.session() as session:
+        job = JobRepository(session).cancel(job_id)
+        if job.state is JobState.CANCELLED:
+            typer.echo(f"✓ cancelled {job.identifier[:8]}  {job.kind}  {job.target}")
+        else:
+            typer.echo(
+                f"→ marked {job.identifier[:8]}  {job.kind}  {job.target} — "
+                "already running, so it will finish or fail on its own and keep no result"
+            )
 
 
 @application.command()

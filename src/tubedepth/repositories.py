@@ -8,7 +8,13 @@ from datetime import datetime, timedelta
 from sqlalchemy import select, update
 from sqlalchemy.orm import Session
 
+from .errors import ConflictError, NotFoundError
 from .models import Artifact, Job, JobState, utcnow
+
+# States from which nothing further happens. Cancelling one is a conflict
+# rather than a no-op: a client told "cancelled" about work that already ran
+# would believe it had prevented a cost it in fact paid.
+TERMINAL_STATES = frozenset({JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED})
 
 
 class JobRepository:
@@ -65,6 +71,40 @@ class JobRepository:
         if taken.rowcount != 1:
             return None
         return self._session.get(Job, candidate)
+
+    def cancel(self, identifier: str) -> Job:
+        """Stop a job that is no longer wanted, as far as is honest.
+
+        A queued job is cancelled outright: nothing is happening to it, so the
+        state change *is* the cancellation and the claim query will never see
+        it again.
+
+        A running job is only *marked*. Its extraction is inside yt-dlp, inside
+        a thread, and nothing here can interrupt that — so moving it to
+        CANCELLED would announce that the cost had stopped while requests were
+        still going out against the address. What the mark buys is real but
+        narrower: the worker will not retry it, and its result is discarded
+        rather than stored. The caller is told which of the two happened by the
+        state on the row it gets back.
+
+        A finished job is a conflict rather than a silent no-op. "Cancel"
+        succeeding against a job that already ran would let a client believe it
+        had prevented work that has in fact been done and billed for.
+        """
+        job = self._session.get(Job, identifier)
+        if job is None:
+            raise NotFoundError(f"no such job: {identifier}")
+        if job.state in TERMINAL_STATES:
+            raise ConflictError(f"job has already finished: {identifier}")
+
+        now = self._clock()
+        job.cancel_requested_at = now
+        if job.state is JobState.QUEUED:
+            job.state = JobState.CANCELLED
+            job.finished_at = now
+            job.claimed_by = None
+            job.lease_expires_at = None
+        return job
 
     def renew_lease(self, identifier: str, *, lease: timedelta) -> None:
         """Push a running job's lease out.

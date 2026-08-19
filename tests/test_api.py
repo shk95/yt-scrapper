@@ -20,7 +20,7 @@ from tubedepth.database import Database
 from tubedepth.egress.control import Lane
 from tubedepth.egress.transport import Egress
 from tubedepth.identifiers import TargetType
-from tubedepth.models import Job
+from tubedepth.models import Job, JobState
 from tubedepth.payload_store import PayloadStore
 from tubedepth.services.keys import ApiKeyService
 from tubedepth.sources import SourceRegistry
@@ -300,3 +300,50 @@ def test_the_openapi_document_is_served(api: tuple[TestClient, str, Database]) -
 
     assert response.status_code == 200
     assert "/v1/jobs" in response.json()["paths"]
+
+
+def test_cancelling_a_queued_job_over_http_reports_it_cancelled(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    client, key, _ = api
+    job_id = client.post(
+        "/v1/jobs",
+        headers={"X-API-Key": key},
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+    ).json()["job_id"]
+
+    cancelled = client.delete(f"/v1/jobs/{job_id}", headers={"X-API-Key": key})
+
+    assert cancelled.status_code == 200
+    assert cancelled.json()["state"] == "cancelled"
+    read_back = client.get(f"/v1/jobs/{job_id}", headers={"X-API-Key": key})
+    assert read_back.json()["state"] == "cancelled"
+
+
+def test_cancelling_a_finished_job_is_a_conflict_and_not_a_silent_success(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """Reporting success would tell a client it prevented work already done."""
+    client, key, database = api
+    job_id = client.post(
+        "/v1/jobs",
+        headers={"X-API-Key": key},
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+    ).json()["job_id"]
+    with database.session() as session:
+        job = session.get(Job, job_id)
+        assert job is not None
+        job.state = JobState.FAILED
+        job.error_message = "nothing came back"
+
+    cancelled = client.delete(f"/v1/jobs/{job_id}", headers={"X-API-Key": key})
+
+    assert cancelled.status_code == 409
+
+
+def test_cancelling_needs_a_key_like_every_other_versioned_route(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    client, _, _ = api
+
+    assert client.delete("/v1/jobs/whatever").status_code == 401

@@ -56,6 +56,10 @@ class JobState(enum.StrEnum):
     RUNNING = "running"
     SUCCEEDED = "succeeded"
     FAILED = "failed"
+    # Asked for and no longer wanted. Reached directly from QUEUED, and from
+    # RUNNING only once the worker notices — see JobRepository.cancel for why
+    # a running job is not moved here by the request itself.
+    CANCELLED = "cancelled"
 
 
 class Job(Base):
@@ -88,6 +92,11 @@ class Job(Base):
     claimed_by: Mapped[str | None] = mapped_column(String(64), nullable=True)
     lease_expires_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
     finished_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    # Set the moment cancellation is asked for, and never cleared. For a queued
+    # job it is the same instant as `finished_at`; for a running one it is the
+    # only record that the request happened at all, since the job goes on to
+    # finish or fail on its own.
+    cancel_requested_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
 
     # The result, by reference. The payload itself is a file: a comment harvest
     # runs to tens of megabytes and does not belong in the table the claim

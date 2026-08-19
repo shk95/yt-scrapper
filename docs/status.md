@@ -12,7 +12,7 @@ Last updated: 2026-08-18.
 | Milestone | State |
 | --- | --- |
 | M0 — repository skeleton | done |
-| M1 — domain core | done, except lease reaping and cancellation |
+| M1 — domain core | done |
 | M2 — first yt-dlp source | done (video.metadata) |
 | M4 — transcripts | done (video.transcript); third-party sources not started |
 | M5 — comments | done (video.comments) |
@@ -187,9 +187,31 @@ defined inside the factory is a local name resolution cannot see, and
 parameter — every route then answers 422 about an argument nobody wrote.
 Collaborators are read off `app.state` instead.
 
-**Still not done in the queue:** cancellation. `DELETE`-style stopping of a
-running job does not exist, so a comment harvest started by mistake runs to
-completion.
+**Cancellation landed 2026-08-19, and it is deliberately narrow.** A queued
+job is cancelled outright — nothing is happening to it, so the state change is
+the cancellation. A running job is only *marked*: its extraction is inside
+yt-dlp inside a thread, and nothing here can interrupt that.
+
+Measured end to end against a real harvest: cancel requested at 02:41:48, job
+settled at 02:42:11. **Twenty-three seconds of requests went out after the
+client asked it to stop.** That gap is the honest content of the feature and
+the reason a running job is not moved to `cancelled` by the request itself —
+saying `cancelled` while requests are still leaving would announce that a cost
+had stopped when it had not. `DELETE /v1/jobs/{id}` returns the job, and the
+state on it says which of the two happened.
+
+What the mark does buy is real: the job is not retried, and it hands back no
+result. The `max_comments` ceiling remains the only mechanism that actually
+bounds the cost of a harvest before it starts.
+
+**The artifact is kept, and that was a reversal.** The first version discarded
+it — cancel, therefore leave nothing — which is wrong on this project's own
+terms. The request to YouTube had already gone out and been paid for; dropping
+the result does not un-spend it, it guarantees the next caller spends it again
+against the one budget that caps this system. So the *job* is cancelled and
+carries no result, while the cache keeps what was fetched, keyed by video
+rather than by who asked. Wanting collected data to disappear is a retention
+and access-control problem, and those are different mechanisms.
 
 Lease reaping and retries landed on 2026-08-18 and were verified against a
 simulated crash: a job left in `running` by a worker that never released it

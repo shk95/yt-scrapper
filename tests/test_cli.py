@@ -100,3 +100,32 @@ def test_the_error_boundary_prints_a_refusal_instead_of_a_traceback(
     assert completed.returncode == 1
     assert "✗ unknown option: --thn" in completed.stderr
     assert "Traceback" not in completed.stderr
+
+
+def test_cancelling_a_queued_job_from_the_command_line(tmp_path: Path) -> None:
+    runner.invoke(
+        application,
+        ["enqueue", "video.transcript", "dQw4w9WgXcQ", "--data-dir", str(tmp_path)],
+    )
+    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
+        job_id = next(connection.execute("SELECT identifier FROM jobs"))[0]
+
+    result = runner.invoke(application, ["cancel", job_id, "--data-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
+        assert next(connection.execute("SELECT state FROM jobs"))[0] == "cancelled"
+
+
+def test_cancelling_a_job_that_does_not_exist_says_so_without_a_traceback(
+    tmp_path: Path,
+) -> None:
+    completed = subprocess.run(
+        [sys.executable, "-m", "tubedepth.cli", "cancel", "0" * 32, "--data-dir", str(tmp_path)],
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == 1
+    assert "no such job" in completed.stderr
+    assert "Traceback" not in completed.stderr

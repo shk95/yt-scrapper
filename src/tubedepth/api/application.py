@@ -31,8 +31,9 @@ from ..errors import (
     ValidationError,
 )
 from ..identifiers import normalize_target
-from ..models import Job, JobState
+from ..models import Job
 from ..payload_store import PayloadStore
+from ..repositories import JobRepository, JobState
 from ..services.keys import ApiKeyService, VerifiedKey
 from ..sources import SourceRegistry, default_registry
 
@@ -94,6 +95,18 @@ class HealthView(BaseModel):
 # a required query parameter — every route then answers 422 for a missing
 # argument nobody wrote. Reading collaborators off app.state avoids the closure
 # entirely.
+
+
+def _job_view(job: Job) -> JobView:
+    return JobView(
+        job_id=job.identifier,
+        kind=job.kind,
+        target=job.target,
+        state=job.state.value,
+        attempt_count=job.attempt_count,
+        error_message=job.error_message,
+        payload_bytes=job.payload_bytes,
+    )
 
 
 def get_database(request: Request) -> Database:
@@ -227,15 +240,26 @@ def create_application(
         job = open_session.get(Job, job_id)
         if job is None:
             raise NotFoundError(f"job not found: {job_id}")
-        return JobView(
-            job_id=job.identifier,
-            kind=job.kind,
-            target=job.target,
-            state=job.state.value,
-            attempt_count=job.attempt_count,
-            error_message=job.error_message,
-            payload_bytes=job.payload_bytes,
-        )
+        return _job_view(job)
+
+    @versioned.delete("/jobs/{job_id}")
+    def cancel_job(job_id: str, open_session: Annotated[Session, Depends(get_session)]) -> JobView:
+        """Stop a job that is no longer wanted.
+
+        DELETE rather than a POST to /cancel because what it removes is the
+        client's claim on the work, which is the only thing here a client owns.
+        The row survives — a queue that forgets what it was told to stop cannot
+        answer why nothing arrived.
+
+        What the answer means depends on the state that comes back. `cancelled`
+        means it never ran. `running` means the request was recorded and the
+        extraction is still going: it will not be retried and will not hand
+        back a result, but it is still spending requests until it finishes.
+        Saying `cancelled` in that case would announce a cost that has not
+        stopped.
+        """
+        job = JobRepository(open_session).cancel(job_id)
+        return _job_view(job)
 
     @versioned.get("/jobs/{job_id}/result")
     def read_result(
