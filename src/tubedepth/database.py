@@ -110,6 +110,22 @@ class Database:
                         continue
                     self._add_column(connection, table, column)
 
+            # Indexes have the same gap as columns and hide it better: an index
+            # added after a database exists never lands on it, nothing errors,
+            # and the only symptom is a query plan nobody looks at. The claim
+            # went back to a full table scan on the working database while
+            # every test asserted it used an index.
+            existing_indexes = {
+                row[1]
+                for row in connection.exec_driver_sql(
+                    "SELECT type, name FROM sqlite_master WHERE type = 'index'"
+                ).fetchall()
+            }
+            for table in Base.metadata.sorted_tables:
+                for index in table.indexes:
+                    if index.name not in existing_indexes:
+                        index.create(bind=connection)
+
     def _add_column(self, connection: Connection, table: Table, column: Column[object]) -> None:
         if not column.nullable and column.default is None and column.server_default is None:
             raise ConfigurationError(

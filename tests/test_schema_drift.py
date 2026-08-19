@@ -44,12 +44,16 @@ def test_a_missing_column_that_cannot_be_added_is_reported_by_name(tmp_path: Pat
     path = tmp_path / "tubedepth.db"
     Database(path).create_schema()
     with sqlite3.connect(path) as connection:
-        connection.execute("ALTER TABLE jobs DROP COLUMN kind")
+        # `artifacts.byte_count`, chosen for what it is rather than which
+        # table it is in: required, no default, and in no index. An indexed
+        # column cannot be dropped at all, and a column with a default is one
+        # the repair can legitimately rebuild.
+        connection.execute("ALTER TABLE artifacts DROP COLUMN byte_count")
 
     with pytest.raises(ConfigurationError) as caught:
         Database(path).create_schema()
 
-    assert "jobs.kind" in str(caught.value)
+    assert "artifacts.byte_count" in str(caught.value)
 
 
 def test_a_database_created_by_this_version_needs_no_repair(tmp_path: Path) -> None:
@@ -60,3 +64,27 @@ def test_a_database_created_by_this_version_needs_no_repair(tmp_path: Path) -> N
     with sqlite3.connect(path) as connection:
         columns = {row[1] for row in connection.execute("PRAGMA table_info(jobs)")}
     assert columns == {column.name for column in Job.__table__.columns}
+
+
+def test_an_index_added_since_the_file_was_created_is_created_too(tmp_path: Path) -> None:
+    """The same gap as the missing column, one level down.
+
+    `create_all` skips a table it already finds, and that skips the table's
+    indexes with it. So an index added after a database exists never lands on
+    it — silently, because an index is a performance decision and nothing
+    errors without one. The claim query went back to a full scan on the working
+    database while every test asserted it used an index.
+    """
+    path = tmp_path / "tubedepth.db"
+    Database(path).create_schema()
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP INDEX ix_job_claimable")
+
+    Database(path).create_schema()
+
+    with sqlite3.connect(path) as connection:
+        names = {
+            row[0]
+            for row in connection.execute("SELECT name FROM sqlite_master WHERE type='index'")
+        }
+    assert "ix_job_claimable" in names

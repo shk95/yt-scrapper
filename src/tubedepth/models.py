@@ -64,6 +64,20 @@ class JobState(enum.StrEnum):
 
 class Job(Base):
     __tablename__ = "jobs"
+    __table_args__ = (
+        # The claim's index, and the column order matches its WHERE and ORDER
+        # BY exactly. Without it every claim is a full scan plus a temporary
+        # B-tree for the ordering — on the hot path of every job the system
+        # runs. The plan called for this and it was never added; five hundred
+        # rows hid it.
+        Index("ix_job_claimable", "state", "scheduled_at", "created_at"),
+        # The reaper's, which asks a different question of the same column.
+        Index("ix_job_lease", "state", "lease_expires_at"),
+        # Browsing, which filters by kind and orders by recency. Deliberately
+        # separate from the claim index: leading with `state` would make it
+        # useless for a browser that does not filter on state.
+        Index("ix_job_recent", "kind", "created_at"),
+    )
 
     identifier: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_identifier)
     kind: Mapped[str] = mapped_column(String(64), nullable=False)
@@ -123,7 +137,15 @@ class Artifact(Base):
     """
 
     __tablename__ = "artifacts"
-    __table_args__ = (Index("ix_artifact_lookup", "fingerprint", "fresh_until"),)
+    __table_args__ = (
+        # The cache path: is there a fresh answer to this exact question.
+        Index("ix_artifact_lookup", "fingerprint", "fresh_until"),
+        # Browsing by kind, newest first.
+        Index("ix_artifact_recent", "kind", "fetched_at"),
+        # One target's history, which is what this table keeps by appending
+        # rather than overwriting — how a video's counts moved over a month.
+        Index("ix_artifact_target", "target", "fetched_at"),
+    )
 
     identifier: Mapped[str] = mapped_column(String(32), primary_key=True, default=new_identifier)
     kind: Mapped[str] = mapped_column(String(64), nullable=False)
