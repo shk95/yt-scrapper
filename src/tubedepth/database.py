@@ -14,6 +14,27 @@ from .errors import ConfigurationError
 from .models import Base
 
 
+def _scalar_default(column: Column[object]) -> str | None:
+    """The column's default as SQL, when it is a plain value.
+
+    Only scalars: a callable default is Python running at INSERT time and has
+    no meaning in a DDL statement, so it cannot stand in for the rows that
+    already exist.
+    """
+    default = column.default
+    value = getattr(default, "arg", None) if default is not None else None
+    if value is None or callable(value):
+        return None
+    if isinstance(value, bool):
+        return "1" if value else "0"
+    if isinstance(value, int | float):
+        return str(value)
+    if isinstance(value, str):
+        escaped = value.replace("'", "''")
+        return f"'{escaped}'"
+    return None
+
+
 class Database:
     """One SQLite file, and the one setting that makes it safe to claim from.
 
@@ -127,13 +148,30 @@ class Database:
                         index.create(bind=connection)
 
     def _add_column(self, connection: Connection, table: Table, column: Column[object]) -> None:
-        if not column.nullable and column.default is None and column.server_default is None:
+        """Add one column to a table that already exists.
+
+        The subtlety that broke this once: SQLAlchemy's `default` is applied by
+        Python at INSERT and is invisible to `ALTER TABLE`, while SQLite
+        refuses `ADD COLUMN ... NOT NULL` outright unless the statement carries
+        a default of its own. Checking `column.default` therefore let a
+        required column through the guard and fail on the statement — and since
+        this runs when the database is opened, the process then refused to
+        start at all.
+
+        So a scalar default is rendered into the statement, which also fills it
+        in for the rows that predate the column. Anything else — a callable
+        default, or no default — cannot be filled in for existing rows, and
+        guessing a value is worse than naming the column that needs a hand.
+        """
+        literal = _scalar_default(column)
+        if not column.nullable and literal is None and column.server_default is None:
             raise ConfigurationError(
                 "database schema is behind the code and cannot be repaired automatically: "
                 f"{table.name}.{column.name} is required and has no default"
             )
         definition = CreateColumn(column).compile(bind=self._engine)
-        connection.exec_driver_sql(f"ALTER TABLE {table.name} ADD COLUMN {definition}")
+        clause = f" DEFAULT {literal}" if literal is not None and not column.nullable else ""
+        connection.exec_driver_sql(f"ALTER TABLE {table.name} ADD COLUMN {definition}{clause}")
 
     @contextmanager
     def session(self, *, readonly: bool = False) -> Iterator[Session]:
