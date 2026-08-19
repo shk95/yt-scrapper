@@ -496,6 +496,47 @@ yt-dlp forwards one. That is a different and larger job than the "cheapest
 change in this issue by a wide margin" the issue estimated, and it should be
 re-estimated before it is scheduled.
 
+### The upcast machinery is deferred, and here is what should build it
+
+Issue #4 asks for five things. Four shipped: `Artifact.schema_version` and its
+backfill, `GET /v1/artifacts/{digest}`, the invalidate half (`retracted_versions`,
+which `channel.about` v1 actually needs), and the CI check that refuses a model
+change without a bump. The fifth — a source declaring how to *lift* a payload
+from the previous version — was not built, on purpose.
+
+*Because there is nothing to lift.* Measured before deciding: nine sources have
+never bumped, `channel.about` is the only one that has, and issue #4 itself says
+its honest handling is deletion rather than a lift. `channel.about` had **zero**
+stored rows. So `Upgrade` would have shipped with no instance and its tests would
+have exercised a `lift` written by the test — the `renew_lease` shape exactly, in
+a repository with a decision file about that.
+
+*And because the signature would be a guess.* `Callable[[Mapping], Mapping]` fits
+a rename or a default. It does not fit a field split needing data v1 never held,
+and it does not fit a semantic change to an existing field. Designing the seam
+before the case is how you get a seam the case does not fit.
+
+**Build it the first time all three hold:**
+
+1. **The kind about to bump has stored history.** Checkable, not recalled:
+   ```sql
+   SELECT kind, count(*) FROM (
+     SELECT kind, target, count(*) n FROM artifacts GROUP BY 1,2 HAVING n>1
+   ) GROUP BY 1;
+   ```
+   On 2026-08-20 that returned `video.metadata` and nothing else.
+2. **The bump is a shape change, not a correctness fix.** If the old data is
+   wrong, `retracted_versions` is already the honest answer and is built.
+3. **Something reads across the version boundary** — the trend work's delta
+   layer, or a second consumer of `/v1/artifacts/{digest}` that needs one shape.
+
+The tripwire is already armed: `tests/test_payload_shapes.py` fails on the bump
+that would need this, and its message names the fork — bump and record, or
+retract. A deferral with a tripwire is a plan; without one it is a hope.
+
+*Not in `decisions/`.* That directory's README sets the bar at a cost someone
+has already paid and measured. Nothing here has been paid yet.
+
 ### The sampler is a timer and a text file, not a scheduler
 
 Nothing in this project ran periodically, so the artifact table was a time
