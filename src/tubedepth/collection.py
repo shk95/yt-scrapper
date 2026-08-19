@@ -8,18 +8,24 @@ what is already known.
 
 from __future__ import annotations
 
+import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 
 from pydantic import BaseModel
 
 from .database import Database
 from .egress.transport import DirectEgress, Egress
+from .errors import NotFoundError, TubedepthError
 from .fingerprints import fingerprint
 from .identifiers import normalize_target
 from .payload_store import PayloadStore, StoredPayload
 from .repositories import ArtifactRepository
+from .schemas import Degradation, VideoBundle
 from .sources import SourceRegistry, default_registry
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime, YtdlpRuntime
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,12 +73,50 @@ class CollectionService:
             if cached is not None:
                 return cached
 
-        result = source.collect(normalized, self._egress, self._runtime)
+        parts = getattr(source, "parts", None)
+        if parts is not None:
+            result = self._assemble(normalized, parts)
+        else:
+            result = source.collect(normalized, self._egress, self._runtime)
         stored = self._payloads.put(kind, result.model_dump_json(indent=1).encode())
         self._record(question, kind, normalized, stored, source.default_freshness)
         return Collected(
             kind=kind, target=normalized, payload=stored, result=result, from_cache=False
         )
+
+    def _assemble(self, target: str, parts: Sequence[str]) -> VideoBundle:
+        """Collect each part through this same service, keeping what arrives.
+
+        Through `self.collect` rather than the sources directly, so every part
+        consults the cache and records its own artifact. A bundle asked for
+        seconds after a metadata collect must not fetch the metadata again —
+        on the one budget that actually caps this system, that is the expensive
+        kind of convenience.
+
+        A part that fails becomes a degradation instead of failing the bundle,
+        which is the whole reason the composite exists. All parts failing is
+        still a failure: an empty success would make "collected" and "collected
+        nothing" the same answer.
+        """
+        collected: dict[str, object] = {}
+        degradations: list[Degradation] = []
+        for part in parts:
+            try:
+                result = self.collect(part, target)
+            except TubedepthError as error:
+                degradations.append(
+                    Degradation(source=part, code=type(error).__name__, detail=str(error))
+                )
+                logger.info("bundle for %s lost %s: %s", target, part, error)
+                continue
+            collected[part] = result.result.model_dump() if result.result else None
+
+        if not collected:
+            raise NotFoundError(
+                f"nothing could be collected for: {target} "
+                f"({', '.join(f'{d.source} {d.code}' for d in degradations)})"
+            )
+        return VideoBundle(video_id=target, parts=collected, degradations=degradations)
 
     def cached(self, kind: str, target: str) -> Collected | None:
         """A fresh answer if one is held, without collecting. Never fetches."""

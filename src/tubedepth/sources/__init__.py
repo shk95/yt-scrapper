@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from functools import cache
 
+from .bundle import BundleSource
 from .comments import CommentsSource
 from .innertube_sources import (
     ChannelAboutSource,
@@ -29,6 +30,8 @@ def default_registry() -> SourceRegistry:
     registry = SourceRegistry()
     registry.register(VideoMetadataSource())
     registry.register(TranscriptSource())
+    # Last, so every kind it fans out to is already registered.
+    registry.register(BundleSource())
     registry.register(CommentsSource())
     registry.register(ChannelVideosSource())
     registry.register(SearchVideosSource())

@@ -8,6 +8,7 @@ implementation rather than what a viewer sees.
 from __future__ import annotations
 
 from datetime import date, datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
@@ -223,3 +224,27 @@ class ChannelAbout(BaseModel):
     tags: list[str] = []
     avatar_url: str | None = None
     links: list[str] = []
+
+
+class Degradation(BaseModel):
+    """A part that did not arrive, and why, travelling with the parts that did.
+
+    Named rather than omitted. A bundle missing its transcript and a bundle for
+    a video with no captions look identical without this, and only one of them
+    is worth retrying.
+    """
+
+    source: str
+    code: str
+    detail: str
+
+
+class VideoBundle(BaseModel):
+    """Several collections about one video, plus what could not be collected."""
+
+    video_id: str
+    # Keyed by kind, and deliberately untyped at this level: each part is
+    # already a validated model of its own, and re-declaring the union here
+    # would mean editing this file every time a source is added.
+    parts: dict[str, Any] = {}
+    degradations: list[Degradation] = []
