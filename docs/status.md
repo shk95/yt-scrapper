@@ -517,16 +517,37 @@ drvfs WAL problem, and the pysqlite deferred-transaction lock upgrade.
 
 ## Next
 
-Verify the clone per project-scaffold `decisions/006` — follow the README in
-order, using nothing you happen to know. That check always finds something.
+Everything the original plan called M0–M8 is done except webhooks, systemd
+units and Alembic. Ten kinds collect real data; the queue claims, retries,
+reaps, renews and cancels; the API serves it behind a key.
 
-Then either finish the queue's unfinished half (lease reaping, cancellation,
-retries) or start M3, the HTTP API over the same service layer. The API is the
-larger user-visible step; the reaping is the thing that will bite first in
-unattended use.
+**Do these before adding anything.**
 
-M1 built the domain core with **zero network**, and the egress package
-skeleton lands with it — `Egress.build`, `DirectEgress`, the selector and the
-AIMD controller are all pure logic and fully testable offline. Landing the
-"every transport comes from an egress" invariant on day one is cheap;
-retrofitting it after five sources exist is a rewrite.
+1. **Verify a fresh clone** per project-scaffold `decisions/006` — follow the
+   README in order using nothing you happen to know. Never yet done here, and
+   that check always finds something.
+2. **Alembic.** `create_schema` now adds nullable columns that appeared since a
+   database was made, which closed the one case that kept happening, but it is
+   not a migration tool and does not pretend to be. Anything that renames,
+   drops or backfills has no answer today.
+3. **Retention has never run against real volume.** The policy and its tests
+   exist; no sweep has been observed evicting anything, and the orphan-blob
+   path has only been exercised by hand — a CLI `collect` writes a payload with
+   no artifact row, so orphans are produced routinely.
+
+**Two things this session's measurements point at, in order of value.**
+
+4. **Nothing here is measured beyond a few hundred jobs.** Every figure in this
+   file comes from sweeps of 20–50. How the rate controller behaves over hours,
+   where the bot-check threshold sits under sustained load, and whether the
+   AIMD window settles or oscillates are all unknown — and they are the numbers
+   that decide whether this works at the scale it was built for.
+5. **The InnerTube three are the fragile half and nothing watches them.**
+   Fixtures catch a renderer rename when someone runs the suite; nothing tells
+   an operator that `video.related` started coming back empty an hour ago. The
+   circuit breaker the plan specified (`source_health`) was never built.
+
+**Deferred with a reason, not forgotten:** the egress pool. Its quantified case
+left with the dislikes source. GitHub milestone 1 holds the conditions under
+which it becomes justified again, and issue 1 is the one measurement that could
+revive it.
