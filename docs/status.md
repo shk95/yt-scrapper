@@ -79,6 +79,36 @@ concurrent extractions the bottleneck stops being us. That is the number the
 plan wanted measured instead of guessed, and `TUBEDEPTH_WINDOW_CEILING` is how
 an operator asks for a different one.
 
+**Transcripts, measured 2026-08-19 — and the measurement found two bugs.**
+Three sweeps of forty fresh videos each, one channel, concurrency 8:
+
+| sweep | outcome | jobs/hour | what changed |
+| --- | --- | --- | --- |
+| 1 | 43 jobs, 4 m 55 s | ~525 | as found |
+| 2 | 40 jobs, 3 m 43 s | ~648 | requeue no longer spends attempts |
+| 3 | 20 jobs, **13 s** | **~5,400** | a video's failings are NEUTRAL to the route |
+
+Sweep 1's timeline is the whole story: twenty-two of forty jobs finished in the
+first fifteen seconds, then it fell to roughly one per fifteen seconds and
+stayed there. Nothing about YouTube changed during those four minutes. Seven
+videos in the batch had captions turned off, and each of those failures was
+reported to the controller as throttling, doubling the lane's minimum interval
+— 1s, 2s, 4s, 8s, 16s. The tail rate was our own ceiling.
+
+Sweep 3 had **eight** caption-less videos out of twenty, twice the proportion,
+and did not slow down at all. That is the confirmation: the collapse was the
+verdict mapping, not the videos and not the address.
+
+A transcript costs one extraction plus one caption fetch, so it should sit
+somewhere near the metadata figure rather than an order below it. It now does.
+
+Two lessons worth keeping. The first is that a rate controller with a wrong
+verdict mapping is worse than none: it converts content-level disappointments
+into a self-inflicted rate limit, and every symptom points at YouTube. The
+second is that neither bug was visible in a single job, in the test suite, or
+in a ten-job trial — both needed a sweep large enough for the interval to
+compound.
+
 **Caching, measured 2026-08-18.** The same channel sweep, twice:
 
 | sweep | wall clock | YouTube requests |
