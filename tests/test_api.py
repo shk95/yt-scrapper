@@ -45,8 +45,13 @@ class EchoSource:
         return EchoPayload(target=target)
 
 
-@pytest.fixture
-def api(tmp_path: Path) -> tuple[TestClient, str, Database]:
+def build_api(tmp_path: Path) -> tuple[TestClient, str, Database]:
+    """The fixture's body as a plain function.
+
+    Other test modules need the same client and were reaching into the
+    fixture's `__wrapped__`, which is an implementation detail of pytest and
+    not a seam anyone should rely on.
+    """
     database = Database(tmp_path / "tubedepth.db")
     database.create_schema()
     registry = SourceRegistry()
@@ -60,6 +65,11 @@ def api(tmp_path: Path) -> tuple[TestClient, str, Database]:
     # TestClient rather than an ASGITransport: the transport is async-only, and
     # every service under here is synchronous.
     return TestClient(application), minted.secret, database
+
+
+@pytest.fixture
+def api(tmp_path: Path) -> tuple[TestClient, str, Database]:
+    return build_api(tmp_path)
 
 
 def test_health_needs_no_key(api: tuple[TestClient, str, Database]) -> None:

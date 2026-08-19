@@ -111,6 +111,12 @@ class Job(Base):
     # only record that the request happened at all, since the job goes on to
     # finish or fail on its own.
     cancel_requested_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    # Where to announce this job's end, if the submitter asked for one. The
+    # attempt count lives beside it so a receiver that has been down all day
+    # stops being hammered without the sender needing its own table.
+    webhook_url: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    webhook_attempts: Mapped[int] = mapped_column(default=0)
+    webhook_delivered_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
 
     # The result, by reference. The payload itself is a file: a comment harvest
     # runs to tens of megabytes and does not belong in the table the claim

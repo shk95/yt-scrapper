@@ -42,6 +42,7 @@ from .schemas import VideoListing
 from .sources import SourceRegistry, default_registry
 from .sources.registry import SourceCost
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime, YtdlpRuntime
+from .webhooks import WebhookSender
 
 logger = logging.getLogger(__name__)
 
@@ -74,6 +75,7 @@ class Worker:
         lease: timedelta = DEFAULT_LEASE,
         permit_wait: timedelta = timedelta(seconds=PERMIT_WAIT_SECONDS),
         health: SourceHealthService | None = None,
+        webhook_secret: str | None = None,
     ) -> None:
         self._database = database
         self._payloads = payloads
@@ -90,6 +92,13 @@ class Worker:
         # about consecutive attempts, and reconstructing that from rows means
         # scanning them in order every time anyone asks.
         self._health = health or SourceHealthService(database=database)
+        # Absent by default, and silence is the safer default: an unsigned
+        # callback is one a receiver cannot tell from anyone else who learned
+        # the URL, and a callback URL travels in a job submission rather than
+        # being a secret.
+        self._webhooks = (
+            WebhookSender(database=database, secret=webhook_secret) if webhook_secret else None
+        )
         self._lock = threading.Lock()
         self._in_flight_by_cost: dict[SourceCost, int] = {}
         self._collection = CollectionService(
@@ -110,6 +119,18 @@ class Worker:
         self._execute(*claimed)
         return True
 
+    def deliver_webhooks(self) -> int:
+        """Announce jobs that have finished and are still owed a callback.
+
+        On the worker's tick rather than at the moment a job settles, so a
+        receiver that was down when the job ended is retried without the job
+        having to be re-run — and so a delivery that hangs cannot hold up the
+        job it is about.
+        """
+        if self._webhooks is None:
+            return 0
+        return self._webhooks.deliver_pending()
+
     def reap(self) -> int:
         """Return jobs whose worker stopped reporting. Safe to call often."""
         with self._database.session() as session:
@@ -121,7 +142,13 @@ class Worker:
         Reaps first: a previous run killed mid-job left rows in `running` that
         nothing else will ever release, and starting without collecting them
         means the queue looks shorter than it is.
+
+        Callbacks are delivered at both ends. On entry, so a receiver that was
+        down when a previous run finished is retried; on exit, so jobs this run
+        finished are announced without waiting for the next one — which for a
+        `--once` invocation would be never.
         """
+        self.deliver_webhooks()
         reaped = self.reap()
         if reaped:
             logger.info("returned %s job(s) whose lease had expired", reaped)
@@ -130,6 +157,7 @@ class Worker:
             completed = 0
             while self.run_once():
                 completed += 1
+            self.deliver_webhooks()
             return completed
 
         completed = 0
@@ -148,6 +176,7 @@ class Worker:
         with ThreadPoolExecutor(max_workers=self._concurrency) as pool:
             for future in [pool.submit(pump) for _ in range(self._concurrency)]:
                 future.result()
+        self.deliver_webhooks()
         return completed
 
     # -- the gates -------------------------------------------------------

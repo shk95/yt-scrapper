@@ -162,6 +162,14 @@ def work(
     data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
         "var"
     ),
+    webhook_secret: Annotated[
+        str | None,
+        typer.Option(
+            "--webhook-secret",
+            envvar="TUBEDEPTH_WEBHOOK_SECRET",
+            help="Sign job callbacks with this. Without it, none are sent.",
+        ),
+    ] = None,
     concurrency: Annotated[
         int,
         typer.Option(
@@ -188,6 +196,7 @@ def work(
         payloads=_payload_store(data_directory),
         name=f"cli-{os.getpid()}",
         concurrency=concurrency,
+        webhook_secret=webhook_secret,
         controller=RateController(
             # The ceiling additive increase may not pass. Raising it is how an
             # operator asks for more throughput; the controller still refuses

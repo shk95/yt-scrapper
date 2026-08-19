@@ -23,7 +23,7 @@ from typing import Annotated, Any
 from fastapi import APIRouter, Depends, FastAPI, Request, Response, Security, status
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.security import APIKeyHeader
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, HttpUrl
 from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
@@ -78,6 +78,11 @@ class JobSubmission(BaseModel):
     kind: str
     target: str
     refresh: bool = False
+    # Per request rather than per deployment: the submitter knows where its
+    # answer should go, and different clients of one instance want different
+    # places. Validated as a URL here because a malformed one stored is a
+    # delivery that fails on every sweep forever.
+    webhook_url: HttpUrl | None = None
 
 
 class JobView(BaseModel):
@@ -359,7 +364,12 @@ def create_application(
                     media_type="application/json",
                 )
 
-        job = Job(kind=submission.kind, target=target, api_key_id=api_key.identifier)
+        job = Job(
+            kind=submission.kind,
+            target=target,
+            api_key_id=api_key.identifier,
+            webhook_url=str(submission.webhook_url) if submission.webhook_url else None,
+        )
         open_session.add(job)
         open_session.flush()
         response.status_code = status.HTTP_202_ACCEPTED
