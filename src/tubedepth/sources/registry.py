@@ -75,6 +75,21 @@ def cache_parameters_of(source: DataSource) -> Mapping[str, Any]:
     return dict(getattr(source, "cache_parameters", None) or {})
 
 
+def retracted_versions_of(source: DataSource) -> frozenset[str]:
+    """Versions of this source whose stored payloads are wrong, not merely old.
+
+    Upgrading is not always the honest move. The only bump this project has
+    made, `channel.about` v1 to v2, fixed a parser that read the channel home
+    tab as if it were the about panel and returned a video's description as the
+    channel's. Lifting that data would launder it; the answer a reader deserves
+    is that the observation was withdrawn.
+
+    Read with getattr, like `parts` and `cache_parameters`, so declaring
+    nothing is the ordinary case and costs no line in ten sources.
+    """
+    return frozenset(getattr(source, "retracted_versions", ()) or ())
+
+
 def attempts_for(source: DataSource) -> int:
     """How many tries this source's jobs get. Read where a job is created."""
     return MAXIMUM_ATTEMPTS[source.cost]

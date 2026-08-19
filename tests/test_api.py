@@ -708,3 +708,97 @@ def test_a_submission_carries_the_bound_its_kind_deserves(tmp_path: Path) -> Non
     assert bounds["video.expensive"] < bounds["video.echo"], (
         f"the expensive kind was submitted with as many tries as the standard one: {bounds}"
     )
+
+
+def _stored_artifact(tmp_path: Path, database: Database, *, kind: str, version: str) -> str:
+    """One artifact row and its payload, as a collection would have left them."""
+    from tubedepth.models import Artifact, utcnow
+
+    payloads = PayloadStore(tmp_path / "payloads")
+    stored = payloads.put(kind, b'{"target": "dQw4w9WgXcQ", "kept": true}')
+    with database.session() as session:
+        session.add(
+            Artifact(
+                kind=kind,
+                target="dQw4w9WgXcQ",
+                fingerprint=f"fp-{kind}-{version}",
+                schema_version=version,
+                digest=stored.digest,
+                byte_count=stored.byte_count,
+                fetched_at=utcnow(),
+                fresh_until=utcnow(),
+            )
+        )
+    return stored.digest
+
+
+def test_an_artifact_can_be_read_by_its_digest(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    """`GET /v1/artifacts` hands out digests and nothing could dereference them.
+
+    A list route whose identifiers lead nowhere is a defect on its own terms —
+    the dashboard renders the digest as a dead cell — and it is what history
+    has to go through, since the alternative is keeping a job id forever.
+    """
+    client, key, database = api
+    digest = _stored_artifact(tmp_path, database, kind="video.echo", version="1")
+
+    response = client.get(f"/v1/artifacts/{digest}", headers={"X-API-Key": key})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["digest"] == digest
+    assert body["schema_version"] == "1"
+    assert body["payload"] == {"target": "dQw4w9WgXcQ", "kept": True}
+
+
+def test_a_digest_this_instance_never_stored_is_not_found(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    client, key, _ = api
+
+    response = client.get(f"/v1/artifacts/{'0' * 64}", headers={"X-API-Key": key})
+
+    assert response.status_code == 404
+
+
+def test_an_observation_from_a_retracted_version_is_gone_rather_than_served(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    """`channel.about` v1 read the home tab as the about panel and returned a
+    video's description as the channel's. That data is wrong rather than old,
+    so the honest answer is that it was withdrawn — 410, not 404, because the
+    observation happened and 404 would claim it never did.
+    """
+    from tubedepth.egress.control import Lane as _Lane
+
+    class Retracted:
+        kind = "channel.retracted"
+        target_type = TargetType.CHANNEL
+        lane = _Lane.YOUTUBE
+        cost = SourceCost.CHEAP
+        schema_version = "2"
+        retracted_versions = frozenset({"1"})
+        payload_model: type[BaseModel] = EchoPayload
+        default_freshness = timedelta(hours=6)
+
+        def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
+            return EchoPayload(target=target)
+
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    registry = SourceRegistry()
+    registry.register(Retracted())  # type: ignore[arg-type]
+    client = TestClient(
+        create_application(
+            database=database, payloads=PayloadStore(tmp_path / "payloads"), registry=registry
+        )
+    )
+    key = ApiKeyService(database).mint(label="test").secret
+    digest = _stored_artifact(tmp_path, database, kind="channel.retracted", version="1")
+
+    response = client.get(f"/v1/artifacts/{digest}", headers={"X-API-Key": key})
+
+    assert response.status_code == 410
+    assert response.json()["error"]["code"] == "retracted"

@@ -36,6 +36,22 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Added
 
+- **`GET /v1/artifacts/{digest}`.** The list route has always handed out
+  digests and nothing could dereference them; reaching an old payload meant
+  having kept the job id that produced it, and retention deletes artifacts
+  without touching job rows, so those two age apart. The payload comes back
+  **verbatim** — no model is in the path, so an observation an older normalizer
+  wrote still reads. `payload_fields` against `current_fields` is the honest
+  answer to what an old observation lacks: a field never collected is absent,
+  which says more than a null.
+- **`410 retracted`.** A source can declare a version whose payloads are wrong
+  rather than old — `channel.about` v1 read the home tab as the about panel —
+  and reading one is refused instead of laundered. 410 and not 404, because the
+  observation happened.
+- **`tubedepth backfill-schema-versions`.** Attributes payloads collected
+  before the version was recorded, by recomputing fingerprints against the
+  versions a kind has had. Rows that match nothing are left blank and reported
+  by kind rather than guessed at.
 - **`tubedepth capture-fixture --innertube <surface>`.** InnerTube fixtures
   had no recording path at all, so the four in the tree were made by hand and
   the redaction that strips session identity and signed `googlevideo` URLs ran

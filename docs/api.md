@@ -377,6 +377,49 @@ values mean nothing changed.
 
 ---
 
+---
+
+## `GET /v1/artifacts/{digest}`
+
+One observation, addressed by its content. This is how history is read: the
+list route hands out digests, and this is what dereferences them.
+
+```sh
+curl -s -H "X-API-Key: $KEY" localhost:8080/v1/artifacts/b9f4c0e2...
+```
+
+```json
+{
+  "digest": "b9f4c0e2...",
+  "kind": "video.metadata",
+  "target": "dQw4w9WgXcQ",
+  "fetched_at": "2026-08-19T09:12:44Z",
+  "schema_version": "1",
+  "current_schema_version": "1",
+  "payload_fields": ["chapters", "most_replayed", "tags", "view_count"],
+  "current_fields": ["chapters", "most_replayed", "published_date", "tags", "view_count"],
+  "payload": { "...": "the bytes as they were collected" }
+}
+```
+
+**The payload is returned verbatim and is never re-parsed.** A payload written
+by an older normalizer comes back as it was stored, because the original
+observation is the thing worth keeping — re-shaping it with today's model is
+how a history stops being one.
+
+`payload_fields` and `current_fields` are computed rather than declared, and
+their difference is the honest answer to "what does this old observation not
+have". A field the older version never collected is **absent** from
+`payload_fields`, which says more than a null would.
+
+**410 `retracted`** if the version that collected it is one the source has
+withdrawn — its payloads are wrong rather than merely old, and serving them as
+history would launder a known-bad observation. Not a 404: the observation
+happened, and a 404 would claim it never did.
+
+404 `not_found` for a digest this instance never stored, and for one whose
+payload has since aged out of retention.
+
 ## Pagination
 
 Both list endpoints return `cursor`, and `null` means this was the last page —
@@ -406,6 +449,7 @@ Every error is the same shape.
 | 422 | `invalid_request` | unknown kind, unparseable target, cursor this API did not issue |
 | 404 | `not_found` | no such job — or the video does not have the thing asked for |
 | 409 | `conflict` | the job exists but has not finished |
+| 410 | `retracted` | the version that collected this observation has been withdrawn |
 | 429 | `rate_limited` | over the key's allowance, or an upstream refused this address |
 | 502 | `parse_mismatch` | YouTube answered and our parser no longer understands it |
 | 502 | `upstream_error` | an upstream answered, and the answer was unusable |

@@ -8,6 +8,7 @@ drifting into two different answers for the same question.
 from __future__ import annotations
 
 import base64
+import json
 import logging
 from collections.abc import Iterator
 
@@ -35,6 +36,7 @@ from ..errors import (
     ExtractionError,
     NotFoundError,
     RateLimitedError,
+    RetractedError,
     TubedepthError,
     UnauthenticatedError,
     UpstreamError,
@@ -47,7 +49,7 @@ from ..payload_store import PayloadStore
 from ..repositories import JobRepository, JobState
 from ..services.keys import ApiKeyService, VerifiedKey
 from ..sources import SourceRegistry, default_registry
-from ..sources.registry import attempts_for
+from ..sources.registry import attempts_for, retracted_versions_of
 
 logger = logging.getLogger(__name__)
 
@@ -66,6 +68,9 @@ STATUS_BY_ERROR: tuple[tuple[type[TubedepthError], int, str], ...] = (
     (ValidationError, 422, "invalid_request"),
     (NotFoundError, status.HTTP_404_NOT_FOUND, "not_found"),
     (ConflictError, status.HTTP_409_CONFLICT, "conflict"),
+    # 410 rather than 404: the observation happened and was withdrawn, and a
+    # 404 would tell a reader building a history that it never happened.
+    (RetractedError, status.HTTP_410_GONE, "retracted"),
     # 502 rather than 500: the upstream answered, our parser did not understand
     # it. A 500 sends an operator into our tracebacks; a 502 sends them to the
     # renderer names in the message.
@@ -140,6 +145,30 @@ class ArtifactView(BaseModel):
     byte_count: int
     fetched_at: datetime
     fresh_until: datetime
+
+
+class ArtifactPayloadView(BaseModel):
+    """One stored observation, verbatim, with what a reader needs to interpret it.
+
+    The bytes are returned exactly as they were collected — no model is in this
+    path, so an old payload the current normalizer could not parse still comes
+    back rather than raising. That is the whole point of a history route: the
+    thing worth keeping is the original observation.
+    """
+
+    digest: str
+    kind: str
+    target: str
+    fetched_at: datetime
+    schema_version: str | None
+    current_schema_version: str | None
+    # Computed from the bytes and from the model, rather than declared. A field
+    # the older version never collected is simply absent here, which is a
+    # stronger and truer statement than a null — and a hand-maintained list of
+    # "what v1 lacked" would drift against data nobody can re-derive.
+    payload_fields: list[str]
+    current_fields: list[str]
+    payload: Any
 
 
 class ArtifactListView(BaseModel):
@@ -498,6 +527,67 @@ def create_application(
                 for artifact in rows
             ],
             cursor=_encode_cursor(rows[-1].fetched_at, rows[-1].identifier) if more else None,
+        )
+
+    @versioned.get("/artifacts/{digest}", response_model=ArtifactPayloadView)
+    def read_artifact(
+        digest: str,
+        open_session: Annotated[Session, Depends(get_reading_session)],
+        payloads: Annotated[PayloadStore, Depends(get_payloads)],
+        registry: Annotated[SourceRegistry, Depends(get_registry)],
+    ) -> ArtifactPayloadView:
+        """One observation from the history, addressed by its content.
+
+        `GET /v1/artifacts` has always handed out digests and nothing could
+        dereference them — reaching an old payload meant having kept the job id
+        that produced it, and retention deletes artifacts without touching job
+        rows, so those two age apart.
+
+        The bytes come back verbatim. No model is in this path, deliberately:
+        a payload written by an older normalizer that the current one would
+        reject still reads, because the original observation is the thing worth
+        keeping and re-parsing it with today's shape is how history gets lost.
+        """
+        artifact = open_session.scalars(
+            select(Artifact)
+            .where(Artifact.digest == digest)
+            .order_by(Artifact.fetched_at.desc())
+            .limit(1)
+        ).first()
+        if artifact is None:
+            raise NotFoundError(f"no artifact stored with digest: {digest}")
+
+        # A retired kind keeps its history: it has no source to ask, so nothing
+        # is retracted and nothing is claimed about the current shape.
+        try:
+            source = registry.get(artifact.kind)
+        except TubedepthError:
+            source = None
+
+        if source is not None and artifact.schema_version in retracted_versions_of(source):
+            raise RetractedError(
+                f"the {artifact.kind} observation at {digest} was collected by "
+                f"schema version {artifact.schema_version}, which is retracted: its payloads "
+                "are wrong rather than merely old"
+            )
+
+        try:
+            body = json.loads(payloads.read(artifact.digest))
+        except FileNotFoundError as error:
+            raise NotFoundError(
+                f"the payload for {digest} is no longer stored: it has aged out of retention"
+            ) from error
+
+        return ArtifactPayloadView(
+            digest=artifact.digest,
+            kind=artifact.kind,
+            target=artifact.target,
+            fetched_at=artifact.fetched_at,
+            schema_version=artifact.schema_version,
+            current_schema_version=source.schema_version if source is not None else None,
+            payload_fields=sorted(body) if isinstance(body, dict) else [],
+            current_fields=sorted(source.payload_model.model_fields) if source is not None else [],
+            payload=body,
         )
 
     @versioned.get("/jobs/{job_id}", response_model=JobView)

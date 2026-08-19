@@ -29,6 +29,18 @@
 
 ### Added
 
+- **`GET /v1/artifacts/{digest}`.** 목록 라우트는 늘 digest를 내줬는데 그걸 실제 데이터로 바꿀
+  방법이 없었다. 옛 payload에 닿으려면 그것을 만든 잡 id를 계속 갖고 있어야 했고, retention은
+  artifact를 지우면서 잡 행은 건드리지 않으므로 둘은 서로 다른 속도로 늙는다. payload는 **그대로**
+  나온다 — 이 경로에 모델이 없어서 옛 normalizer가 쓴 관측도 읽힌다. `payload_fields`와
+  `current_fields`의 차이가 "이 옛 관측에 무엇이 없는가"에 대한 정직한 답이다: 수집된 적 없는
+  필드는 아예 없고, 그것이 null보다 강한 진술이다.
+- **`410 retracted`.** 소스는 payload가 낡은 것이 아니라 틀린 버전을 선언할 수 있다 —
+  `channel.about` v1이 홈 탭을 about 패널로 읽었다 — 그리고 그런 관측은 세탁 대신 거부된다.
+  404가 아니라 410인 이유는 관측이 실제로 일어났기 때문이다.
+- **`tubedepth backfill-schema-versions`.** 버전이 기록되기 전에 수집된 payload를, kind가 거쳐온
+  버전들에 대해 fingerprint를 다시 계산해 귀속시킨다. 아무것도 맞지 않는 행은 추측하지 않고
+  비워둔 채 kind별로 보고한다.
 - **`tubedepth capture-fixture --innertube <surface>`.** InnerTube fixture는 기록 경로가 아예
   없어서, 저장소에 있는 넷은 손으로 만들어졌고 세션 신원과 서명된 `googlevideo` URL을 지우는
   redaction은 만든 사람이 기억했을 때만 돌았다. 기록은 소스가 쓰는 것과 같은 헬퍼를 거치므로,
