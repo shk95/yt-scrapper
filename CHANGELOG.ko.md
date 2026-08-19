@@ -29,6 +29,11 @@
 
 ### Added
 
+- **`tubedepth capture-fixture --innertube <surface>`.** InnerTube fixture는 기록 경로가 아예
+  없어서, 저장소에 있는 넷은 손으로 만들어졌고 세션 신원과 서명된 `googlevideo` URL을 지우는
+  redaction은 만든 사람이 기억했을 때만 돌았다. 기록은 소스가 쓰는 것과 같은 헬퍼를 거치므로,
+  fixture가 프로덕션이 실제로 받는 것이 된다. `browse-channel-about`은 의도적으로 제외했다 —
+  런타임 continuation 뒤에 있고, 이미 한 번 깨진 적 있는 표면에 대해 반쯤 맞는 fixture는 없느니만 못하다.
 - **`TUBEDEPTH_COOKIES_FILE`이 이제 troubleshooting 문서가 말하던 일을 한다.** Netscape 형식
   쿠키 jar를 가리키면 워커가 모든 추출에 실어 보낸다. 경로가 잘못되면 조용히 버리지 않고 시작할 때
   거부한다 — 오타를 무시하는 것은 아무것도 안 읽던 예전 동작과 정확히 같기 때문이다.

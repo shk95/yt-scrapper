@@ -89,6 +89,11 @@ worker:
 fixture-capture target name:
     uv run tubedepth capture-fixture {{target}} --name {{name}}
 
+# Record an InnerTube fixture: next-related, browse-channel-home, browse-community
+[group('data')]
+fixture-capture-innertube surface target name:
+    uv run tubedepth capture-fixture {{target}} --name {{name}} --innertube {{surface}}
+
 ############################################################################
 #
 #  dependencies

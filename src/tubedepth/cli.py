@@ -21,6 +21,7 @@ from .egress.transport import DirectEgress
 from .errors import TubedepthError, ValidationError
 from .fixture_capture import redact_for_fixture
 from .identifiers import normalize_target, normalize_video_identifier
+from .innertube.client import InnerTubeClient
 from .models import Job, JobState
 from .observability import configure_logging
 from .payload_store import PayloadStore
@@ -28,6 +29,7 @@ from .repositories import JobRepository
 from .retention import RetentionPolicy, RetentionService
 from .services.keys import ApiKeyService
 from .sources import default_registry
+from .sources.innertube_sources import RECORDABLE_SURFACES, record_surface
 from .sources.registry import attempts_for
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime
 from .worker import Worker
@@ -432,31 +434,49 @@ def sources() -> None:
 def capture_fixture(
     target: Annotated[str, typer.Argument(help="A video URL or bare video id")],
     name: Annotated[str, typer.Option("--name", help="Filename stem, dated by convention")],
-    directory: Annotated[Path, typer.Option("--into", help="Fixture directory")] = Path(
-        "tests/fixtures/ytdlp/video_metadata"
-    ),
+    directory: Annotated[Path | None, typer.Option("--into", help="Fixture directory")] = None,
+    innertube: Annotated[
+        str | None,
+        typer.Option(
+            "--innertube", help=f"Record a surface instead: {', '.join(RECORDABLE_SURFACES)}"
+        ),
+    ] = None,
 ) -> None:
-    """Record a real yt-dlp dump as a committable fixture.
+    """Record a real response as a committable fixture.
 
     Reaches the network on purpose, and is run by a person rather than by CI.
     The redaction is the point: see fixture_capture for what is stripped and
     why the two rules differ.
+
+    Without `--innertube` this records a yt-dlp dump. With it, an InnerTube
+    surface — which had no command at all, so the fixtures under
+    `tests/fixtures/innertube/` were made by hand and their redaction ran only
+    if whoever made them remembered to call it.
     """
-    video_id = normalize_video_identifier(target)
-    typer.echo(f"→ extracting {video_id}")
-    dump = LibraryYtdlpRuntime().extract(video_id, egress=DirectEgress())
+    if innertube is not None:
+        directory = directory or Path("tests/fixtures/innertube")
+        typer.echo(f"→ recording {innertube} for {target}")
+        body = record_surface(innertube, target, caller=InnerTubeClient(DirectEgress()))
+        summary = f"  top-level keys {len(body)}"
+    else:
+        directory = directory or Path("tests/fixtures/ytdlp/video_metadata")
+        video_id = normalize_video_identifier(target)
+        typer.echo(f"→ extracting {video_id}")
+        dump = LibraryYtdlpRuntime().extract(video_id, egress=DirectEgress())
+        body = redact_for_fixture(dump)
+        summary = (
+            f"  keys {len(dump)}  chapters {len(dump.get('chapters') or [])}"
+            f"  heatmap {len(dump.get('heatmap') or [])}"
+            f"  subtitle languages {len(dump.get('subtitles') or {})}"
+        )
 
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / f"{name}.json.gz"
-    payload = json.dumps(redact_for_fixture(dump), ensure_ascii=False, indent=1, sort_keys=True)
+    payload = json.dumps(body, ensure_ascii=False, indent=1, sort_keys=True)
     path.write_bytes(gzip.compress(payload.encode()))
 
     typer.echo(f"✓ wrote {path} ({path.stat().st_size / 1024:.0f} KB gzipped)")
-    typer.echo(
-        f"  keys {len(dump)}  chapters {len(dump.get('chapters') or [])}"
-        f"  heatmap {len(dump.get('heatmap') or [])}"
-        f"  subtitle languages {len(dump.get('subtitles') or {})}"
-    )
+    typer.echo(summary)
 
 
 @application.command()
