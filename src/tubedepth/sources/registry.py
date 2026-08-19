@@ -52,6 +52,29 @@ MAXIMUM_ATTEMPTS: Mapping[SourceCost, int] = {
 }
 
 
+def cache_parameters_of(source: DataSource) -> Mapping[str, Any]:
+    """What, besides kind and target, makes this source's answer a different answer.
+
+    Read with getattr rather than required on the protocol, for the same reason
+    `parts` is: most sources have none, and a required member would make the
+    cost of adding a source a line in every source instead of a module and a
+    registration.
+
+    An absent declaration is not a special case downstream. `fingerprint()`
+    writes `"parameters": {}` into its canonical JSON whether it is handed a
+    mapping or nothing at all, so a source that declares nothing keeps exactly
+    the fingerprint it has today, byte for byte, and its artifacts stay
+    reachable.
+
+    Declare the value, never its relationship to a default. Eliding `limit`
+    because it happens to equal DEFAULT_LIMIT would make a listing collected at
+    100 key identically to a request for 1,000 the day that constant moves —
+    which is the collision this whole change exists to prevent, rebuilt one
+    level along.
+    """
+    return dict(getattr(source, "cache_parameters", None) or {})
+
+
 def attempts_for(source: DataSource) -> int:
     """How many tries this source's jobs get. Read where a job is created."""
     return MAXIMUM_ATTEMPTS[source.cost]

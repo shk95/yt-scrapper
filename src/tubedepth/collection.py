@@ -23,6 +23,7 @@ from .payload_store import PayloadStore, StoredPayload
 from .repositories import ArtifactRepository
 from .schemas import Degradation, VideoBundle
 from .sources import SourceRegistry, default_registry
+from .sources.registry import DataSource, cache_parameters_of
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime, YtdlpRuntime
 
 logger = logging.getLogger(__name__)
@@ -63,10 +64,34 @@ class CollectionService:
     def kinds(self) -> list[str]:
         return self._registry.kinds()
 
+    def _question(self, source: DataSource, target: str) -> str:
+        """The cache key for one question, computed in exactly one place.
+
+        `collect` and `cached` are the same lookup asked from two processes —
+        the worker and the API — and a key built twice is a key that can be
+        built two ways. When they disagree the API stops matching anything the
+        worker writes, *and* keeps matching every row from before the change
+        and serving it as a 200: both failures the fingerprints docstring
+        names, at once.
+
+        Note `default_registry()` is @cache'd, so what a source declares is
+        frozen per process, and `tubedepth serve` and `tubedepth work` are
+        separate processes. Every parameter here is a module constant today so
+        they cannot disagree. The moment one becomes an env var, two units with
+        different environments compute different keys and the API answers for a
+        question the worker did not collect.
+        """
+        return fingerprint(
+            kind=source.kind,
+            target=target,
+            schema_version=source.schema_version,
+            parameters=cache_parameters_of(source),
+        )
+
     def collect(self, kind: str, target: str, *, refresh: bool = False) -> Collected:
         source = self._registry.get(kind)
         normalized = normalize_target(source.target_type, target)
-        question = fingerprint(kind=kind, target=normalized, schema_version=source.schema_version)
+        question = self._question(source, normalized)
 
         if not refresh:
             cached = self._cached(question, kind, normalized)
@@ -123,8 +148,7 @@ class CollectionService:
     def cached(self, kind: str, target: str) -> Collected | None:
         """A fresh answer if one is held, without collecting. Never fetches."""
         source = self._registry.get(kind)
-        question = fingerprint(kind=kind, target=target, schema_version=source.schema_version)
-        return self._cached(question, kind, target)
+        return self._cached(self._question(source, target), kind, target)
 
     # -- the cache -------------------------------------------------------
 

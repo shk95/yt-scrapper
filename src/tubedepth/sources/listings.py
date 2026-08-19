@@ -82,6 +82,10 @@ class _ListingSource:
 
     def __init__(self, *, limit: int = DEFAULT_LIMIT) -> None:
         self._limit = limit
+        # In the cache key. A listing capped at 100 and one capped at 1,000 are
+        # different answers to different questions, and serving the first for
+        # the second is a sweep that reports success and is missing 900 videos.
+        self.cache_parameters = {"limit": limit}
 
     def _extraction_target(self, target: str) -> str:
         raise NotImplementedError

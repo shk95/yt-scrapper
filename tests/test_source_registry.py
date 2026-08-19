@@ -120,3 +120,25 @@ def test_a_comment_harvest_is_declared_more_expensive_than_a_metadata_fetch() ->
 
     assert registry.get("video.comments").cost is SourceCost.EXPENSIVE
     assert registry.get("video.metadata").cost is SourceCost.STANDARD
+
+
+def test_every_declared_cache_parameter_survives_the_canonical_json() -> None:
+    """The cache key must not depend on a repr an object is free to change.
+
+    `fingerprint()` falls back to `default=str` for anything it cannot
+    serialise, which turns a `timedelta` or a tuple of objects into a key that
+    moves when that type's `__str__` does — a silent mass invalidation with no
+    change anyone made.
+    """
+    from tubedepth.sources import default_registry
+    from tubedepth.sources.registry import cache_parameters_of
+
+    simple = (str, int, float, bool, type(None))
+    offenders: list[str] = []
+    for kind in default_registry().kinds():
+        for name, value in cache_parameters_of(default_registry().get(kind)).items():
+            values = value if isinstance(value, list) else [value]
+            if not all(isinstance(entry, simple) for entry in values):
+                offenders.append(f"{kind}.{name}={value!r}")
+
+    assert not offenders, f"cache parameters that do not round-trip as JSON: {offenders}"

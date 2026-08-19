@@ -224,3 +224,62 @@ def test_a_recorded_artifact_names_the_schema_version_that_wrote_it(tmp_path: Pa
     with database.session() as session:
         recorded = session.query(Artifact).one()
     assert recorded.schema_version == source.schema_version
+
+
+class ParameterisedSource:
+    """A source whose answer depends on more than its kind and target."""
+
+    kind = "video.parameterised"
+    target_type = TargetType.VIDEO
+    lane = Lane.YOUTUBE
+    cost = SourceCost.STANDARD
+    schema_version = "1"
+    payload_model: type[BaseModel] = FakeListing
+    default_freshness = timedelta(hours=6)
+
+    def __init__(self, limit: int) -> None:
+        self.calls = 0
+        self.cache_parameters = {"limit": limit}
+
+    def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> FakeListing:
+        self.calls += 1
+        return FakeListing(target=target)
+
+
+def test_the_cache_check_answers_for_the_question_the_collection_recorded(tmp_path: Path) -> None:
+    """`collect` and `cached` built the same key in two places.
+
+    They are the same lookup asked from two processes — the worker and the API
+    — and fixing one without the other is worse than fixing neither: the API
+    then misses everything the worker writes, and matches every pre-change row
+    forever and serves it as a 200. Both failure modes from the fingerprints
+    docstring at once.
+    """
+    source = ParameterisedSource(limit=10)
+    service, _ = cached_service(tmp_path, source)
+    service.collect("video.parameterised", "dQw4w9WgXcQ")
+
+    held = service.cached("video.parameterised", "dQw4w9WgXcQ")
+
+    assert held is not None, "the cache check asked a different question than the collection stored"
+
+
+def test_two_sources_differing_only_in_a_parameter_do_not_share_an_artifact(
+    tmp_path: Path,
+) -> None:
+    """A listing capped at 10 is not an answer to a request for 20."""
+    narrow = ParameterisedSource(limit=10)
+    service, database = cached_service(tmp_path, narrow)
+    service.collect("video.parameterised", "dQw4w9WgXcQ")
+
+    wide = ParameterisedSource(limit=20)
+    registry = SourceRegistry()
+    registry.register(wide)  # type: ignore[arg-type]
+    CollectionService(
+        payloads=PayloadStore(tmp_path / "payloads"),
+        registry=registry,
+        database=database,
+        runtime=None,
+    ).collect("video.parameterised", "dQw4w9WgXcQ")
+
+    assert wide.calls == 1, "the wider request was served the narrower one's answer"

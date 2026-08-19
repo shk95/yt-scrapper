@@ -52,6 +52,14 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Fixed
 
+- **The cache key no longer ignores half its inputs.** A source's parameters —
+  a listing's `limit`, a comment harvest's `sort`, a transcript's language
+  preference, a bundle's parts — were frozen at construction and left out of
+  the fingerprint, so a listing capped at 100 would have answered a request for
+  1,000 the moment that cap became configurable. Six kinds' fingerprints move
+  once as a result and their caches go cold; the other five are byte-identical
+  and untouched. `collect` and `cached` now build the key in one place, because
+  fixing one without the other is worse than fixing neither.
 - **An expensive kind is queued with fewer attempts than a cheap one.**
   `Job.max_attempts` documented itself as set when a job is queued and nothing
   set it, so every kind took the column default of three — and three failed

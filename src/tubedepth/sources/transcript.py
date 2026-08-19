@@ -259,6 +259,12 @@ class TranscriptSource:
 
     def __init__(self, *, fallback_languages: Sequence[str] = FALLBACK_LANGUAGES) -> None:
         self._fallback_languages = tuple(fallback_languages)
+        # The same defect as the listing limit, one source over. Swap this order
+        # and every cached transcript answers a request that asked for a
+        # different language preference — and which language counts as the
+        # video's own words is the whole point of this source. A list because
+        # the order is a preference, not a set.
+        self.cache_parameters = {"fallback_languages": list(self._fallback_languages)}
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> Transcript:
         dump = runtime.extract(target, egress=egress)
