@@ -11,7 +11,8 @@ Python + FastAPI + SQLAlchemy + SQLite, 패키지는 `tubedepth`, 실행은 전�
 2. `gh issue list --label blocked` — 이 호스트에 없던 것이 필요해서 이전 세션이 끝내지 못한 일.
 3. `docs/status.md` — 현재 상태와 되돌리기 비싼 결정들.
 
-그다음 `README.md`의 마일스톤 표에서 일을 고른다.
+그다음 `docs/status.md`의 상태 표와 열린 이슈에서 일을 고른다. (README에는 마일스톤 표가 없다 —
+계획서의 단계는 전부 끝났고, 남은 것은 `docs/plan.md`에 기록으로만 있다.)
 
 **무언가 말이 안 되게 깨지면**, 조사하기 전에 `docs/troubleshooting.md`를 에러 문구로 grep한다.
 제목이 실제 메시지 그대로다. 처음부터 읽지 말 것 — 조회 테이블이다.
@@ -41,8 +42,20 @@ Python + FastAPI + SQLAlchemy + SQLite, 패키지는 `tubedepth`, 실행은 전�
 
 ## 워크플로
 
-**코드·주석·docstring·커밋 메시지는 전부 영어로 쓴다.** 문서(README·AGENTS·docs)의 산문은 한국어,
-기술 명사는 영어 그대로(`revision`, `egress`, `lane`, `renderer`).
+**코드·주석·docstring·커밋 메시지는 전부 영어로 쓴다.**
+
+문서는 독자에 따라 갈린다. **저장소 바깥 사람이 읽는 셋 — `README.md`, `docs/api.md`,
+`CHANGELOG.md` — 은 영어가 정본이고, 옆의 `.ko.md`가 번역이다. 둘 다 고친다.**
+한쪽만 고친 번역은 틀린 문서이고, 기계적으로 확인 가능한 부분(라우트·kind·오류 코드·버전)은
+`tests/test_documentation_is_true.py`가 양쪽에 대해 검사한다. 검사가 읽는 구간은 제목이 아니라
+`<!-- kinds:start -->` 같은 HTML 마커로 표시한다 — 제목은 번역되는 쪽이라서다.
+
+그 밖의 문서(AGENTS·status·troubleshooting·definition-of-done·releasing·plan)는 기여자용이므로
+**한국어 하나만** 둔다. 기술 명사는 어느 쪽이든 영어 그대로(`revision`, `egress`, `lane`, `renderer`).
+
+버전은 `src/tubedepth/__init__.py` 한 줄이 유일한 출처다. 올리는 절차는
+[`docs/releasing.md`](docs/releasing.md)에 있고, 그냥 올리기만 하면 테스트가 CHANGELOG와
+어긋났다고 잡는다.
 
 브랜치: `master`(릴리스) ← `dev`(통합, 기본) ← `feature/<name>`·`fix/<name>`.
 `dev`에서 갈라져 `dev`로 머지한다. `master`에 직접 커밋하지 않는다.
@@ -83,6 +96,9 @@ tool/worktree.sh done <name>
 | `src/tubedepth/services/` | 업무 규칙. CLI와 API가 공유한다 |
 | `src/tubedepth/api/` | service 위의 얇은 층. 여기에 업무 로직을 넣지 않는다 |
 | `tests/fixtures/` | 기록된 응답. 네트워크 없이 CI가 돌게 하는 것 |
+| `docs/api.md` | REST 레퍼런스. 라우트를 추가하면 여기와 `api.ko.md`도 고쳐야 CI가 통과한다 |
 | `docs/definition-of-done.md` | 마일스톤별 "끝났다"의 정의 |
+| `docs/releasing.md` | 릴리스 절차. 버전이 사는 곳도 여기 적혀 있다 |
 | `docs/status.md` | 현재 상태와 그 뒤의 결정들 |
 | `docs/troubleshooting.md` | 이미 누군가의 오후를 잡아먹은 에러들. 읽지 말고 grep |
+| `CHANGELOG.md` | 릴리스별 변경 내역. `Unreleased`에 쌓고 릴리스 때 확정한다 |
