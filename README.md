@@ -2,19 +2,37 @@
 
 YouTube Data API가 주지 않는 영상·채널 데이터를 수집하는 자체 호스팅 API.
 
-챕터, "가장 많이 본 구간" 히트맵, 태그, 정확한 업로드 시각, 자막 본문, 댓글 전량, 싫어요 추정치,
-SponsorBlock 구간, 관련 영상, 채널 About, 커뮤니티 게시물. 클라이언트가 API 키로 **작업(job)을 등록**하고
-정규화된 JSON을 받아간다.
+챕터, "가장 많이 본 구간" 히트맵, 태그, 정확한 업로드 시각, 자막 본문, 댓글 전량, SponsorBlock 구간,
+관련 영상, 채널 About, 커뮤니티 게시물. 클라이언트가 API 키로 **작업(job)을 등록**하고 정규화된 JSON을
+받아간다.
 
 ```sh
-curl -H "X-API-Key: $KEY" -X POST localhost:8080/v1/videos/dQw4w9WgXcQ/metadata
-# 202 → 폴링 → chapters, most_replayed(100버킷), tags, published_at …
+curl -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+     -d '{"kind":"video.metadata","target":"dQw4w9WgXcQ"}' localhost:8080/v1/jobs
+# 202 + job_id → 폴링 → chapters, most_replayed(100버킷), tags, published_at …
+# 이미 신선한 결과가 있으면 잡을 만들지 않고 200 + 결과
 ```
+
+## 수집할 수 있는 것
+
+| kind | 주는 것 | 공식 API로는 |
+| --- | --- | --- |
+| `video.metadata` | 챕터, 히트맵 100버킷, 태그, 정확한 업로드 시각, 라이선스, 자막 트랙 목록 | 태그는 소유자만, 나머지는 필드 없음 |
+| `video.transcript` | 자막 본문 — 영상 자체 언어로, 사람이 쓴 것 우선 | 소유자 OAuth 없이 불가 |
+| `video.comments` | 댓글 전량, `parent_id` 스레딩, 고정·하트·인증 플래그 | 가능하나 쿼터가 감당 안 됨 |
+| `video.sponsor_segments` | SponsorBlock 구간 (커뮤니티 기여, CC BY-NC-SA 4.0) | 없음 |
+| `video.related` | 관련 영상 | 없음 |
+| `video.bundle` | 위 넷을 한 번에, 빠진 것은 `degradations`에 이유와 함께 | — |
+| `channel.about` | 가입일, 국가, 외부 링크, **정확한 총 조회수**, 설명, 태그, 아바타 | 대부분 없음 |
+| `channel.community` | 커뮤니티 게시물 | 없음 |
+| `channel.videos` · `playlist.items` · `search.videos` | 목록 — `--then`으로 항목별 수집까지 팬아웃 | 가능하나 쿼터 소모 |
+
+`tubedepth sources` 또는 `GET /v1/sources`가 항상 실제 목록을 말한다.
 
 ## 왜 필요한가
 
 Data API v3는 공개 영상에 대해서도 많은 것을 감춘다. `snippet.tags`는 영상 소유자에게만 반환되고,
-자막 본문은 소유자 OAuth 없이 못 받으며, 챕터·히트맵·싫어요·관련 영상·커뮤니티 게시물은 필드 자체가 없다.
+자막 본문은 소유자 OAuth 없이 못 받으며, 챕터·히트맵·관련 영상·커뮤니티 게시물은 필드 자체가 없다.
 댓글은 있지만 쿼터 소모가 커서 대량 수집에 못 쓴다.
 
 ## 배포
@@ -72,21 +90,15 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$ID/result
 
 작업 방식은 [`AGENTS.md`](AGENTS.md)에, 현재 상태는 [`docs/status.md`](docs/status.md)에 있다.
 
-## 마일스톤
+## 상태
 
-| # | 내용 | 상태 |
-| --- | --- | --- |
-| M0 | 저장소 스캐폴딩, 훅, CI, doctor | 진행 중 |
-| M1 | 도메인 코어 + egress 골격 (네트워크 0) | |
-| M2 | 첫 yt-dlp 소스 — 영상 메타 | |
-| M3 | HTTP API + API 키 인증 | |
-| M4 | 자막 · 싫어요 · SponsorBlock | |
-| M4.5 | egress 풀 (wireproxy) + 적응 라우팅 | |
-| M5 | 댓글 수집 | |
-| M6 | 채널 · 재생목록 · 검색 | |
-| M7 | InnerTube — 관련영상 · About · 커뮤니티 | |
-| M8 | 합성 · 웹훅 · 보존 · systemd | |
-| M9 | 확장 지점 증명 (라이브 채팅 추가) | |
+계획서(M0–M9)의 모든 단계가 구현되었고, 계획에 없던 대시보드가 추가됐다.
+계획에 있었으나 **의도적으로 만들지 않은 것 둘**은 이유와 함께 기록되어 있다:
+`video.dislikes`는 제거했고(수치를 아무도 판정할 수 없어서), `channel.profile`은 취소했다
+(그 내용이 `channel.about`이 이미 하는 호출의 응답에 들어 있어서).
+
+무엇이 검증되었고 무엇이 아닌지는 [`docs/status.md`](docs/status.md)에 있다.
+그 문서와 [`docs/plan.md`](docs/plan.md)가 어긋나면 status.md가 맞다 — plan.md는 기록이지 지시가 아니다.
 
 ## Honest limits
 
@@ -130,8 +142,8 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$ID/result
 
 | 종류 | 시간당 수천 건? |
 | --- | --- |
-| 싫어요 · SponsorBlock · 캐시 히트 | 가능. 풀이 실제로 도움 되는 유일한 구간 |
-| 영상 메타 · 관련영상 · 검색 | 아마도 (직결 IP 하나로 900–1,800/시간이 계획용 밴드) |
+| SponsorBlock · 캐시 히트 | 가능. 캐시 히트가 유일하게 우리가 완전히 통제하는 축이다 |
+| 영상 메타 · 관련영상 · 검색 | 실측 8,417/시간(40건, 동시 8). 지속 부하는 미측정 |
 | 댓글 전량 수집 | **불가능.** 1,000댓글 = 50+ 요청 = 1–3분. 게다가 그 요청들이 메타 수집이 써야 할 IP 예산을 갉아먹는다 |
 
 **법적 위치.** YouTube 이용약관은 공개 API 외의 자동화 접근을 금지한다. 데이터가 공개적으로 보인다는 사실이나

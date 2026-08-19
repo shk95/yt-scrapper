@@ -707,6 +707,13 @@ serves it behind a key with a dashboard on top; systemd units and Alembic
 migrations exist. `channel.profile` was cancelled with reasons recorded, and
 `video.dislikes` was removed with reasons recorded.
 
+**Planned and not built, deliberately.** The convenience aliases —
+`/v1/videos/{id}/metadata` and friends, with `GET` meaning cache-only and
+`POST` meaning ensure — are absent. The README advertised one of them in its
+first example for a day, against a route that never existed. The `GET`/`POST`
+split is the part worth having if they are ever added: it lets a client ask
+"have you got this" without being able to trigger a fetch by accident.
+
 **Never verified, in order of how likely it is to bite.**
 
 1. **Nothing here is measured beyond a few hundred jobs.** Every figure in this
