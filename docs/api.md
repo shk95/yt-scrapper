@@ -522,7 +522,9 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/artifacts/b9f4c0e2...
   "digest": "b9f4c0e2...",
   "kind": "video.metadata",
   "target": "dQw4w9WgXcQ",
-  "fetched_at": "2026-08-19T09:12:44Z",
+  "observations": 9,
+  "first_fetched_at": "2026-08-19T15:12:56Z",
+  "fetched_at": "2026-08-19T23:24:55Z",
   "schema_version": "1",
   "current_schema_version": "1",
   "payload_fields": ["chapters", "most_replayed", "tags", "view_count"],
@@ -530,6 +532,14 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/artifacts/b9f4c0e2...
   "payload": { "...": "the bytes as they were collected" }
 }
 ```
+
+**A digest is not one observation.** The store is content-addressed, so a
+video whose counts have not moved records a new row against the same digest —
+which is what makes equal digests readable as "nothing changed", and which the
+sampler produces by design. `observations` is how many rows share these bytes
+and `first_fetched_at` is the earliest of them, so the pair says the useful
+thing: this exact payload was what the video looked like across that span.
+`fetched_at` is the most recent.
 
 **The payload is returned verbatim and is never re-parsed.** A payload written
 by an older normalizer comes back as it was stored, because the original

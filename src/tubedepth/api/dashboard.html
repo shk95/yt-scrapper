@@ -384,6 +384,13 @@ async function submitMany(kind, targets, refresh) {
     const { queued, held } = answer.body;
     say(`queued ${queued.length} of ${targets.length}`
       + (held.length ? `; ${held.length} already held` : ""));
+    if (held.length) {
+      // The batch answers with a digest per held target rather than a payload,
+      // so the useful thing to do with them is offer to read one.
+      $("said").innerHTML += " — " + held.map((one) =>
+        `<span class="digest" data-digest="${escape(one.digest)}">${escape(one.target)}</span>`
+      ).join(", ");
+    }
     await load();
   } catch (error) {
     say(error.message, true);
@@ -403,7 +410,25 @@ $("submit").onclick = () => {
 };
 $("new-target").onkeydown = (event) => { if (event.key === "Enter") $("submit").click(); };
 
+async function openDigest(digest) {
+  const answer = await api(`/v1/artifacts/${digest}`);
+  const held = answer.body;
+  const missing = held.current_fields.filter((one) => !held.payload_fields.includes(one));
+  show(
+    `${held.kind} — ${held.target} @ schema ${held.schema_version ?? "unrecorded"}`
+      + ` · ${held.observations} observation${held.observations === 1 ? "" : "s"}`
+      + (missing.length ? ` · absent: ${missing.join(", ")}` : ""),
+    held,
+  );
+}
+
 // Delegated, because the rows are replaced on every refresh.
+$("said").onclick = async (event) => {
+  const cell = event.target.closest("[data-digest]");
+  if (!cell) return;
+  try { await openDigest(cell.dataset.digest); } catch (error) { say(error.message, true); }
+};
+
 $("records").onclick = async (event) => {
   const button = event.target.closest("[data-do]");
   const cell = event.target.closest("[data-digest]");
@@ -427,8 +452,7 @@ $("records").onclick = async (event) => {
         await submit(kind, target, true);
       }
     } else if (cell) {
-      const answer = await api(`/v1/artifacts/${cell.dataset.digest}`);
-      show(`${answer.body.kind} — ${answer.body.target} @ schema ${answer.body.schema_version ?? "unrecorded"}`, answer.body);
+      await openDigest(cell.dataset.digest);
     }
   } catch (error) {
     say(error.message, true);

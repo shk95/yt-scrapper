@@ -1033,3 +1033,47 @@ def test_an_observation_whose_version_is_unrecorded_is_not_claimed_to_be_fine(
         "an unattributed observation was served as though known good"
     )
     assert "backfill-schema-versions" in response.json()["error"]["message"]
+
+
+def test_a_shared_digest_says_how_many_observations_it_covers(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    """Identical bytes are one file, and that is half this store.
+
+    Content addressing means a video whose counts have not moved records a new
+    row against the same digest — which `GET /v1/artifacts` teaches readers to
+    expect and which the hourly sampler produces by design. On the working
+    store 756 of 1,556 rows share a digest, one of them across nine
+    observations spanning eight hours.
+
+    Answering with only the newest `fetched_at` throws that away and quietly
+    misdates every older duplicate. Reporting the span says the thing a series
+    actually wants: nothing changed between these two times.
+    """
+    from tubedepth.models import Artifact, utcnow
+
+    client, key, database = api
+    payloads = PayloadStore(tmp_path / "payloads")
+    stored = payloads.put("video.echo", b'{"target": "dQw4w9WgXcQ", "unchanged": true}')
+    first = utcnow() - timedelta(hours=3)
+    with database.session() as session:
+        for offset in (3, 2, 1):
+            session.add(
+                Artifact(
+                    kind="video.echo",
+                    target="dQw4w9WgXcQ",
+                    fingerprint="fp",
+                    schema_version="1",
+                    digest=stored.digest,
+                    byte_count=stored.byte_count,
+                    fetched_at=utcnow() - timedelta(hours=offset),
+                    fresh_until=utcnow(),
+                )
+            )
+
+    body = client.get(f"/v1/artifacts/{stored.digest}", headers={"X-API-Key": key}).json()
+
+    assert body["observations"] == 3
+    assert body["first_fetched_at"] is not None
+    assert body["first_fetched_at"][:13] == first.isoformat()[:13]
+    assert body["fetched_at"] > body["first_fetched_at"]

@@ -484,7 +484,9 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/artifacts/b9f4c0e2...
   "digest": "b9f4c0e2...",
   "kind": "video.metadata",
   "target": "dQw4w9WgXcQ",
-  "fetched_at": "2026-08-19T09:12:44Z",
+  "observations": 9,
+  "first_fetched_at": "2026-08-19T15:12:56Z",
+  "fetched_at": "2026-08-19T23:24:55Z",
   "schema_version": "1",
   "current_schema_version": "1",
   "payload_fields": ["chapters", "most_replayed", "tags", "view_count"],
@@ -492,6 +494,12 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/artifacts/b9f4c0e2...
   "payload": { "...": "수집된 그대로의 바이트" }
 }
 ```
+
+**digest 하나는 관측 하나가 아니다.** 저장소는 내용 주소 방식이라, 수치가 움직이지 않은 영상은
+같은 digest에 새 행을 남긴다 — digest가 같으면 "아무것도 안 변했다"로 읽히는 이유가 그것이고,
+샘플러가 설계상 만들어내는 상황이다. `observations`는 이 바이트를 공유하는 행의 수이고
+`first_fetched_at`은 그중 가장 이른 것이다. 둘을 합치면 쓸모 있는 진술이 된다: 이 payload가
+그 기간 동안 이 영상의 모습이었다. `fetched_at`은 가장 최근이다.
 
 **payload는 그대로 돌려주며 다시 파싱하지 않는다.** 옛 normalizer가 쓴 payload도 저장된 모습
 그대로 나온다. 보관할 가치가 있는 것은 원래의 관측이고, 오늘의 모델로 다시 모양을 잡는 것이

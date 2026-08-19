@@ -194,6 +194,15 @@ class ArtifactPayloadView(BaseModel):
     digest: str
     kind: str
     target: str
+    # How many observations recorded these exact bytes, and when the first of
+    # them was. A digest is not one observation: the store is content-addressed,
+    # so a video whose counts have not moved records a new row against the same
+    # digest — half the rows in a store the sampler has been running against.
+    # Answering with only the newest `fetched_at` misdates every older
+    # duplicate, and the span is the more useful fact anyway: nothing changed
+    # between these two times.
+    observations: int
+    first_fetched_at: datetime | None
     fetched_at: datetime
     schema_version: str | None
     current_schema_version: str | None
@@ -747,12 +756,14 @@ def create_application(
         reject still reads, because the original observation is the thing worth
         keeping and re-parsing it with today's shape is how history gets lost.
         """
-        artifact = open_session.scalars(
-            select(Artifact)
-            .where(Artifact.digest == digest)
-            .order_by(Artifact.fetched_at.desc())
-            .limit(1)
-        ).first()
+        observed = list(
+            open_session.scalars(
+                select(Artifact)
+                .where(Artifact.digest == digest)
+                .order_by(Artifact.fetched_at.desc())
+            ).all()
+        )
+        artifact = observed[0] if observed else None
         if artifact is None:
             raise NotFoundError(f"no artifact stored with digest: {digest}")
 
@@ -793,6 +804,8 @@ def create_application(
             digest=artifact.digest,
             kind=artifact.kind,
             target=artifact.target,
+            observations=len(observed),
+            first_fetched_at=observed[-1].fetched_at,
             fetched_at=artifact.fetched_at,
             schema_version=artifact.schema_version,
             current_schema_version=source.schema_version if source is not None else None,
