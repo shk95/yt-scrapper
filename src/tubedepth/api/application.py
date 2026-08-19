@@ -47,6 +47,7 @@ from ..payload_store import PayloadStore
 from ..repositories import JobRepository, JobState
 from ..services.keys import ApiKeyService, VerifiedKey
 from ..sources import SourceRegistry, default_registry
+from ..sources.registry import attempts_for
 
 logger = logging.getLogger(__name__)
 
@@ -369,6 +370,10 @@ def create_application(
             target=target,
             api_key_id=api_key.identifier,
             refresh=submission.refresh,
+            # How many tries a kind is worth is a property of what collecting
+            # it costs, which the registry knows and a submitter does not — so
+            # it is not a field on the submission.
+            max_attempts=attempts_for(source),
             webhook_url=str(submission.webhook_url) if submission.webhook_url else None,
         )
         open_session.add(job)

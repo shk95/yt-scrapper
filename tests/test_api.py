@@ -659,3 +659,52 @@ def test_the_dashboard_never_embeds_a_key(api: tuple[TestClient, str, Database])
 
     assert key not in client.get("/").text
     assert "ytd_" not in client.get("/").text
+
+
+def test_a_submission_carries_the_bound_its_kind_deserves(tmp_path: Path) -> None:
+    """The API is the third place a job is constructed, and the easiest to miss.
+
+    A client cannot ask for a retry budget and should not: how many times a
+    kind is worth trying is a property of what collecting it costs, which the
+    registry knows and the submitter does not.
+    """
+
+    class ExpensivePayload(BaseModel):
+        target: str
+
+    class ExpensiveSource:
+        kind = "video.expensive"
+        target_type = TargetType.VIDEO
+        lane = Lane.YOUTUBE
+        cost = SourceCost.EXPENSIVE
+        schema_version = "1"
+        payload_model: type[BaseModel] = ExpensivePayload
+        default_freshness = timedelta(hours=6)
+
+        def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> ExpensivePayload:
+            return ExpensivePayload(target=target)
+
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    registry = SourceRegistry()
+    registry.register(EchoSource())  # type: ignore[arg-type]
+    registry.register(ExpensiveSource())  # type: ignore[arg-type]
+    client = TestClient(
+        create_application(
+            database=database, payloads=PayloadStore(tmp_path / "payloads"), registry=registry
+        )
+    )
+    key = ApiKeyService(database).mint(label="test").secret
+
+    for kind in ("video.expensive", "video.echo"):
+        client.post(
+            "/v1/jobs",
+            json={"kind": kind, "target": "dQw4w9WgXcQ"},
+            headers={"X-API-Key": key},
+        )
+
+    with database.session() as session:
+        bounds = {job.kind: job.max_attempts for job in session.query(Job).all()}
+    assert bounds["video.expensive"] < bounds["video.echo"], (
+        f"the expensive kind was submitted with as many tries as the standard one: {bounds}"
+    )

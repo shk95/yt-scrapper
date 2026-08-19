@@ -40,7 +40,7 @@ from .repositories import JobRepository
 from .retrying import backoff_for_attempt, is_retryable
 from .schemas import VideoListing
 from .sources import SourceRegistry, default_registry
-from .sources.registry import SourceCost
+from .sources.registry import SourceCost, attempts_for
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime, YtdlpRuntime
 from .webhooks import WebhookSender
 
@@ -410,10 +410,16 @@ class Worker:
         undecided on purpose rather than settled by whichever behaviour fell
         out; the watch list in the trend work is what should settle it.
         """
-        self._registry.get(kind)
+        source = self._registry.get(kind)
         with self._database.session() as session:
             for video in listing.videos:
-                session.add(Job(kind=kind, target=video.video_id))
+                session.add(
+                    Job(
+                        kind=kind,
+                        target=video.video_id,
+                        max_attempts=attempts_for(source),
+                    )
+                )
         return len(listing.videos)
 
     def _fail_or_retry(self, identifier: str, kind: str, error: TubedepthError) -> None:

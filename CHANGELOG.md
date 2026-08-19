@@ -36,6 +36,12 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Fixed
 
+- **An expensive kind is queued with fewer attempts than a cheap one.**
+  `Job.max_attempts` documented itself as set when a job is queued and nothing
+  set it, so every kind took the column default of three — and three failed
+  comment harvests against one target spend around a hundred requests of the
+  one per-address budget everything here competes for. Expensive kinds now get
+  two; cheap and standard keep the three they had.
 - **`tubedepth work --once` delivers its callbacks and reaps stale leases.**
   It called `run_once`, which is the primitive and does neither, so the one
   invocation with no next run to catch up was the one that skipped the

@@ -35,6 +35,28 @@ class SourceCost(StrEnum):
     EXPENSIVE = "expensive"  # minutes, dozens of requests
 
 
+# How many times a job of each cost is worth trying, applied where the job is
+# queued. `Job.max_attempts` said this was done from the day the column was
+# written and nothing did it, so every kind took the column default of three:
+# a comment harvest is dozens of requests, and three of them against one target
+# spend around a hundred requests of the single per-address budget everything
+# here competes for — on an address that an UpstreamError suggests is already
+# in trouble.
+#
+# Cheap and standard keep the three they have. Only the expensive case changes,
+# because only the expensive case was the argument.
+MAXIMUM_ATTEMPTS: Mapping[SourceCost, int] = {
+    SourceCost.CHEAP: 3,
+    SourceCost.STANDARD: 3,
+    SourceCost.EXPENSIVE: 2,
+}
+
+
+def attempts_for(source: DataSource) -> int:
+    """How many tries this source's jobs get. Read where a job is created."""
+    return MAXIMUM_ATTEMPTS[source.cost]
+
+
 @runtime_checkable
 class DataSource(Protocol):
     """One kind of data, fetched and normalized.

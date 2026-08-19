@@ -679,3 +679,38 @@ def test_a_video_with_nothing_to_collect_does_not_slow_the_route_down(
 
     assert controller.window("direct", Lane.YOUTUBE) == widened
     assert controller.is_available("direct", Lane.YOUTUBE)
+
+
+def test_the_jobs_a_listing_fans_out_carry_their_own_kinds_bound(tmp_path: Path) -> None:
+    """The fan-out is where forgetting this is most expensive.
+
+    One channel becomes a job per video it holds, so a bound that is not
+    applied here is not applied a hundred times — and `--then video.comments`
+    is the shape that turns one queued channel into a hundred harvests.
+    """
+    listing = ListingSource()
+    expensive = EchoSource()
+    expensive.kind = "video.expensive"  # type: ignore[misc]
+    expensive.cost = SourceCost.EXPENSIVE  # type: ignore[misc]
+    database = Database(tmp_path / "tubedepth.db")
+    database.create_schema()
+    worker = Worker(
+        database=database,
+        registry=_registry(listing, expensive),
+        payloads=PayloadStore(tmp_path / "payloads"),
+        name="worker-1",
+        concurrency=1,
+    )
+    with database.session() as session:
+        session.add(Job(kind="channel.fake", target="@someone", follow_up_kind="video.expensive"))
+
+    worker.run_once()
+
+    with database.session() as session:
+        bounds = {
+            job.max_attempts
+            for job in session.query(Job).filter(Job.kind == "video.expensive").all()
+        }
+    assert bounds and bounds != {3}, (
+        f"the follow-up jobs took the column default instead of their kind's bound: {bounds}"
+    )

@@ -236,3 +236,28 @@ def test_work_once_takes_one_job_and_leaves_the_rest(tmp_path: Path) -> None:
     with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
         states = dict(connection.execute("SELECT state, count(*) FROM jobs GROUP BY state"))
     assert states == {"failed": 1, "queued": 1}, f"--once did not stop after one job: {states}"
+
+
+def test_an_expensive_kind_is_queued_with_fewer_attempts_than_a_standard_one(
+    tmp_path: Path,
+) -> None:
+    """`Job.max_attempts` says it is "set when the job is queued". Nothing set it.
+
+    So a comment harvest — dozens of requests and minutes of wall clock by its
+    own docstring — got the same three tries as a two-second metadata fetch,
+    and an upstream failure spent three full harvests against one target out
+    of the single per-address budget that caps this system.
+    """
+    runner.invoke(
+        application, ["enqueue", "video.comments", "dQw4w9WgXcQ", "--data-dir", str(tmp_path)]
+    )
+    runner.invoke(
+        application, ["enqueue", "video.metadata", "dQw4w9WgXcQ", "--data-dir", str(tmp_path)]
+    )
+
+    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
+        attempts = dict(connection.execute("SELECT kind, max_attempts FROM jobs"))
+
+    assert attempts["video.comments"] < attempts["video.metadata"], (
+        f"an expensive kind was queued with as many tries as a standard one: {attempts}"
+    )
