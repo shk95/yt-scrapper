@@ -24,12 +24,21 @@ def upgrade() -> None:
         # fails on every database that already exists — empty or not. The same
         # rule is written down in Database._add_column, which learned it first.
         #
+        # `sa.false()` rather than `sa.text("0")`, which is what this said until
+        # the chain was first run against PostgreSQL. A literal 0 is what SQLite
+        # needs and PostgreSQL rejects outright — `column "refresh" is of type
+        # boolean but default expression is of type integer`, with no implicit
+        # cast to save it. `sa.false()` is rendered by the dialect: `0` on
+        # SQLite, `false` on PostgreSQL, so one revision is correct on both
+        # while both exist. `tests/test_postgres_migrations.py` is what keeps
+        # the next revision honest about it.
+        #
         # It is left in place rather than dropped afterwards. Every existing
         # row means a submission that never asked to bypass the cache, which is
-        # exactly what 0 says, and a default that stays makes an INSERT written
-        # without this column keep working instead of failing later.
+        # exactly what false says, and a default that stays makes an INSERT
+        # written without this column keep working instead of failing later.
         batch_op.add_column(
-            sa.Column("refresh", sa.Boolean(), nullable=False, server_default=sa.text("0"))
+            sa.Column("refresh", sa.Boolean(), nullable=False, server_default=sa.false())
         )
 
 

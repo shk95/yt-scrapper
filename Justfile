@@ -50,6 +50,37 @@ test:
 contract:
     uv run pytest -m live
 
+# The migration checks against a real PostgreSQL server, which this project is
+# moving to (`docs/status.md`). Not part of `just check`: that suite must stay
+# runnable with nothing installed, and a missing container is not a failing
+# change. It brings the server up with `deploy/postgres-bootstrap.sql`, the
+# same file a real deployment runs, so what is checked is the shape production
+# has — including the `search_path` that decides where `alembic_version` lands.
+
+# Start a throwaway PostgreSQL, run the migration checks against it, remove it
+[group('repository')]
+postgres:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    name=tubedepth-pg-check
+    trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    docker run -d --name "$name" -e POSTGRES_PASSWORD=fleet -e POSTGRES_USER=fleet \
+        -e POSTGRES_DB=fleet -p 55432:5432 postgres:18-alpine >/dev/null
+    for _ in $(seq 1 60); do
+        docker exec "$name" pg_isready -U fleet -q 2>/dev/null && break
+        sleep 1
+    done
+    docker exec -i "$name" psql -U fleet -d fleet -v ON_ERROR_STOP=1 \
+        -v password="'check'" -q < deploy/postgres-bootstrap.sql
+    # Harness only, and deliberately not in the bootstrap file: the tests drop
+    # and recreate the schema between cases so a half-applied migration cannot
+    # decide what the next one starts from. In production the service role has
+    # no business creating schemas.
+    docker exec "$name" psql -U fleet -d fleet -q -c 'GRANT CREATE ON DATABASE fleet TO tubedepth'
+    TUBEDEPTH_TEST_POSTGRES_URL='postgresql+psycopg://tubedepth:check@localhost:55432/fleet' \
+        tool/checks/postgres
+
 ############################################################################
 #
 #  running it

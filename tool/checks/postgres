@@ -1,0 +1,27 @@
+#!/bin/sh
+# The migration checks that need a real PostgreSQL server.
+#
+# Separate from `tool/checks/test` on purpose. That one is offline by
+# construction and must stay runnable on a laptop with nothing installed; this
+# one needs a server, so making it part of the default check would turn a
+# missing container into a red build for everyone who is not working on the
+# migration.
+#
+# It is still a check rather than something you remember to run: CI runs it in
+# a service container, and `just postgres` starts one locally. `decisions/003`
+# is about capabilities with no caller — this is the caller.
+#
+# TUBEDEPTH_TEST_POSTGRES_URL names the server. Without it the tests skip with
+# a message rather than fail, so a partial environment says what is missing.
+
+set -e
+. tool/checks/prerequisite
+require_command uv
+
+if [ -z "$TUBEDEPTH_TEST_POSTGRES_URL" ]; then
+    echo "TUBEDEPTH_TEST_POSTGRES_URL is not set; run 'just postgres' instead" >&2
+    exit 1
+fi
+
+uv sync --extra dev --extra postgres --frozen
+uv run pytest -m postgres

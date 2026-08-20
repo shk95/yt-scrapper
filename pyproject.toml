@@ -35,6 +35,14 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+# The driver is an extra rather than a dependency because this project runs on
+# SQLite today and PostgreSQL is where it is going (`docs/status.md`). An extra
+# lets `tests/test_postgres_migrations.py` and a PostgreSQL deployment install
+# it without putting a compiled driver in the path of anyone running the
+# SQLite one. It moves into `dependencies` at the cutover, not before.
+postgres = [
+  "psycopg[binary]>=3.2,<4",
+]
 dev = [
   "pytest>=8,<9",
   "pytest-asyncio>=0.24,<2",
@@ -78,10 +86,11 @@ testpaths = ["tests"]
 # project talks to YouTube, and a suite that actually does so is red on any
 # datacenter address for reasons unrelated to the change under test. A check
 # that is red for unrelated reasons is one people learn to ignore.
-addopts = "-q -m 'not live'"
+addopts = "-q -m 'not live and not postgres'"
 asyncio_mode = "auto"
 markers = [
   "live: reaches YouTube or a third-party service; never runs in CI. Use `just contract`.",
+  "postgres: needs a PostgreSQL server. Use `just postgres`; CI runs it in a service container.",
 ]
 
 [tool.coverage.run]

@@ -15,6 +15,10 @@ ALTER ROLE tubedepth SET search_path = tubedepth;
 REVOKE ALL ON SCHEMA public FROM PUBLIC;
 ```
 
+이 저장소에서는 `deploy/postgres-bootstrap.sql`이 그 파일이고, `just postgres`와 CI가 **같은 파일로**
+서버를 세운 뒤 마이그레이션을 검사한다. 문서에만 있는 셋업은 배포와 갈라지고, 갈라진 것은
+배포일에 발견된다.
+
 논리 경계는 강제될 때만 경계다. 같은 롤과 같은 `public`을 공유하면 그건 명명 규칙일 뿐이고,
 여섯 달 뒤 누군가 경계를 넘는 조인을 하나 쓴다. 그때는 다른 서비스가 이미 그 조인에
 의존하므로 되돌릴 수 없다.
@@ -24,7 +28,7 @@ REVOKE ALL ON SCHEMA public FROM PUBLIC;
 ## 1. 가장 위험 — autogenerate가 남의 테이블을 지운다
 
 ```python
-context.configure(..., version_table_schema="tubedepth", include_schemas=False)
+context.configure(..., include_schemas=False)
 ```
 
 Alembic의 autogenerate는 내 모델과 **데이터베이스에 실제로 있는 것**을 비교한다. 연결이 다른
@@ -32,15 +36,29 @@ Alembic의 autogenerate는 내 모델과 **데이터베이스에 실제로 있�
 생성한다.** 리뷰에서 걸린다고 생각하기 쉽지만 생성된 마이그레이션은 잘 안 읽힌다. 이 목록에서
 **다른 팀의 데이터를 지우는 유일한 항목**이다.
 
-그래서 0번이 취향이 아니다 — 스키마 분리가 autogenerate를 안전하게 만드는 장치다.
+그래서 0번이 취향이 아니다 — 스키마 분리가 autogenerate를 안전하게 만드는 장치다. `search_path`가
+`tubedepth`뿐이면 리플렉션이 남의 테이블을 아예 못 보고, `include_schemas=False`가 그 범위를
+넓히지 않겠다는 선언이다.
 
-**확인.** `alembic revision --autogenerate`를 한 번 돌려 `drop_table`이 없는지 본다.
+**`version_table_schema`는 여기 같이 쓰지 않는다.** 처음 이 문서는 둘을 함께 적었는데, 실제로
+돌려보니 그 조합이 **`drop_table('alembic_version')`을 만들어낸다.** alembic은 설정된 스키마와
+리플렉션된 스키마를 비교해서 자기 버전 테이블을 제외하는데, `search_path` 아래의 리플렉션은
+`None`을 보고하므로 `"tubedepth" != None`이 되어 제외에 실패한다. 스퓨리어스 `drop_table`을
+막으려던 설정이 하나를 만든다. 0번의 `search_path`만으로 버전 테이블은 이미 자기 스키마에
+들어가므로 **둘은 대안이지 짝이 아니다.**
+
+**확인.** `alembic revision --autogenerate`를 한 번 돌려 `drop_table`이 없는지 본다. 이 저장소에서는
+`tests/test_postgres_migrations.py`가 그것을 매번 한다.
 
 ## 2. `alembic_version`을 스키마마다 분리한다
 
 기본값은 `public.alembic_version`이고, 서비스가 여럿이면 **같은 한 줄을 서로 덮어쓴다.** 그러면
 A의 마이그레이션이 B의 리비전을 head로 알고 이미 적용된 것을 다시 돌리거나 건너뛴다. 조용히
 깨지고, 알아챘을 때는 어디까지 적용됐는지가 추측이 된다.
+
+분리하는 방법은 **0번의 `search_path` 하나면 된다** — 확인했다. 별도 설정이 아니라 1번에서 쓰지
+말라고 한 그 설정의 대안이다. 다만 `search_path`에 기대는 만큼, 롤 설정이 빠지면 테이블이 조용히
+`public`으로 간다. 그래서 이건 문서가 아니라 테스트가 지켜야 한다.
 
 **확인.** `\dt *.alembic_version` — 스키마마다 하나씩 있어야 한다.
 
@@ -117,7 +135,8 @@ Postgres에서도 유지한다.
 ## 도입 체크리스트
 
 - [ ] 롤·스키마·`search_path` (0)
-- [ ] `version_table_schema` + `include_schemas=False` (1, 2)
+- [ ] `include_schemas=False` (1) — `version_table_schema`는 **쓰지 않는다**
+- [ ] `alembic_version`이 서비스 스키마에 있는지, 테스트로 (2)
 - [ ] autogenerate 한 번 돌려 `drop_table` 없는지 (1)
 - [ ] 최대 커넥션 계산해서 함대 합계에 더하기 (3)
 - [ ] `idle_in_transaction_session_timeout` (4)
