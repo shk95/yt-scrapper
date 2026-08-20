@@ -11,8 +11,21 @@ Python + FastAPI + SQLAlchemy + SQLite, 패키지는 `tubedepth`, 실행은 전�
 2. `gh issue list --label blocked` — 이 호스트에 없던 것이 필요해서 이전 세션이 끝내지 못한 일.
 3. `docs/status.md` — 현재 상태와 되돌리기 비싼 결정들.
 
-그다음 `docs/status.md`의 상태 표와 열린 이슈에서 일을 고른다. (README에는 마일스톤 표가 없다 —
-계획서의 단계는 전부 끝났고, 남은 것은 `docs/plan.md`에 기록으로만 있다.)
+## 일을 고르는 곳
+
+**`gh api repos/:owner/:repo/milestones` — 마일스톤이 순서를 가진 일의 목록이다.** 각 마일스톤의
+description이 왜 그 일이 존재하는지를 말하고, 이슈 본문이 무엇을 해야 하는지를 말한다. 마일스톤에
+없는 열린 이슈는 순서가 없는 단독 작업이다.
+
+`docs/plan.md`의 M0–M9는 **전부 끝났고 기록으로만 남아 있다** — 거기서 일을 고르지 않는다.
+
+**이슈와 `docs/status.md`는 역할이 다르다.** 이슈가 상태를 갖고(무엇이 열려 있고 누가 무엇을
+하는지), status.md가 논리를 갖는다(왜 그렇게 하기로 했는지, 무엇이 측정되었는지). 한쪽만 보면
+"무엇"이나 "왜" 중 하나가 없다. 새 이슈를 열 때는 status.md의 해당 절을 링크하고, 되돌리기 비싼
+결정을 내렸으면 status.md에 적는다 — 이슈는 닫히면 읽히지 않는다.
+
+**링크는 절대 URL로 쓴다.** 이슈 본문의 `../blob/dev/…`는 이슈 페이지에서는 풀리지만 알림 메일과
+API로 읽는 쪽에서는 풀리지 않는다.
 
 **무언가 말이 안 되게 깨지면**, 조사하기 전에 `docs/troubleshooting.md`를 에러 문구로 grep한다.
 제목이 실제 메시지 그대로다. 처음부터 읽지 말 것 — 조회 테이블이다.
@@ -103,5 +116,6 @@ tool/worktree.sh done <name>
 | `docs/definition-of-done.md` | 마일스톤별 "끝났다"의 정의 |
 | `docs/releasing.md` | 릴리스 절차. 버전이 사는 곳도 여기 적혀 있다 |
 | `docs/status.md` | 현재 상태와 그 뒤의 결정들 |
+| `docs/shared-postgres.md` | 여러 서비스가 PostgreSQL 하나를 공유할 때의 규약. 함대 공통이라 이 저장소 밖에도 적용된다 |
 | `docs/troubleshooting.md` | 이미 누군가의 오후를 잡아먹은 에러들. 읽지 말고 grep |
 | `CHANGELOG.md` | 릴리스별 변경 내역. `Unreleased`에 쌓고 릴리스 때 확정한다 |

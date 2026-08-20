@@ -124,6 +124,7 @@ API는 기본적으로 **loopback에만** 바인딩한다. 이 프로젝트의 �
 | [`docs/api.ko.md`](docs/api.ko.md) | REST 레퍼런스 — 엔드포인트, 오류 코드, 웹훅 계약 |
 | [`docs/status.md`](docs/status.md) | 현재 상태와 그 뒤의 결정들 |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | 이미 누군가의 오후를 잡아먹은 에러들. 읽지 말고 grep |
+| [`docs/shared-postgres.md`](docs/shared-postgres.md) | 다른 스크래퍼들과 공유하는 PostgreSQL 인스턴스의 규약 |
 | [`CHANGELOG.ko.md`](CHANGELOG.ko.md) | 릴리스별 변경 내역 |
 | [`docs/releasing.md`](docs/releasing.md) | 릴리스를 내는 절차 |
 | [`AGENTS.md`](AGENTS.md) | 이 저장소에서 작업하는 법 |
@@ -199,7 +200,7 @@ API는 기본적으로 **loopback에만** 바인딩한다. 이 프로젝트의 �
 | 종류 | 시간당 수천 건? |
 | --- | --- |
 | SponsorBlock · 캐시 히트 | 가능. 캐시 히트가 유일하게 우리가 완전히 통제하는 축이다 |
-| 영상 메타 · 관련영상 · 검색 | 실측 8,417/시간(40건, 동시 8). 지속 부하는 미측정 |
+| 영상 메타 · 관련영상 · 검색 | **지속 실측 ~3,100/시간**(474건, 실패 0, 430초, 동시 8). 40건 버스트는 8,417/시간까지 가는데, 그건 버스트가 재는 값이다 |
 | 댓글 전량 수집 | **불가능.** 1,000댓글 = 50+ 요청 = 1–3분. 게다가 그 요청들이 메타 수집이 써야 할 IP 예산을 갉아먹는다 |
 
 **법적 위치.** YouTube 이용약관은 공개 API 외의 자동화 접근을 금지한다. 데이터가 공개적으로 보인다는 사실이나
@@ -212,8 +213,13 @@ API는 기본적으로 **loopback에만** 바인딩한다. 이 프로젝트의 �
 **검증된 것과 아닌 것.** 계획 단계에서 이 머신에서 직접 확인: yt-dlp 78키, 자막 json3 취득, 댓글 20건 6.7초,
 SponsorBlock 200/404 양쪽, InnerTube `/next`·`/browse` 도달,
 SQLite 3.46.1, wireproxy 1.1.3 가용, 메타 추출 병렬 4건 3.11초.
-**아직 확인하지 않음**: 지속 부하에서의 봇 검사 임계, PO token 조건, **실제 VPN egress를 통한 요청**
-(config가 아직 없어 한 번도 프록시로 나가본 적 없다), AIMD의 실부하 수렴 거동, 장시간 다중 워커 운용.
+
+그 뒤 지속 부하에서: 474건, 실패 0, AIMD 창은 상한에 붙었고 격리 연속 카운트는 0 — 이 속도에서
+컨트롤러는 진동하지 않고 수렴하며, 봇 검사에는 닿지 않았다. **여전히 확인하지 않음**: 봇 검사 임계가
+실제로 어디인지, PO token 조건, **실제 VPN egress를 통한 요청**(config가 아직 없어 한 번도 프록시로
+나가본 적 없다), 장시간 다중 워커 운용. 미검증으로 남은 것들은 여기 서술로만 두지 않고
+[`verification`](https://github.com/slopindustries/yt-scrapper/issues?q=is%3Aissue+is%3Aopen+label%3Averification)
+라벨의 이슈로 추적한다.
 
 ## 라이선스
 
