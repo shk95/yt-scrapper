@@ -17,6 +17,8 @@
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-08-21
+
 ### Fixed
 
 - **외부 서버를 상대로 한 `docker compose up`이 local 프로파일의 비밀번호를
@@ -310,7 +312,8 @@
 - 워커가 실행 중 리스를 갱신한다. 긴 댓글 수집이 죽은 것으로 회수되어 재시도되던 문제.
 - 계획서에 있었으나 아무도 넣지 않았던 조회 인덱스.
 
-[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/slopindustries/yt-scrapper/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/slopindustries/yt-scrapper/releases/tag/v0.1.0
