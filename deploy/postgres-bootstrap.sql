@@ -72,8 +72,32 @@ ALTER DEFAULT PRIVILEGES FOR ROLE tubedepth_owner IN SCHEMA tubedepth
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO tubedepth_runtime;
 ALTER DEFAULT PRIVILEGES FOR ROLE tubedepth_owner IN SCHEMA tubedepth
   GRANT USAGE, SELECT ON SEQUENCES TO tubedepth_runtime;
-ALTER DEFAULT PRIVILEGES FOR ROLE tubedepth_owner IN SCHEMA tubedepth
-  REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+--
+-- No `ALTER DEFAULT PRIVILEGES ... REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`
+-- here on purpose. `docs/shared-postgres.md` rule 1 documents (measured live,
+-- PostgreSQL 18.6, and re-verified against a throwaway 18-alpine container
+-- while fixing this file) that this statement stores no `pg_default_acl` row
+-- at all — PUBLIC's function `EXECUTE` is PostgreSQL's built-in default, not
+-- a granted privilege, so there is nothing for `ALTER DEFAULT PRIVILEGES` to
+-- revoke ahead of time. A function `tubedepth_owner` creates after this line
+-- runs still has `proacl IS NULL` and
+-- `has_function_privilege('public', ..., 'EXECUTE')` still returns true,
+-- REVOKE statement or not. Keeping a statement that reads as protection but
+-- changes nothing is worse than having no statement — it is why this file
+-- used to carry it and does not any more.
+--
+-- Nothing here creates a function today (`service-db.json` declares no
+-- required_extensions and the schema uses only core types), so this is
+-- dormant rather than urgent, but the rule still has to be enforced the day
+-- that changes: every migration that creates a function must end with its
+-- own `REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA tubedepth FROM PUBLIC` (this
+-- form works, but only against functions that already exist at the moment it
+-- runs — a function created afterwards is PUBLIC-executable again, so this
+-- is not a bootstrap-time statement either). The actual enforcement point is
+-- the audit query `docs/shared-postgres.md` rule 1 gives for finding any
+-- function PUBLIC can still execute; that query belongs in the deploy gate,
+-- not just a periodic audit, because pre-setting this privilege is not
+-- possible.
 -- SCHEMA-SCOPED-GRANTS-END
 
 -- Not cosmetic. Unqualified names resolve here, which is what puts this
