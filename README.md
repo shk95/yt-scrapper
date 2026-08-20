@@ -133,6 +133,7 @@ exposing it.
 | [`docs/api.md`](docs/api.md) | REST reference — every endpoint, error code and the webhook contract |
 | [`docs/status.md`](docs/status.md) | where things stand, and the decisions behind them |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | errors that have already cost someone an afternoon — grep it, do not read it |
+| [`docs/shared-postgres.md`](docs/shared-postgres.md) | the rules for the PostgreSQL instance this shares with the other scrapers |
 | [`CHANGELOG.md`](CHANGELOG.md) | what changed in each release |
 | [`docs/releasing.md`](docs/releasing.md) | how a release is cut |
 | [`AGENTS.md`](AGENTS.md) | how to work in this repository |
@@ -223,7 +224,7 @@ What this project **cannot** do, and what has **not been checked**.
 | kind | thousands per hour? |
 | --- | --- |
 | SponsorBlock · cache hits | yes — cache hits are the only axis fully under our control |
-| video metadata · related · search | measured 8,417/hour (40 jobs, concurrency 8). Sustained load unmeasured |
+| video metadata · related · search | **~3,100/hour sustained** (474 jobs, 0 failed, 430 s, concurrency 8). A 40-job burst reaches 8,417/hour, which is what a burst measures |
 | whole comment threads | **no.** 1,000 comments = 50+ requests = 1–3 minutes, and those requests eat the IP budget metadata collection needs |
 
 **Where this stands legally.** YouTube's terms prohibit automated access
@@ -241,11 +242,17 @@ estimates was removed on purpose — the reasons are in
 **Checked and unchecked.** Verified by hand on this machine during planning: 78
 yt-dlp keys, caption json3 retrieval, 20 comments in 6.7s, SponsorBlock 200 and
 404 both, InnerTube `/next` and `/browse` reachable, SQLite 3.46.1, wireproxy
-1.1.3 available, four parallel metadata extractions in 3.11s. **Not yet
-checked**: the bot-check threshold under sustained load, what triggers a PO
-token, **a request that actually leaves through a VPN egress** (no config
-exists, so nothing has ever gone out through a proxy), how AIMD converges under
-real load, and long multi-worker operation.
+1.1.3 available, four parallel metadata extractions in 3.11s.
+
+Since then, under sustained load: 474 jobs, none failed, the AIMD window at its
+ceiling and the quarantine streak at zero — so the controller settles rather
+than oscillates at this rate, and no bot check was reached. **Still not
+checked**: where the bot-check threshold actually is, what triggers a PO token,
+**a request that leaves through a VPN egress** (no config exists, so nothing has
+ever gone out through a proxy), and long multi-worker operation. What remains
+unverified is tracked as issues labelled
+[`verification`](https://github.com/slopindustries/yt-scrapper/issues?q=is%3Aissue+is%3Aopen+label%3Averification)
+rather than only described here.
 
 ## License
 
