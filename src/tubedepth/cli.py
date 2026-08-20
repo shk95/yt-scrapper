@@ -21,7 +21,7 @@ from .collection import CollectionService
 from .database import Database
 from .egress.control import RateController
 from .egress.transport import DirectEgress
-from .errors import TubedepthError, ValidationError
+from .errors import ConfigurationError, TubedepthError, ValidationError
 from .fixture_capture import redact_for_fixture
 from .identifiers import normalize_target, normalize_video_identifier
 from .innertube.client import InnerTubeClient
@@ -120,8 +120,23 @@ def collect(
 
 
 def _database(data_directory: Path) -> Database:
+    """Open the database every CLI entry point uses.
+
+    Creates no schema (#14) — but a database with none is not a database
+    this can do anything useful against, and letting the first query fail
+    with `no such table` inside SQLAlchemy is a traceback, not a refusal.
+    `is_migrated()` only reflects, so checking it here does not reintroduce
+    DDL on the boot path; it just turns the eventual failure into one that
+    names the fix.
+    """
     data_directory.mkdir(parents=True, exist_ok=True)
-    return Database(data_directory / "tubedepth.db")
+    database = Database(data_directory / "tubedepth.db")
+    if not database.is_migrated():
+        raise ConfigurationError(
+            f"no schema at {data_directory / 'tubedepth.db'} — run: "
+            f"tubedepth migrate --data-dir {data_directory}"
+        )
+    return database
 
 
 @application.command(context_settings=TOLERATE_LEADING_DASHES)

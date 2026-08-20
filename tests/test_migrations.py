@@ -1,15 +1,15 @@
-"""Real migrations, and what they have to answer that the repair cannot.
+"""Real migrations, and the properties that make this migration set trustworthy.
 
-`Database.create_schema` adds nullable columns and missing indexes to a file
-that predates them, which closed the one drift that kept happening during
-development. It is not a migration tool and never pretended to be: it cannot
-rename, cannot drop, cannot backfill, and refuses by name when a change needs
-any of those.
+`Database.create_schema` only creates the tables the models describe (#14) —
+it used to also repair a file that predates a column or index, but that
+closed a real gap only while there was no migration tool, and kept the gap
+open once there was one: a repaired file and `alembic_version` could quietly
+disagree. This migration set is what covers that gap now, so what matters is
+that it is trustworthy rather than merely present.
 
-These check the properties that make a migration set trustworthy rather than
-merely present — that it produces the schema the models describe, that it is
-reversible, and that nobody has left two heads for the next person to discover
-mid-deploy.
+These check exactly that — that it produces the schema the models describe,
+that it is reversible, and that nobody has left two heads for the next person
+to discover mid-deploy.
 """
 
 from __future__ import annotations

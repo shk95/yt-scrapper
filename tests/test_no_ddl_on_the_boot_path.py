@@ -61,6 +61,27 @@ def test_a_migrated_database_gets_no_ddl_when_a_command_opens_it(
     assert recorded_ddl == [], f"the boot path issued DDL: {recorded_ddl}"
 
 
+def test_a_fresh_data_dir_is_refused_rather_than_given_ddl_or_a_traceback(
+    tmp_path: Path, recorded_ddl: list[str]
+) -> None:
+    """The other half of #14: no schema is not a schema this silently builds.
+
+    `_database()` used to answer a fresh `--data-dir` by calling
+    `create_schema()` — DDL on the boot path, the thing this whole file is
+    about. Simply removing that call turns the same case into an unhandled
+    `sqlalchemy.exc.OperationalError` and a Rich traceback the first time a
+    query runs, which is worse: this repository's boundary never prints a
+    traceback (`test_cli.py`'s error-boundary test), and nothing tells the
+    operator what to run. So the boot path must refuse cleanly instead, and
+    still issue no DDL while deciding that.
+    """
+    result = runner.invoke(application, ["jobs", "--data-dir", str(tmp_path)])
+
+    assert result.exit_code != 0
+    assert "tubedepth migrate" in str(result.exception), result.output
+    assert recorded_ddl == [], f"the refusal path issued DDL: {recorded_ddl}"
+
+
 def test_create_schema_does_not_alter_a_table_that_has_fallen_behind(tmp_path: Path) -> None:
     """The repair is gone. `create_schema` creates what is missing and stops.
 

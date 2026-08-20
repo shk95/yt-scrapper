@@ -6,7 +6,7 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import Connection, create_engine, event
+from sqlalchemy import Connection, create_engine, event, inspect
 from sqlalchemy.orm import Session, sessionmaker
 
 from .models import Base
@@ -91,6 +91,19 @@ class Database:
         that is already there.
         """
         Base.metadata.create_all(self._engine)
+
+    def is_migrated(self) -> bool:
+        """Whether a schema this expects already exists.
+
+        `inspect` reflects the database; it issues no DDL, so calling this
+        from the boot path does not reintroduce the thing #14 removed. It
+        checks one table (`jobs`) rather than the whole of `Base.metadata`
+        because a schema that has `jobs` but is missing something newer is
+        exactly what `tubedepth migrate` exists to catch — with a real
+        error naming the missing column, not a blank database pretending to
+        be fine.
+        """
+        return inspect(self._engine).has_table("jobs")
 
     @contextmanager
     def session(self, *, readonly: bool = False) -> Iterator[Session]:
