@@ -485,6 +485,30 @@ SQLite-shaped decisions keep accruing — 2026-08-20 alone added four, one of
 them the deadlock.
 
 
+### index와 payload store는 한 쌍이고, 코드가 그것을 강제한다
+
+**결정 2026-08-20.** artifact 테이블은 index이고 바이트는
+`TUBEDEPTH_DATA_DIR/payloads`의 파일이다. 둘은 따로 이동할 수 있고, 컷오버(#15,
+#24)는 정확히 그 이동을 절반씩 한다 — DB URL은 PostgreSQL로 옮기고 payload는
+디스크에 남긴다. 그 중간 상태에서 `prune`을 한 번 돌리면 store 전체가 사라진다.
+
+`RetentionService._sweep_orphans`는 **부재로 판단한다**: artifact 행이 가리키지
+않는 payload는 쓰레기다. index에 행이 **하나도 없을 때** 그 추론은 조용히
+뒤집힌다. 모든 파일이 orphan이 되고, 로그에는 "swept N payload file(s)"라는
+정상 동작처럼 보이는 줄이 남는다. 그리고 sweep은 되돌릴 수 없다.
+
+그래서 `prune`은 그 상태를 **거부한다**. 비대칭이 기본값을 정한다 — 거부는
+운영자에게 명령 하나를 물리고, 잘못 추측하면 재수집으로 복구되지 않는 시계열
+전체를 잃는다(3주 전 조회수는 어디에도 없다). `tubedepth collect`는 데이터베이스를
+받지 않아 index 없이 payload만 남기므로 index가 정말로 없는 host도 존재한다.
+그쪽은 `--sweep-without-an-index`로 스스로를 선언한다 — 둘을 구분할 수 있는 것은
+운영자뿐이기 때문에 자동 판정이 아니라 명시적 플래그다.
+
+같은 이유로 `GET /v1/artifacts/{digest}`는 없는 바이트를 retention 탓으로
+단정하지 않는다. 이전 메시지는 30일 정책 아래 이틀 된 관측에도 "aged out of
+retention"이라고 말했고, 그것은 on-call을 존재하지 않는 retention 버그를 찾으러
+보내는 문구다.
+
 ### 규정 적용 — 함대 PostgreSQL 규정을 이 저장소가 지키는 방법
 
 2026-08-20에 [`docs/shared-postgres.md`](shared-postgres.md)가 **함대 공통

@@ -14,7 +14,10 @@ import random
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
+import pytest
+
 from tubedepth.database import Database
+from tubedepth.errors import ConfigurationError
 from tubedepth.models import Artifact
 from tubedepth.payload_store import PayloadStore
 from tubedepth.retention import RetentionPolicy, RetentionService
@@ -179,8 +182,14 @@ def test_a_blob_with_no_artifact_row_is_swept(tmp_path: Path) -> None:
     # parked in the past makes every file look like it is from the future.
     # This test used to pass by accident: START happened to sit a day behind
     # real time, and it began failing the day the calendar caught up.
+    # `sweep_without_an_index` because that is literally this store: a payload
+    # written by `collect`, and an index that has never held a row. The default
+    # refuses it, since from inside the sweep that is indistinguishable from
+    # being pointed at the wrong database.
     clock = FakeClock(datetime.now(UTC))
-    database, payloads, service = build(tmp_path, RetentionPolicy(), clock)
+    database, payloads, service = build(
+        tmp_path, RetentionPolicy(sweep_without_an_index=True), clock
+    )
     stored = payloads.put("video.metadata", b'{"orphan": true}')
     # Age the file rather than the clock, for the same reason.
     _age(stored.path, timedelta(hours=2))
@@ -201,7 +210,9 @@ def test_a_blob_written_moments_ago_is_left_alone(tmp_path: Path) -> None:
     period would delete the result of a job that is still committing.
     """
     clock = FakeClock(datetime(2026, 8, 19, tzinfo=UTC))
-    database, payloads, service = build(tmp_path, RetentionPolicy(), clock)
+    database, payloads, service = build(
+        tmp_path, RetentionPolicy(sweep_without_an_index=True), clock
+    )
     stored = payloads.put("video.metadata", b'{"just": "written"}')
 
     outcome = service.prune()
@@ -262,3 +273,64 @@ def test_an_expiring_observation_does_not_take_a_payload_a_current_one_shares(
     assert payloads.read(digest) == unchanged, (
         "the surviving observation's payload was unlinked along with the expiring one"
     )
+
+
+def test_a_payload_store_with_no_index_rows_is_refused_rather_than_swept(
+    tmp_path: Path,
+) -> None:
+    """An index with no rows at all cannot tell a full store from a wrong one.
+
+    This is the shape of a database cutover half-done: the payloads are still
+    on disk and the index they belong to is somewhere else. Every file is an
+    orphan by the sweep's test, and the sweep is irreversible — so the one
+    state where the question cannot be answered is the one state where it must
+    not be guessed at.
+    """
+    clock = FakeClock()
+    database, payloads, service = build(
+        tmp_path, RetentionPolicy(maximum_age=timedelta(days=30)), clock
+    )
+    stored = payloads.put("video.metadata", b'{"orphaned": true}')
+    _age(stored.path, timedelta(hours=2))
+
+    with pytest.raises(ConfigurationError) as refusal:
+        service.prune()
+
+    assert "1" in str(refusal.value)
+    assert payloads.path_for("video.metadata", stored.digest) is not None
+
+
+def test_an_empty_index_and_an_empty_store_is_not_an_error(tmp_path: Path) -> None:
+    """A fresh installation prunes nothing and says so, rather than refusing."""
+    clock = FakeClock()
+    _, _, service = build(tmp_path, RetentionPolicy(maximum_age=timedelta(days=30)), clock)
+
+    outcome = service.prune()
+
+    assert outcome.artifacts_removed == 0
+    assert outcome.orphans_removed == 0
+
+
+def test_the_refusal_is_overridable_for_a_store_that_is_genuinely_all_orphans(
+    tmp_path: Path,
+) -> None:
+    """`tubedepth collect` takes no database, so a collect-only host is this.
+
+    The refusal protects a store whose index is elsewhere; it must not
+    permanently strand a store that really has no index. The override is
+    explicit because the operator is the only one who can tell the two apart.
+    """
+    # Real time, because the sweep compares the clock against the file's mtime.
+    clock = FakeClock(datetime.now(UTC))
+    _, payloads, service = build(
+        tmp_path,
+        RetentionPolicy(maximum_age=timedelta(days=30), sweep_without_an_index=True),
+        clock,
+    )
+    stored = payloads.put("video.metadata", b'{"orphaned": true}')
+    _age(stored.path, timedelta(hours=2))
+
+    outcome = service.prune()
+
+    assert outcome.orphans_removed == 1
+    assert payloads.path_for("video.metadata", stored.digest) is None

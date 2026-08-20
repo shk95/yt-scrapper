@@ -561,8 +561,12 @@ its kind has withdrawn one. A null version is not "fine", it is "not known" —
 and a kind that has withdrawn a version has rows predating the column that
 could be either. Run `tubedepth backfill-schema-versions` and ask again.
 
-404 `not_found` for a digest this instance never stored, and for one whose
-payload has since aged out of retention.
+404 `not_found` for a digest this instance never stored, and for one whose row
+is in the index while its bytes are not in the payload store. The message
+offers both explanations rather than asserting one: retention removed the
+bytes, or `TUBEDEPTH_DATA_DIR` is not the store this index was built against.
+The index and the store are a pair, and only an operator can tell which half
+moved.
 
 ## Pagination
 

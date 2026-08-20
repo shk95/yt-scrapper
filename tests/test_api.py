@@ -1077,3 +1077,29 @@ def test_a_shared_digest_says_how_many_observations_it_covers(
     assert body["first_fetched_at"] is not None
     assert body["first_fetched_at"][:13] == first.isoformat()[:13]
     assert body["fetched_at"] > body["first_fetched_at"]
+
+
+def test_a_missing_payload_does_not_blame_retention_for_it(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    """The index row is two days old and the bytes are gone. Retention is 30 days.
+
+    "It has aged out of retention" is the one explanation this route cannot
+    check and the one it used to give unconditionally. The other explanation is
+    that the index and the payload store were separated — a cutover that moved
+    the database and not `TUBEDEPTH_DATA_DIR` — and telling an operator their
+    fresh observation expired sends them to look for a retention bug that is
+    not there.
+    """
+    client, key, database = api
+    digest = _stored_artifact(tmp_path, database, kind="video.echo", version="1")
+    PayloadStore(tmp_path / "payloads").delete("video.echo", digest)
+
+    response = client.get(f"/v1/artifacts/{digest}", headers={"X-API-Key": key})
+
+    assert response.status_code == 404
+    message = response.json()["error"]["message"]
+    assert "it has aged out of retention" not in message, (
+        "a two-day-old observation was told, as a fact, that it expired"
+    )
+    assert "TUBEDEPTH_DATA_DIR" in message, "the other explanation is not offered"
