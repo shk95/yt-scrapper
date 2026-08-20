@@ -126,8 +126,16 @@ of 100 this returns 100 of the 698.
 
 `target` is what the `target` field of a submission has to name. A video
 accepts an id, a `youtu.be` link or a `watch?v=` URL; a channel accepts an id,
-an `@handle` or a channel URL — normalisation happens before the job is
-recorded, so the ledger stores one canonical form.
+an `@handle` or a channel URL. Normalisation strips a URL down to the
+identifier inside it and refuses anything that is not one. **It does not
+resolve a handle to a channel id, and it does not fold case** — either would
+need a network call on the way in, and a submission is answered before any
+request goes out.
+
+So `@veritasium` and `UCHnyfMqiRRG1u-2MsSQLbXA` are **two targets, not two
+spellings of one**: two cache keys, two job histories, two artifact histories,
+and nothing later joins them back together. Pick one spelling per channel and
+stay with it for as long as you want its history to be one history.
 
 `lane` is which upstream the request goes to, and `cost` is how the queue rates
 it. Both exist so that a comment harvest cannot starve everything else.
@@ -138,6 +146,9 @@ it. Both exist so that a comment harvest cannot starve everything else.
 
 Unauthenticated. Whether the service is up, what version it is, and what the
 queue and each source have been doing.
+
+**Answers** 200. It takes no key, so it never answers 401 — which is what makes
+it usable before anyone holds a credential.
 
 ```sh
 curl -s localhost:8080/healthz
@@ -194,9 +205,11 @@ says so.
 read by things that restart processes and one broken parser is not a reason to
 cycle an API whose other ten kinds are still collecting. The bad news is in
 `sources`, where a person reads it — and in `last_error_message` rather than
-`last_error_code`. The code says `parse_mismatch`; the message names the
-renderer that stopped matching, which is the difference between knowing a
-source is broken and knowing what to change.
+`last_error_code`. The code says `ExtractionError` — a Python class name, out
+of the second vocabulary the `## Errors` section describes and not out of its
+HTTP table — while the message names the renderer that stopped matching, which
+is the difference between knowing a source is broken and knowing what to
+change.
 
 A source's `status` distinguishes causes that need different fixes:
 
@@ -204,7 +217,7 @@ A source's `status` distinguishes causes that need different fixes:
 | --- | --- | --- |
 | `ok` | recent successes | — |
 | `degraded` | one recent failure | usually nothing; watch it |
-| `broken` | our parser stopped matching | a code change — check `degradations` for `parse_mismatch` |
+| `broken` | our parser stopped matching | a code change — check `degradations` for `ExtractionError` |
 | `blocked` | the address is being refused | a different egress, or waiting |
 | `stale` | nothing has exercised it lately | run a job |
 | `unknown` | never tried on this instance | run a job |
@@ -217,6 +230,10 @@ for something nobody has run is worse than one admitting it does not know.
 ## `GET /v1/control`, `PATCH /v1/control`
 
 Whether the worker is claiming, and the only way to tell it not to.
+
+**Answers** 200, both of them. 401 `unauthenticated`; 429 `rate_limited`; and
+on `PATCH`, 422 `invalid_request` for a body that is not `{"paused": <bool>}`
+with an optional `reason`.
 
 ```sh
 curl -s -X PATCH -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
@@ -252,6 +269,8 @@ rather than as an error.
 What this build can collect, read from the registry — so a source added in code
 documents itself here without anyone editing a list.
 
+**Answers** 200. 401 `unauthenticated`; 429 `rate_limited`.
+
 ```sh
 curl -s -H "X-API-Key: $KEY" localhost:8080/v1/sources
 ```
@@ -273,8 +292,13 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/sources
 
 ## `POST /v1/jobs`
 
-Ask for data. Answers 202 with a job, or 200 with the result if a fresh one
-already exists.
+Ask for data.
+
+**Answers** 200 or 202, and the two are told apart by the status code rather
+than by the shape of the body. **Only the 202 carries a `Location` header**,
+`/v1/jobs/{job_id}`. 401 `unauthenticated`; 404 `not_found` for a `kind` this
+build does not have; 422 `invalid_request` for an unparseable `target` or a
+malformed `webhook_url`; 429 `rate_limited`.
 
 | field | type | default | |
 | --- | --- | --- | --- |
@@ -304,16 +328,25 @@ curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
 **200 OK** — a fresh artifact existed, and the body is the collected data
 itself, not a job. Distinguish the two by status code, not by shape.
 
-Failure modes worth a branch: an unknown `kind` or an unparseable `target` is
-422 `invalid_request`; a malformed `webhook_url` is rejected here rather than
-stored, because a bad URL stored is a delivery that fails on every sweep
-forever.
+Failure modes worth a branch, and they are not the same status: an unknown
+`kind` is **404 `not_found`** — this build has no such source, and asking again
+with the same word cannot help — while an unparseable `target` is **422
+`invalid_request`**. A malformed `webhook_url` is 422 too, and is rejected here
+rather than stored, because a bad URL stored is a delivery that fails on every
+sweep forever.
 
 ---
 
 ## `POST /v1/jobs/batch`
 
-One kind, many targets, one request. Answers 202.
+One kind, many targets, one request.
+
+**Answers** 202, always — including when every target was already held and
+nothing was queued. **No `Location` header**, unlike `POST /v1/jobs`: a batch
+is many jobs and there is no single one to point at, so read `queued` and
+`held` from the body instead of assuming the two routes are symmetric. 401
+`unauthenticated`; 404 `not_found` for an unknown `kind`; 422 `invalid_request`
+for an empty list, a list over 500, or one bad target; 429 `rate_limited`.
 
 ```sh
 curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
@@ -350,6 +383,8 @@ submission a bulk download.
 
 One job's current state.
 
+**Answers** 200. 401 `unauthenticated`; 404 `not_found`; 429 `rate_limited`.
+
 ```sh
 curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB
 ```
@@ -385,6 +420,9 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB
 
 The collected data, verbatim — the stored payload, not a re-encoding of it.
 
+**Answers** 200. 401 `unauthenticated`; 404 `not_found`; 409 `conflict`; 429
+`rate_limited`.
+
 ```sh
 curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB/result
 ```
@@ -403,8 +441,9 @@ retention window has to store it when it fetches it.
 Every payload carries a `degradations` list. It is empty on a clean collection
 and names what could not be had otherwise — a `video.bundle` whose comments
 were disabled, or a surface whose renderer no longer matches, which appears as
-`parse_mismatch`. **An empty list is a promise; a missing part always has a
-name.** Silently returning less than was asked for is the failure this project
+`ExtractionError`. Each entry's `code` is a class name out of the same second
+vocabulary a job's `error_code` uses, described under `## Errors`. **An empty
+list is a promise; a missing part always has a name.** Silently returning less than was asked for is the failure this project
 is built to make impossible.
 
 ---
@@ -413,6 +452,10 @@ is built to make impossible.
 
 Stop a job that is no longer wanted. The row survives — a queue that forgets
 what it was told to stop cannot answer why nothing arrived.
+
+**Answers** 200, carrying the job; its `state` is the answer. 401
+`unauthenticated`; 404 `not_found`; 409 `conflict` for a job that has already
+finished; 429 `rate_limited`.
 
 ```sh
 curl -s -X DELETE -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB
@@ -432,13 +475,17 @@ curl -s -X DELETE -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB
 
 The job ledger, newest first.
 
+**Answers** 200. 401 `unauthenticated`; 422 `invalid_request` for a `limit`
+outside its bounds, an unparseable `since`/`until`, or a cursor this API did
+not issue; 429 `rate_limited`.
+
 | parameter | |
 | --- | --- |
 | `state` | `queued`, `running`, `succeeded`, `failed`, `cancelled` |
 | `kind` | one of the kinds above |
-| `target` | the canonical target, as stored |
-| `since` / `until` | RFC 3339, filtering on `created_at` |
-| `limit` | default 50, capped at 500 |
+| `target` | the target as stored, matched byte for byte |
+| `since` / `until` | RFC 3339, filtering on **`created_at`** — when the job was asked for |
+| `limit` | default 50. Outside 1–500 it is **refused** with 422 `invalid_request`, not clamped |
 | `cursor` | from the previous page |
 
 ```sh
@@ -447,7 +494,7 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/jobs?state=failed&limit=20'
 
 ```json
 {
-  "jobs": [{ "job_id": "j_2f7c1d9a", "state": "failed", "error_code": "upstream_error" }],
+  "jobs": [{ "job_id": "j_2f7c1d9a", "state": "failed", "error_code": "UpstreamError" }],
   "cursor": "MjAyNi0wOC0xOVQwOToxMjozMSswMDowMHxqXzJmN2MxZDlh"
 }
 ```
@@ -465,8 +512,23 @@ Comparing this route between the two is how that is caught.
 
 ## `GET /v1/artifacts`
 
-What was actually collected, as opposed to what was asked for. Takes `kind`,
-`target`, `since`, `until`, `limit` and `cursor`, filtering on `fetched_at`.
+What was actually collected, as opposed to what was asked for.
+
+**Answers** 200. 401 `unauthenticated`; 422 `invalid_request` for a `limit`
+outside its bounds, an unparseable `since`/`until`, or a cursor this API did
+not issue; 429 `rate_limited`.
+
+| parameter | |
+| --- | --- |
+| `kind` | one of the kinds above |
+| `target` | the target as stored, matched byte for byte |
+| `since` / `until` | RFC 3339, filtering on **`fetched_at`** — when the observation was made, which on the jobs route is `created_at`, when it was asked for |
+| `limit` | default 50. Outside 1–500 it is **refused** with 422 `invalid_request`, not clamped |
+| `cursor` | from the previous page |
+
+**There is no `state` here, deliberately.** A state belongs to a request, and
+this table holds records of things that already happened — every row in it is
+a collection that succeeded.
 
 ```sh
 curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/artifacts?target=dQw4w9WgXcQ'
@@ -506,12 +568,13 @@ values mean nothing changed.
 
 ---
 
----
-
 ## `GET /v1/artifacts/{digest}`
 
 One observation, addressed by its content. This is how history is read: the
 list route hands out digests, and this is what dereferences them.
+
+**Answers** 200. 401 `unauthenticated`; 404 `not_found`; 409 `conflict`; 410
+`retracted`; 429 `rate_limited`.
 
 ```sh
 curl -s -H "X-API-Key: $KEY" localhost:8080/v1/artifacts/b9f4c0e2...
@@ -568,6 +631,36 @@ bytes, or `TUBEDEPTH_DATA_DIR` is not the store this index was built against.
 The index and the store are a pair, and only an operator can tell which half
 moved.
 
+### Reading one target's history end to end
+
+The two routes as a pair: list the observations for a target, then dereference
+one of the digests it hands back.
+
+```sh
+KEY=ytd_...
+TARGET=dQw4w9WgXcQ
+
+# every observation of that target, newest first
+curl -s -H "X-API-Key: $KEY" \
+     "localhost:8080/v1/artifacts?kind=video.metadata&target=$TARGET"
+
+# the newest one, in full
+DIGEST=$(curl -s -H "X-API-Key: $KEY" \
+     "localhost:8080/v1/artifacts?kind=video.metadata&target=$TARGET" \
+     | jq -r '.artifacts[0].digest')
+curl -s -H "X-API-Key: $KEY" "localhost:8080/v1/artifacts/$DIGEST"
+```
+
+Two things will cost you an afternoon otherwise:
+
+- **`target` matches byte for byte, as stored.** It is not normalised on the
+  way in to this route and there is no prefix or case-insensitive matching, so
+  what you pass has to be exactly what the submission stored.
+- **A handle and a channel id are different targets** (see `## Kinds`), so a
+  history collected under `@veritasium` is not returned by a query for
+  `UCHnyfMqiRRG1u-2MsSQLbXA` and neither is missing anything — they are two
+  histories.
+
 ## Pagination
 
 Both list endpoints return `cursor`, and `null` means this was the last page —
@@ -585,23 +678,37 @@ issue is 422 `invalid_request`.
 
 ## Errors
 
-Every error is the same shape.
+Every error this document describes is the same shape, including the ones the
+framework raises before a route ever runs — a malformed body, an unparseable
+`since` and a `limit` outside its bounds are all `invalid_request` in this
+shape.
 
 ```json
 { "error": { "code": "not_found", "message": "job not found: j_2f7c1d9a" } }
 ```
 
+<!-- error-codes:start -->
+
 | status | code | meaning |
 | --- | --- | --- |
 | 401 | `unauthenticated` | key missing, malformed, unknown or revoked |
-| 422 | `invalid_request` | unknown kind, unparseable target, cursor this API did not issue |
-| 404 | `not_found` | no such job — or the video does not have the thing asked for |
+| 422 | `invalid_request` | a malformed body, a query value that cannot be parsed, a limit outside its bounds, a target this API cannot read, a cursor it did not issue |
+| 404 | `not_found` | no such job or digest, no source registered for that kind — or the video does not have the thing asked for |
+| 404 | `unavailable` | the video exists and cannot be watched from here: private, deleted, members-only, age-gated, region-blocked. Not our bug and not worth retrying |
 | 409 | `conflict` | the job exists but has not finished |
 | 410 | `retracted` | the version that collected this observation has been withdrawn |
 | 429 | `rate_limited` | over the key's allowance, or an upstream refused this address |
 | 502 | `parse_mismatch` | YouTube answered and our parser no longer understands it |
 | 502 | `upstream_error` | an upstream answered, and the answer was unusable |
+| 503 | `not_configured` | this deployment is missing something it needs — an unset data API key, a database role whose search path was never set. Fix the configuration and retry |
 | 500 | `internal_error` | our bug |
+
+<!-- error-codes:end -->
+
+Two answers here are the framework's rather than this service's, and do not
+carry that shape: a request to a path this API does not route at all, and a
+method a routed path does not have, come back as 404 and 405 with a `detail`
+field. Nothing described in this document answers that way.
 
 `parse_mismatch` is kept apart from every other upstream failure and is never
 retried. It is not transient and not a network problem: retrying spends
@@ -610,7 +717,54 @@ that fixes it is a code change. It is 502 rather than 500 for the same reason �
 a 500 sends an operator into our tracebacks, a 502 sends them to the renderer
 names in the message.
 
+`unavailable` and `not_configured` exist for the same reason in the other
+direction: both used to arrive as 500 `internal_error`, which this table
+defines as our bug. A geo-blocked video is not our bug, and neither is an
+unset key — and 503 in particular is the answer that tells an operator to look
+at the configuration rather than at a traceback.
+
 `message` is written to be shown to a person and names the offending value.
+
+### A job's `error_code` is a different vocabulary
+
+**Same field name, different value space.** The table above is the `code`
+inside an HTTP error body. A job's `error_code` — in `GET /v1/jobs`,
+`GET /v1/jobs/{job_id}`, the webhook body, each entry of a payload's
+`degradations`, and `last_error_code` in `/healthz` — is not from that table at
+all. It is the **name of the Python class** the failure was raised as, written
+verbatim, plus one literal that is not an exception.
+
+So a failed job says `UpstreamError`, never `upstream_error`. Nothing
+translates between the two, and the only value in both spellings is none of
+them.
+
+<!-- job-error-codes:start -->
+
+| value | what happened |
+| --- | --- |
+| `ValidationError` | the request could not be understood: a malformed identifier, a bad option |
+| `NotFoundError` | the thing asked for does not exist here, or the video does not have it |
+| `UnavailableError` | the video exists and cannot be watched from here: private, deleted, members-only, age-gated, region-blocked |
+| `UpstreamError` | a backend answered, and the answer was unusable |
+| `RateLimitedError` | the upstream told us to slow down, or refused this address outright |
+| `ExtractionError` | a backend answered and the response no longer holds what the parser needs |
+| `ConfigurationError` | our own misconfiguration; never the client's fault |
+| `UnauthenticatedError` | no key was presented, or the one presented is unknown or revoked |
+| `RetractedError` | a stored observation whose collecting version is known to have been wrong |
+| `ConflictError` | the thing exists but is in the wrong state |
+| `lease_expired` | not an exception: a worker claimed the job and stopped renewing its lease, and the reaper gave up on it after the last attempt |
+
+<!-- job-error-codes:end -->
+
+Every domain error this project defines is listed, because the worker writes
+whichever one reached it; several of them are unlikely on a job in practice.
+
+**These are not renamed to match the HTTP codes, and will not be.** Rows
+already in the database carry class names, and a rename produces a ledger in
+two vocabularies at once — some rows saying `ExtractionError` and some saying
+`parse_mismatch` for the same failure — which no document can describe honestly
+and no client can branch on. The names are the stable half of this; the mapping
+to HTTP is the part that is allowed to move.
 
 ## Webhooks
 
@@ -658,6 +812,12 @@ service from one by anyone who learned the URL.
 Delivery is at-least-once and gives up after 8 attempts. Answer any 2xx to be
 counted as delivered; anything else leaves the job owed and the next sweep
 tries again.
+
+**A delivery times out after 10 seconds, and a timeout is a failed delivery.**
+A receiver that takes longer than that to answer is retried like any other
+failure and will see the same body again, however well its own work went. The
+callback carries no data, so there is nothing to do before answering:
+acknowledge first, then do the work.
 
 ## What this API does not do
 

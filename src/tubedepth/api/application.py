@@ -10,7 +10,7 @@ from __future__ import annotations
 import base64
 import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 
 # Imported for pydantic rather than for the type checker. With
 # `from __future__ import annotations` every annotation is a string, and a
@@ -21,7 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, FastAPI, Request, Response, Security, status
+from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, Security, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, HttpUrl
@@ -32,6 +33,7 @@ from .. import __version__
 from ..collection import CollectionService
 from ..database import Database
 from ..errors import (
+    ConfigurationError,
     ConflictError,
     ExtractionError,
     NotFoundError,
@@ -39,6 +41,7 @@ from ..errors import (
     RetractedError,
     TubedepthError,
     UnauthenticatedError,
+    UnavailableError,
     UpstreamError,
     ValidationError,
 )
@@ -67,6 +70,13 @@ STATUS_BY_ERROR: tuple[tuple[type[TubedepthError], int, str], ...] = (
     # is a secret shown once.
     (ValidationError, 422, "invalid_request"),
     (NotFoundError, status.HTTP_404_NOT_FOUND, "not_found"),
+    # 404 rather than the catch-all 500: a private, deleted, members-only or
+    # region-blocked video is a fact about the video, not a bug in this
+    # service, and answering `internal_error` sends an operator into our
+    # tracebacks for something no code change here fixes. Kept apart from
+    # `not_found` because "you may not see this" and "there is no such thing"
+    # are different answers to give a client.
+    (UnavailableError, status.HTTP_404_NOT_FOUND, "unavailable"),
     (ConflictError, status.HTTP_409_CONFLICT, "conflict"),
     # 410 rather than 404: the observation happened and was withdrawn, and a
     # 404 would tell a reader building a history that it never happened.
@@ -76,8 +86,36 @@ STATUS_BY_ERROR: tuple[tuple[type[TubedepthError], int, str], ...] = (
     # renderer names in the message.
     (ExtractionError, status.HTTP_502_BAD_GATEWAY, "parse_mismatch"),
     (UpstreamError, status.HTTP_502_BAD_GATEWAY, "upstream_error"),
+    # 503 rather than the catch-all 500: our own misconfiguration is not a bug
+    # in the code, and "fix the configuration and retry" is the whole of the
+    # instruction. Since #16 a `search_path` that does not lead with this
+    # project's schema raises this from `Database` itself, so the most likely
+    # cause of a 503 here is a role whose search_path was never set — an
+    # operator reading `internal_error` would go looking for our traceback
+    # instead. An unset `TUBEDEPTH_DATA_API_KEY` is the same shape of answer.
+    (ConfigurationError, status.HTTP_503_SERVICE_UNAVAILABLE, "not_configured"),
     (TubedepthError, status.HTTP_500_INTERNAL_SERVER_ERROR, "internal_error"),
 )
+
+
+def _describe_rejected_request(reported: Sequence[Any]) -> str:
+    """FastAPI's `errors()` list rendered as one line a person can read.
+
+    Each entry is a dict carrying a `loc` tuple, a message, and the offending
+    input. Passing the structure through would put pydantic's internal error
+    types and a copy of the request body into a field this API documents as
+    written for a person; naming the place and the reason is the part a caller
+    can act on.
+    """
+    lines: list[str] = []
+    for detail in reported:
+        if not isinstance(detail, Mapping):
+            lines.append(str(detail))
+            continue
+        where = ".".join(str(part) for part in detail.get("loc", ()))
+        reason = str(detail.get("msg", "is not valid"))
+        lines.append(f"{where}: {reason}" if where else reason)
+    return "; ".join(lines) or "the request could not be understood"
 
 
 class JobSubmission(BaseModel):
@@ -392,6 +430,31 @@ def create_application(
             content={"error": {"code": label, "message": str(error)}},
         )
 
+    @application.exception_handler(RequestValidationError)
+    async def handle_rejected_request(request: Request, error: Exception) -> JSONResponse:
+        """The framework's own 422, in the shape the reference promises.
+
+        Everything this code raises reaches the handler above and comes out as
+        `{"error": {"code": ..., "message": ...}}`. Everything FastAPI rejects
+        before a handler runs — a malformed body, an unparseable `since=`, a
+        `limit` outside its bounds — came out as `{"detail": [...]}` instead,
+        so a client needed two branches for one class of failure and the
+        reference's "every error is the same shape" was false for the errors a
+        client is most likely to provoke.
+
+        `invalid_request` rather than a new label: it is what `ValidationError`
+        already maps to above, and a cursor this API did not issue — the same
+        failure, caught one layer deeper — has always answered with it.
+        """
+        assert isinstance(error, RequestValidationError)
+        message = _describe_rejected_request(error.errors())
+        logger.warning("%s %s -> invalid_request: %s", request.method, request.url.path, message)
+        # 422 as a literal for the reason STATUS_BY_ERROR gives above.
+        return JSONResponse(
+            status_code=422,
+            content={"error": {"code": "invalid_request", "message": message}},
+        )
+
     @application.get("/", response_class=HTMLResponse, include_in_schema=False)
     def dashboard() -> HTMLResponse:
         """The operator page: an empty shell that calls the same `/v1` routes.
@@ -637,7 +700,12 @@ def create_application(
         target: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
-        limit: int = 50,
+        # Declared rather than clamped. A silent clamp turns `limit=100000`
+        # into 500 and `limit=0` into 1 without saying so, and a bare
+        # `limit: int` advertises an unbounded integer in the OpenAPI
+        # document — so the schema promised something the code refused to do.
+        # MAXIMUM_PAGE is module-level, so it is the one number here too.
+        limit: int = Query(default=50, ge=1, le=MAXIMUM_PAGE),
         cursor: str | None = None,
     ) -> JobListView:
         """A page of the job ledger, newest first.
@@ -675,10 +743,9 @@ def create_application(
                 )
             )
 
-        page = max(1, min(limit, MAXIMUM_PAGE))
-        rows = list(open_session.scalars(query.limit(page + 1)).all())
-        more = rows[page:]
-        rows = rows[:page]
+        rows = list(open_session.scalars(query.limit(limit + 1)).all())
+        more = rows[limit:]
+        rows = rows[:limit]
         return JobListView(
             jobs=[_job_view(job) for job in rows],
             cursor=_encode_cursor(rows[-1].created_at, rows[-1].identifier) if more else None,
@@ -691,7 +758,7 @@ def create_application(
         target: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
-        limit: int = 50,
+        limit: int = Query(default=50, ge=1, le=MAXIMUM_PAGE),
         cursor: str | None = None,
     ) -> ArtifactListView:
         """What was actually collected, as opposed to what was asked for.
@@ -718,10 +785,9 @@ def create_application(
                 )
             )
 
-        page = max(1, min(limit, MAXIMUM_PAGE))
-        rows = list(open_session.scalars(query.limit(page + 1)).all())
-        more = rows[page:]
-        rows = rows[:page]
+        rows = list(open_session.scalars(query.limit(limit + 1)).all())
+        more = rows[limit:]
+        rows = rows[:limit]
         return ArtifactListView(
             artifacts=[
                 ArtifactView(

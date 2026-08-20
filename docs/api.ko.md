@@ -114,8 +114,14 @@ POST /v1/jobs  ─┬─→ 200 + 결과                 이미 신선한 artifa
 상한에 유의: `TUBEDEPTH_LISTING_LIMIT`은 배포 전역이라, 기본값 100이면 698개 중 100개가 나온다.
 
 `target`은 등록 요청의 `target` 필드가 가리켜야 하는 것이다. 영상은 id·`youtu.be` 링크·
-`watch?v=` URL을, 채널은 id·`@handle`·채널 URL을 받는다. 정규화는 잡이 기록되기 전에
-일어나므로 원장에는 정규형 하나만 남는다.
+`watch?v=` URL을, 채널은 id·`@handle`·채널 URL을 받는다. 정규화는 URL에서 그 안의 식별자만
+꺼내고 식별자가 아닌 것은 거부한다. **handle을 채널 id로 해석하지 않고, 대소문자도 접지
+않는다** — 둘 다 등록 시점에 네트워크 요청이 필요한데, 등록은 어떤 요청도 나가기 전에 답하기
+때문이다.
+
+그래서 `@veritasium`과 `UCHnyfMqiRRG1u-2MsSQLbXA`는 **한 채널의 두 표기가 아니라 서로 다른 두
+target이다**: 캐시 키도 둘, 잡 이력도 둘, artifact 이력도 둘이고, 나중에 그 둘을 합쳐 주는 것은
+없다. 채널마다 표기 하나를 정하고, 그 이력을 하나의 이력으로 두고 싶은 동안은 그것만 쓴다.
 
 `lane`은 요청이 어느 업스트림으로 나가는지, `cost`는 큐가 그것을 어떻게 값매기는지다.
 댓글 수집이 나머지를 굶기지 못하게 하려고 둘 다 있다.
@@ -125,6 +131,9 @@ POST /v1/jobs  ─┬─→ 200 + 결과                 이미 신선한 artifa
 ## `GET /healthz`
 
 인증 없음. 서비스가 살아 있는지, 어떤 버전인지, 큐와 각 소스가 무엇을 하고 있었는지.
+
+**응답** 200. 키를 받지 않으므로 401은 나오지 않는다 — 자격증명을 쥔 사람이 생기기 전에도
+쓸 수 있는 이유가 그것이다.
 
 ```sh
 curl -s localhost:8080/healthz
@@ -177,8 +186,10 @@ curl -s localhost:8080/healthz
 개별 소스가 성치 않아도 `status`는 `"ok"`로 남는다. 이 엔드포인트는 프로세스를 재시작하는
 것들이 읽고, 파서 하나가 깨진 것은 나머지 열 종류가 여전히 수집 중인 API를 재기동할 이유가
 아니기 때문이다. 나쁜 소식은 사람이 읽는 `sources`에 실린다 — 그리고 `last_error_code`가 아니라
-`last_error_message`에 실린다. 코드는 `parse_mismatch`라고 말하고, 메시지는 더 이상 맞지 않는
-렌더러의 이름을 말한다. 소스가 깨졌다는 것을 아는 것과 무엇을 고쳐야 하는지 아는 것의 차이다.
+`last_error_message`에 실린다. 코드는 `ExtractionError`라고 말한다 — Python 클래스 이름이고,
+`## 오류`가 설명하는 두 번째 어휘에서 온 값이지 그 절의 HTTP 표에서 온 값이 아니다 — 그리고
+메시지는 더 이상 맞지 않는 렌더러의 이름을 말한다. 소스가 깨졌다는 것을 아는 것과 무엇을
+고쳐야 하는지 아는 것의 차이다.
 
 소스의 `status`는 고치는 방법이 서로 다른 원인들을 구분한다.
 
@@ -186,7 +197,7 @@ curl -s localhost:8080/healthz
 | --- | --- | --- |
 | `ok` | 최근 성공 | — |
 | `degraded` | 최근 실패 1건 | 보통 아무것도. 지켜본다 |
-| `broken` | 우리 파서가 안 맞기 시작 | 코드 변경 — `degradations`의 `parse_mismatch` 확인 |
+| `broken` | 우리 파서가 안 맞기 시작 | 코드 변경 — `degradations`의 `ExtractionError` 확인 |
 | `blocked` | 주소가 거부당하고 있음 | 다른 egress, 또는 대기 |
 | `stale` | 최근에 아무도 돌리지 않음 | 잡을 하나 돌린다 |
 | `unknown` | 이 인스턴스에서 시도된 적 없음 | 잡을 하나 돌린다 |
@@ -199,6 +210,9 @@ curl -s localhost:8080/healthz
 ## `GET /v1/control`, `PATCH /v1/control`
 
 워커가 잡을 집고 있는지, 그리고 집지 말라고 말하는 유일한 방법.
+
+**응답** 둘 다 200. 401 `unauthenticated`; 429 `rate_limited`; 그리고 `PATCH`에서는 본문이
+`{"paused": <bool>}`(`reason`은 선택)이 아니면 422 `invalid_request`.
 
 ```sh
 curl -s -X PATCH -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
@@ -231,6 +245,8 @@ drain 시작에 읽는 행을 쓸 뿐이고, `tubedepth work`는 drain하고 종
 이 빌드가 수집할 수 있는 것. 레지스트리에서 읽으므로 코드에 추가된 소스는 아무도 목록을
 편집하지 않아도 여기 나타난다.
 
+**응답** 200. 401 `unauthenticated`; 429 `rate_limited`.
+
 ```sh
 curl -s -H "X-API-Key: $KEY" localhost:8080/v1/sources
 ```
@@ -252,7 +268,12 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/sources
 
 ## `POST /v1/jobs`
 
-데이터를 요청한다. 202와 잡을 주거나, 이미 신선한 결과가 있으면 200과 결과를 준다.
+데이터를 요청한다.
+
+**응답** 200 또는 202. 둘은 본문 모양이 아니라 **상태 코드로** 구분한다. **`Location` 헤더는
+202에만 실린다** — `/v1/jobs/{job_id}`. 401 `unauthenticated`; 이 빌드에 없는 `kind`는 404
+`not_found`; 해석되지 않는 `target`이나 형식이 틀린 `webhook_url`은 422 `invalid_request`;
+429 `rate_limited`.
 
 | 필드 | 타입 | 기본값 | |
 | --- | --- | --- | --- |
@@ -282,15 +303,23 @@ curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
 **200 OK** — 신선한 artifact가 있었고, 본문은 잡이 아니라 수집된 데이터 자체다.
 둘은 모양이 아니라 **상태 코드로** 구분한다.
 
-분기할 가치가 있는 실패: 모르는 `kind`나 해석되지 않는 `target`은 422 `invalid_request`.
-형식이 틀린 `webhook_url`은 저장되지 않고 여기서 거부된다 — 잘못된 URL을 저장하는 것은
-이후 모든 전송 시도에서 영원히 실패하는 배달을 만드는 일이기 때문이다.
+분기할 가치가 있는 실패, 그리고 둘은 같은 상태 코드가 아니다: 모르는 `kind`는 **404
+`not_found`**다 — 이 빌드에 그런 소스가 없고, 같은 단어로 다시 물어도 달라지지 않는다 —
+해석되지 않는 `target`은 **422 `invalid_request`**다. 형식이 틀린 `webhook_url`도 422이고,
+저장되지 않고 여기서 거부된다 — 잘못된 URL을 저장하는 것은 이후 모든 전송 시도에서 영원히
+실패하는 배달을 만드는 일이기 때문이다.
 
 ---
 
 ## `POST /v1/jobs/batch`
 
-kind 하나, 타깃 여럿, 요청 하나. 202로 답한다.
+kind 하나, 타깃 여럿, 요청 하나.
+
+**응답** 언제나 202 — 모든 타깃이 이미 보유 중이라 큐에 아무것도 넣지 않았을 때도 그렇다.
+`POST /v1/jobs`와 달리 **`Location` 헤더가 없다**: 배치는 잡 여럿이고 가리킬 잡 하나가 없다.
+두 라우트가 대칭이라고 가정하지 말고 본문의 `queued`와 `held`를 읽는다. 401 `unauthenticated`;
+모르는 `kind`는 404 `not_found`; 빈 목록·500개 초과·잘못된 타깃 하나는 422 `invalid_request`;
+429 `rate_limited`.
 
 ```sh
 curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
@@ -321,6 +350,8 @@ curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
 ## `GET /v1/jobs/{job_id}`
 
 잡 하나의 현재 상태.
+
+**응답** 200. 401 `unauthenticated`; 404 `not_found`; 429 `rate_limited`.
 
 ```sh
 curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB
@@ -357,6 +388,8 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB
 
 수집된 데이터 원본 — 저장된 payload 그대로이며, 다시 인코딩한 것이 아니다.
 
+**응답** 200. 401 `unauthenticated`; 404 `not_found`; 409 `conflict`; 429 `rate_limited`.
+
 ```sh
 curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB/result
 ```
@@ -372,7 +405,9 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB/result
 
 모든 payload에는 `degradations` 목록이 있다. 깨끗한 수집에서는 비어 있고, 그렇지 않으면
 얻지 못한 것의 이름이 들어간다 — 댓글이 꺼진 영상의 `video.bundle`이라든가, 렌더러가 더
-이상 맞지 않는 표면(`parse_mismatch`). **빈 목록은 약속이고, 빠진 것에는 항상 이름이 있다.**
+이상 맞지 않는 표면(`ExtractionError`). 각 항목의 `code`는 잡의 `error_code`와 같은 두 번째
+어휘의 클래스 이름이고, `## 오류`에서 설명한다. **빈 목록은 약속이고, 빠진 것에는 항상
+이름이 있다.**
 요청받은 것보다 조용히 적게 돌려주는 것이 이 프로젝트가 구조적으로 불가능하게 만들려는
 실패다.
 
@@ -382,6 +417,9 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB/result
 
 더 이상 원하지 않는 잡을 멈춘다. 행은 남는다 — 무엇을 멈추라고 들었는지 잊는 큐는 왜
 아무것도 오지 않았는지 답할 수 없다.
+
+**응답** 200, 잡을 실어서. 그 `state`가 답이다. 401 `unauthenticated`; 404 `not_found`;
+이미 끝난 잡은 409 `conflict`; 429 `rate_limited`.
 
 ```sh
 curl -s -X DELETE -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB
@@ -400,13 +438,16 @@ curl -s -X DELETE -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB
 
 잡 원장, 최신순.
 
+**응답** 200. 401 `unauthenticated`; 범위 밖의 `limit`, 해석되지 않는 `since`/`until`,
+이 API가 발급하지 않은 cursor는 422 `invalid_request`; 429 `rate_limited`.
+
 | 파라미터 | |
 | --- | --- |
 | `state` | `queued`, `running`, `succeeded`, `failed`, `cancelled` |
 | `kind` | 위 kind 중 하나 |
-| `target` | 저장된 정규형 target |
-| `since` / `until` | RFC 3339, `created_at` 기준 |
-| `limit` | 기본 50, 최대 500 |
+| `target` | 저장된 그대로의 target, 바이트 단위로 일치해야 한다 |
+| `since` / `until` | RFC 3339, **`created_at`** 기준 — 잡이 요청된 시각 |
+| `limit` | 기본 50. 1–500 밖이면 잘라내지 않고 422 `invalid_request`로 **거부한다** |
 | `cursor` | 이전 페이지에서 받은 값 |
 
 ```sh
@@ -415,7 +456,7 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/jobs?state=failed&limit=20'
 
 ```json
 {
-  "jobs": [{ "job_id": "j_2f7c1d9a", "state": "failed", "error_code": "upstream_error" }],
+  "jobs": [{ "job_id": "j_2f7c1d9a", "state": "failed", "error_code": "UpstreamError" }],
   "cursor": "MjAyNi0wOC0xOVQwOToxMjozMSswMDowMHxqXzJmN2MxZDlh"
 }
 ```
@@ -431,8 +472,21 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/jobs?state=failed&limit=20'
 
 ## `GET /v1/artifacts`
 
-요청된 것이 아니라 **실제로 수집된 것**. `kind`, `target`, `since`, `until`, `limit`,
-`cursor`를 받고 `fetched_at`으로 거른다.
+요청된 것이 아니라 **실제로 수집된 것**.
+
+**응답** 200. 401 `unauthenticated`; 범위 밖의 `limit`, 해석되지 않는 `since`/`until`,
+이 API가 발급하지 않은 cursor는 422 `invalid_request`; 429 `rate_limited`.
+
+| 파라미터 | |
+| --- | --- |
+| `kind` | 위 kind 중 하나 |
+| `target` | 저장된 그대로의 target, 바이트 단위로 일치해야 한다 |
+| `since` / `until` | RFC 3339, **`fetched_at`** 기준 — 관측이 이뤄진 시각. 잡 라우트에서는 요청된 시각인 `created_at` 기준이다 |
+| `limit` | 기본 50. 1–500 밖이면 잘라내지 않고 422 `invalid_request`로 **거부한다** |
+| `cursor` | 이전 페이지에서 받은 값 |
+
+**여기에는 `state`가 없고, 그것은 의도된 것이다.** state는 요청에 딸린 것이고 이 표는 이미
+일어난 일의 기록만 담는다 — 이 표의 모든 행은 성공한 수집이다.
 
 ```sh
 curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/artifacts?target=dQw4w9WgXcQ'
@@ -468,12 +522,13 @@ artifact 테이블은 덮어쓰지 않고 덧붙이므로, `target`으로 거르
 
 ---
 
----
-
 ## `GET /v1/artifacts/{digest}`
 
 관측 하나를, 그 내용 주소로. 이력을 읽는 방법이 이것이다 — 목록 라우트가 digest를 내주고,
 이 라우트가 그것을 실제 데이터로 바꾼다.
+
+**응답** 200. 401 `unauthenticated`; 404 `not_found`; 409 `conflict`; 410 `retracted`;
+429 `rate_limited`.
 
 ```sh
 curl -s -H "X-API-Key: $KEY" localhost:8080/v1/artifacts/b9f4c0e2...
@@ -522,6 +577,34 @@ null 버전은 "괜찮다"가 아니라 "모른다"이고, 버전을 철회한 k
 retention이 바이트를 지웠거나, `TUBEDEPTH_DATA_DIR`가 이 index가 만들어질 때의 store가
 아니거나. index와 store는 한 쌍이고, 어느 쪽이 움직였는지는 운영자만 안다.
 
+### 한 target의 이력을 끝까지 읽기
+
+두 라우트를 한 쌍으로: 한 target의 관측 목록을 받고, 거기서 받은 digest 하나를 실제 데이터로
+바꾼다.
+
+```sh
+KEY=ytd_...
+TARGET=dQw4w9WgXcQ
+
+# 그 target의 모든 관측, 최신순
+curl -s -H "X-API-Key: $KEY" \
+     "localhost:8080/v1/artifacts?kind=video.metadata&target=$TARGET"
+
+# 그중 가장 최근 것을 통째로
+DIGEST=$(curl -s -H "X-API-Key: $KEY" \
+     "localhost:8080/v1/artifacts?kind=video.metadata&target=$TARGET" \
+     | jq -r '.artifacts[0].digest')
+curl -s -H "X-API-Key: $KEY" "localhost:8080/v1/artifacts/$DIGEST"
+```
+
+모르면 반나절을 쓰게 되는 것 둘:
+
+- **`target`은 저장된 그대로 바이트 단위로 일치해야 한다.** 이 라우트로 들어올 때 정규화되지
+  않고, 접두사 매칭도 대소문자 무시도 없다. 등록 때 저장된 값과 정확히 같아야 한다.
+- **handle과 채널 id는 서로 다른 target이다** (`## kind` 참조). `@veritasium`으로 수집된 이력은
+  `UCHnyfMqiRRG1u-2MsSQLbXA`로 물어도 나오지 않으며, 어느 쪽도 무언가를 빠뜨린 것이 아니다 —
+  그냥 이력이 둘인 것이다.
+
 ## 페이지네이션
 
 두 목록 엔드포인트 모두 `cursor`를 돌려주고, `null`이면 마지막 페이지였다는 뜻이다 —
@@ -538,30 +621,84 @@ curl -s -H "X-API-Key: $KEY" "localhost:8080/v1/jobs?cursor=$CURSOR"
 
 ## 오류
 
-모든 오류는 같은 모양이다.
+이 문서가 설명하는 모든 오류는 같은 모양이다. 라우트가 실행되기도 전에 프레임워크가 거부하는
+것들 — 형식이 틀린 본문, 해석되지 않는 `since`, 범위 밖의 `limit` — 도 모두 이 모양의
+`invalid_request`다.
 
 ```json
 { "error": { "code": "not_found", "message": "job not found: j_2f7c1d9a" } }
 ```
 
+<!-- error-codes:start -->
+
 | 상태 | 코드 | 뜻 |
 | --- | --- | --- |
 | 401 | `unauthenticated` | 키가 없거나, 형식이 틀렸거나, 모르는 키이거나, 폐기됨 |
-| 422 | `invalid_request` | 모르는 kind, 해석 불가한 target, 이 API가 발급하지 않은 커서 |
-| 404 | `not_found` | 그런 잡이 없음 — 또는 영상이 요청된 것을 갖고 있지 않음 |
+| 422 | `invalid_request` | 형식이 틀린 본문, 해석되지 않는 쿼리 값, 범위 밖의 limit, 읽을 수 없는 target, 이 API가 발급하지 않은 cursor |
+| 404 | `not_found` | 그런 잡이나 digest가 없음, 그 kind로 등록된 소스가 없음 — 또는 영상이 요청된 것을 갖고 있지 않음 |
+| 404 | `unavailable` | 영상은 있으나 여기서 볼 수 없음: 비공개, 삭제됨, 멤버십 전용, 연령 제한, 지역 차단. 우리 버그가 아니고 재시도할 값어치도 없다 |
 | 409 | `conflict` | 잡은 있으나 아직 끝나지 않음 |
 | 410 | `retracted` | 이 관측을 수집한 버전이 철회됨 |
 | 429 | `rate_limited` | 키 할당량 초과, 또는 업스트림이 이 주소를 거부 |
 | 502 | `parse_mismatch` | YouTube는 답했고 우리 파서가 그것을 더는 이해하지 못함 |
 | 502 | `upstream_error` | 업스트림이 답했으나 그 답을 쓸 수 없음 |
+| 503 | `not_configured` | 이 배포에 필요한 것이 빠져 있음 — 설정되지 않은 data API 키, search path가 한 번도 설정된 적 없는 데이터베이스 role. 설정을 고치고 다시 요청하면 된다 |
 | 500 | `internal_error` | 우리 버그 |
+
+<!-- error-codes:end -->
+
+이 서비스의 것이 아니라 프레임워크의 것이어서 저 모양을 쓰지 않는 응답이 둘 있다. 이 API가
+아예 라우팅하지 않는 경로로 온 요청과, 라우팅되는 경로에 없는 메서드로 온 요청은 `detail`
+필드를 단 404와 405로 돌아온다. 이 문서가 설명하는 것 중에 그렇게 답하는 것은 없다.
 
 `parse_mismatch`는 다른 모든 업스트림 실패와 분리되어 있고 **절대 재시도되지 않는다.**
 일시적인 것도 네트워크 문제도 아니다. 재시도는 멀쩡히 답한 주소에 대고 요청을 낭비할 뿐이고,
 고치는 것은 코드 변경뿐이다. 500이 아니라 502인 것도 같은 이유다 — 500은 운영자를 우리
 트레이스백으로 보내고, 502는 메시지에 적힌 렌더러 이름으로 보낸다.
 
+`unavailable`과 `not_configured`는 반대 방향에서 같은 이유로 있다. 둘 다 예전에는 500
+`internal_error`로 나왔는데, 이 표는 그것을 "우리 버그"라고 정의한다. 지역 차단된 영상은 우리
+버그가 아니고, 설정되지 않은 키도 아니다 — 특히 503은 운영자에게 트레이스백이 아니라 설정을
+보라고 말하는 응답이다.
+
 `message`는 사람에게 보여줄 것으로 쓰였고 문제가 된 값을 이름으로 담는다.
+
+### 잡의 `error_code`는 다른 어휘다
+
+**필드 이름은 같고 값의 공간은 다르다.** 위 표는 HTTP 오류 본문 안의 `code`다. 잡의
+`error_code` — `GET /v1/jobs`, `GET /v1/jobs/{job_id}`, 웹훅 본문, payload의 `degradations`
+각 항목, 그리고 `/healthz`의 `last_error_code` — 는 그 표에서 오지 않는다. 실패가 발생한
+**Python 클래스의 이름**을 그대로 쓴 것이고, 예외가 아닌 리터럴 하나가 더 있다.
+
+그래서 실패한 잡은 `UpstreamError`라고 말하지 `upstream_error`라고 말하지 않는다. 둘 사이를
+번역해 주는 것은 없고, 양쪽 표기가 모두 존재하는 값도 하나도 없다.
+
+<!-- job-error-codes:start -->
+
+| 값 | 무엇이 일어났나 |
+| --- | --- |
+| `ValidationError` | 요청을 이해할 수 없었다: 형식이 틀린 식별자, 잘못된 옵션 |
+| `NotFoundError` | 요청된 것이 여기 없거나, 영상이 그것을 갖고 있지 않다 |
+| `UnavailableError` | 영상은 있으나 여기서 볼 수 없다: 비공개, 삭제됨, 멤버십 전용, 연령 제한, 지역 차단 |
+| `UpstreamError` | 백엔드가 답했고, 그 답을 쓸 수 없었다 |
+| `RateLimitedError` | 업스트림이 속도를 줄이라고 했거나 이 주소를 아예 거부했다 |
+| `ExtractionError` | 백엔드는 답했는데 그 응답에 파서가 찾는 것이 더는 없다 |
+| `ConfigurationError` | 우리 쪽 설정 오류. 클라이언트 잘못인 적이 없다 |
+| `UnauthenticatedError` | 키가 제시되지 않았거나, 제시된 키를 모르거나 폐기됐다 |
+| `RetractedError` | 저장된 관측인데, 그것을 수집한 버전이 잘못 수집한 것으로 밝혀졌다 |
+| `ConflictError` | 그것은 있지만 상태가 맞지 않는다 |
+| `lease_expired` | 예외가 아니다: 워커가 잡을 집은 뒤 lease를 갱신하지 않았고, 마지막 시도까지 쓴 뒤 reaper가 포기했다 |
+
+<!-- job-error-codes:end -->
+
+이 프로젝트가 정의하는 도메인 오류가 전부 실려 있다. 워커는 자기에게 도달한 것을 그대로 쓰기
+때문이다. 실제 잡에서 보기 어려운 것도 여럿 있다.
+
+**이 이름들을 HTTP 코드에 맞춰 바꾸지 않으며, 앞으로도 바꾸지 않는다.** 데이터베이스에 이미
+들어 있는 행들이 클래스 이름을 담고 있고, 이름을 바꾸면 원장이 한꺼번에 두 어휘를 갖게 된다 —
+같은 실패를 두고 어떤 행은 `ExtractionError`라 하고 어떤 행은 `parse_mismatch`라고 하는 상태다.
+그런 원장은 어떤 문서도 정직하게 설명할 수 없고 어떤 클라이언트도 분기할 수 없다. 안정된 쪽은
+이 이름들이고, 움직여도 되는 쪽은 HTTP로의 대응이다.
 
 ## 웹훅
 
@@ -605,6 +742,11 @@ hmac.compare_digest(expected, presented)
 
 전송은 at-least-once이고 8회 시도 후 포기한다. 2xx면 배달된 것으로 세고, 그 밖이면 잡은
 빚진 상태로 남아 다음 스윕이 다시 시도한다.
+
+**전송은 10초에 타임아웃되고, 타임아웃은 실패한 전송이다.** 그보다 오래 걸려 답하는 수신자는
+다른 실패와 똑같이 재시도되고, 자기 쪽 작업이 아무리 잘 끝났어도 같은 본문을 다시 받는다.
+콜백에는 데이터가 실려 있지 않으므로 답하기 전에 할 일도 없다 — 먼저 응답하고, 그 다음에
+일한다.
 
 ## 이 API가 하지 않는 것
 
