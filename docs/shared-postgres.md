@@ -1,24 +1,47 @@
-# 하나의 PostgreSQL database를 여러 서비스가 공유할 때의 운영 지시 규정
+# 하나의 PostgreSQL server를 여러 서비스가 공유할 때의 운영 지시 규정
 
-> 이 파일은 함대 공통 규정의 사본이다. 문구를 저장소 사정에 맞게 고치지 않는다 — 이 저장소가
-> 규정을 어떻게 적용하는지는 `docs/status.md`의 "규정 적용" 절에 적는다. 규정 자체의 개정은
-> 함대 수준에서 하고, 개정본을 그대로 다시 복사한다.
+> 이 문서는 이 저장소가 정하고 개정하는 이 저장소 자신의 운영 규정이다. 다른 서비스가
+> 공유 PostgreSQL server에 올라탈 때 그대로 채택할 수 있는 모양을 목표로 쓰여 있지만, 그런
+> 채택을 실제로 조율하는 상위 절차는 존재하지 않는다 — 개정은 이 저장소 안에서, 이 파일을
+> 고쳐서 한다. 이 저장소가 각 규칙을 실제로 어떻게 적용하는지는 규정 본문이 아니라
+> `docs/status.md`의 "규정 적용" 절에 적는다. 그 구분(규칙은 여기, 적용은 거기)은 여전히
+> 쓸모가 있어서 유지한다.
 
 ## 목적과 적용 범위
 
-이 문서는 여러 서비스가 **하나의 PostgreSQL database 안에서 서비스별 schema를 소유**하는 구성에 적용한다.
+이 문서는 여러 서비스가 **하나의 PostgreSQL server(cluster)를 공유하되, 서비스마다 자기
+database를 하나씩 소유**하는 구성에 적용한다. "하나의 database 안에서 서비스별 schema를
+소유"하는 구성이 아니다 — schema별 소유는 database 안에서도 반복하는 구조라서 아래 규칙 대부분에
+여전히 나오지만, 그 스스로가 서비스 사이의 경계는 아니다.
 
 ```text
-PostgreSQL cluster / instance
-└─ database: app
-   ├─ schema: orders
-   ├─ schema: catalog
-   └─ schema: identity
+PostgreSQL server / cluster
+├─ database: orders    (schema: orders,   owner: orders_owner)
+├─ database: catalog   (schema: catalog,  owner: catalog_owner)
+└─ database: identity  (schema: identity, owner: identity_owner)
 ```
 
-이 구조의 목표는 단순히 현재의 공유 database를 안전하게 사용하는 데 그치지 않는다.
+이 구성에서 규칙들이 강제되는 방향은 하나가 아니다. 읽을 때 자신이 어느 문단에 있는지 알아야 한다.
 
-> 어느 서비스든 자기 schema를 별도 database로 옮겼을 때 데이터 소유권과 애플리케이션 의미가 깨지지 않아야 한다.
+- **규칙 4(connection budget)는 여전히 database 경계를 넘는 유일한 규칙이고, 오히려 더 세게
+  걸린다.** `max_connections`는 cluster 설정이고 role은 cluster 전역이라, 한 role의
+  `CONNECTION LIMIT`은 이 server의 모든 database에 걸쳐 그 role을 제한한다. server에 남은
+  공유 자원은 이것 하나뿐이다.
+- **규칙 10–13**(cross-service FK, shared table, cross-service SQL, cross-schema
+  transaction)은 금지가 아니라 **구조적으로 불가능**해진다. cross-database query는
+  `dblink`나 `postgres_fdw`가 있어야 하는데 둘 다 extension이고, 규칙 8이 서비스 migration의
+  extension 설치를 금지한다.
+- **규칙 14의 extraction test는 오히려 쉬워진다.** 서비스당 database가 이미 하나씩이므로
+  추출이 `pg_dump` 한 번이다.
+- **규칙 0과 2의 schema 격리 장치는 불필요해지지만 무해하며, 이 저장소는 그것을 의도적으로
+  전부 유지한다**(`docs/status.md` 참고). 이 문서가 그 장치를 계속 규칙으로 두는 이유는,
+  한 database를 여러 서비스가 실제로 공유하게 되는 경우에도 이 문서가 그대로 작동해야
+  하기 때문이다.
+
+이 구조의 목표는 단순히 현재의 공유 server를 안전하게 사용하는 데 그치지 않는다.
+
+> 어느 서비스든 자기 schema(또는 database)를 별도 database로 옮겼을 때 데이터 소유권과
+> 애플리케이션 의미가 깨지지 않아야 한다.
 
 문서에서 다음 용어는 강제 수준을 뜻한다.
 
@@ -30,7 +53,7 @@ PostgreSQL cluster / instance
 
 ```yaml
 service: orders
-database: app
+database: orders
 schema: orders
 roles:
   owner: orders_owner
@@ -108,8 +131,6 @@ ALTER DEFAULT PRIVILEGES FOR ROLE orders_owner IN SCHEMA orders
   GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO orders_runtime;
 ALTER DEFAULT PRIVILEGES FOR ROLE orders_owner IN SCHEMA orders
   GRANT USAGE, SELECT ON SEQUENCES TO orders_runtime;
-ALTER DEFAULT PRIVILEGES FOR ROLE orders_owner IN SCHEMA orders
-  REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
 
 ALTER ROLE orders_runtime IN DATABASE app
   SET search_path = orders, pg_catalog;
@@ -118,6 +139,30 @@ ALTER ROLE orders_migrator IN DATABASE app
 ```
 
 필요한 function은 `PUBLIC`이 아니라 호출 주체에게만 `EXECUTE`를 부여한다. 기존 객체에 대한 `GRANT`와 미래 객체에 대한 `ALTER DEFAULT PRIVILEGES`를 둘 다 설정한다. 후자는 **지정한 object creator가 앞으로 만드는 객체에만** 적용된다.
+
+**PUBLIC의 function `EXECUTE`는 예외다 — `ALTER DEFAULT PRIVILEGES`로 회수할 수 없다.**
+`ALTER DEFAULT PRIVILEGES FOR ROLE orders_owner IN SCHEMA orders REVOKE EXECUTE ON
+FUNCTIONS FROM PUBLIC;`는 오류 없이 실행되지만 `pg_default_acl`에 아무 행도 만들지
+않는다. PUBLIC에 대한 function `EXECUTE`는 `GRANT`로 부여된 권한이 아니라 PostgreSQL의
+내장 기본값이라서, 회수할 대상 자체가 없기 때문이다(실측, PostgreSQL 18.6: 위 문장을
+실행한 뒤에도 owner가 새로 만든 function의 `proacl`은 `NULL`이고
+`has_function_privilege('public', ..., 'EXECUTE')`는 `true`를 반환했다). 그래서 위
+bootstrap 예시에서 이 문장을 뺐다 — 실행해도 아무것도 바꾸지 않는 문장을 규정에 남겨
+두면, 그것이 보호하고 있다고 믿게 만드는 것 자체가 피해다.
+
+이 규칙이 실제로 요구하는 것("필요한 function은 PUBLIC이 아니라 호출 주체에게만
+`EXECUTE`를 부여한다")을 지키려면 **function을 만드는 쪽에서 매번** 명시적으로
+회수해야 한다 — 이 회수를 앞서 걸어 두는 방법은 없다.
+
+```sql
+REVOKE EXECUTE ON ALL FUNCTIONS IN SCHEMA orders FROM PUBLIC;
+```
+
+이 문장도 그 시점에 이미 존재하는 function에만 적용된다(실측: 이 문장을 실행한 뒤에
+만든 function은 다시 PUBLIC에 `EXECUTE`를 갖는다). 따라서 이것은 bootstrap 시점에 한
+번 거는 설정이 아니라, function을 만드는 **모든** migration이 스스로 끝에 실행해야 하는
+단계다. 사람이 놓치기 쉬운 단계이므로, 아래 확인 방법의 감사 query를 정기 감사와 배포
+gate에 반드시 포함한다 — 이 규칙의 실제 강제력은 사전 설정이 아니라 그 감사에 있다.
 
 **이유.** schema owner인 runtime credential이 탈취되거나 잘못된 SQL을 실행하면 DML 사고가 DDL 사고로 확대된다. owner를 `NOLOGIN`으로 두고 migration 경로에서만 사용하면 서비스 경계와 변경 경로를 database가 강제한다.
 
@@ -141,6 +186,22 @@ WHERE n.nspname = 'orders'
 ```
 
 결과가 비어 있어야 한다. 승인된 예외가 있다면 manifest와 일치해야 한다.
+
+`ALTER DEFAULT PRIVILEGES ... REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC`가 아무것도
+기록하지 않으므로, PUBLIC이 여전히 `EXECUTE`를 가진 function을 다음 query로 직접 찾는다.
+
+```sql
+SELECT n.nspname, p.proname,
+       has_function_privilege('public', p.oid, 'EXECUTE') AS public_can_execute
+FROM pg_proc p
+JOIN pg_namespace n ON n.oid = p.pronamespace
+WHERE n.nspname = 'orders'
+  AND has_function_privilege('public', p.oid, 'EXECUTE');
+```
+
+결과가 비어 있어야 한다. 비어 있지 않다면 승인 없이 PUBLIC에 노출된 function이 있다는
+뜻이고, 이는 경고가 아니라 배포 gate다 — 앞 절에서 확인했듯 사전에 걸어 둘 방법이 없는
+규칙이라 이 감사가 유일한 강제 지점이다.
 
 ---
 
@@ -290,10 +351,23 @@ ALTER ROLE orders_runtime IN DATABASE app
 
 **확인 방법.** 설정값과 오래된 transaction을 점검한다.
 
+`pg_roles.rolconfig`는 이 규칙이 요구하는 형태의 설정을 담지 않는다. 이 규칙은
+`ALTER ROLE ... IN DATABASE ... SET ...`로 role×database 조합에 설정을 거는데, 그렇게
+건 값은 `pg_db_role_setting`에 저장되고 `pg_roles.rolconfig`는 NULL로 남는다(실측,
+PostgreSQL 18.6: 이 규칙대로 설정한 세 role 모두 `rolconfig`가 NULL이었고
+`pg_db_role_setting`에는 요구되는 설정이 전부 있었다). 반대 방향으로도 틀린다 —
+`rolconfig`는 database를 지정하지 않은 `ALTER ROLE ... SET ...`(이 규칙이 요구하지 않는,
+server의 모든 database에 적용되는 형태)에는 값을 채운다. 그래서 `rolconfig`로 감사하면
+규정을 지킨 서비스를 미설정으로 보고하고, 규정이 요구하지 않는 database 전역 설정을
+준수로 보고한다 — 양방향으로 거꾸로다. 감사는 `pg_db_role_setting`을 직접 봐야 한다.
+
 ```sql
-SELECT rolname, rolconfig
-FROM pg_roles
-WHERE rolname LIKE '%\_runtime' ESCAPE '\';
+SELECT r.rolname, d.datname, s.setconfig
+FROM pg_db_role_setting s
+JOIN pg_roles r ON r.oid = s.setrole
+LEFT JOIN pg_database d ON d.oid = s.setdatabase
+WHERE r.rolname LIKE '%\_runtime' ESCAPE '\'
+ORDER BY r.rolname, d.datname;
 
 SELECT pid, usename, application_name, state,
        now() - xact_start AS transaction_age,

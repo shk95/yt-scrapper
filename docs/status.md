@@ -527,12 +527,20 @@ them the deadlock.
 retention"이라고 말했고, 그것은 on-call을 존재하지 않는 retention 버그를 찾으러
 보내는 문구다.
 
-### 규정 적용 — 함대 PostgreSQL 규정을 이 저장소가 지키는 방법
+### 규정 적용 — 이 저장소의 PostgreSQL 규정을 이 저장소가 지키는 방법
 
-2026-08-20에 [`docs/shared-postgres.md`](shared-postgres.md)가 **함대 공통
-규정으로 교체**되었다. 이전 내용(이 저장소가 직접 쓴 10개 규칙)은 규정의
-상위집합으로 흡수됐고, 저장소별 적용 방식은 규정이 아니라 여기에 적는다 —
-규정 사본은 함대 전체에서 byte 단위로 같아야 개정을 그대로 덮어쓸 수 있다.
+2026-08-20에 [`docs/shared-postgres.md`](shared-postgres.md)가 **이 저장소
+자신의 확장된 규정으로 교체**되었다(이전 내용은 이 저장소가 직접 쓴 10개
+규칙이었고, 새 규정은 그 상위집합이다). 같은 날 이 문서는 한동안 "함대 공통
+규정의 사본"이라고 자신을 소개했는데, 그런 사본도 그것을 조율하는 함대
+수준의 개정 절차도 실제로는 존재하지 않았다 — 이 서버의 다른 서비스인
+trend-radar는 이 규정을 전혀 가지고 있지 않고 자기 계약을 별도 문서로 쓴다.
+그 잘못된 전제 때문에 실제로 시간이 든 적이 있다(이 저장소만 답할 수 있는
+질문을 "함대의 답"을 기다리며 미룬 세션 하나). 그래서 이 규정은 이제
+사본이 아니라 이 저장소가 직접 정하고 개정하는 문서라고 명시적으로 선언한다
+— 개정은 함대 어딘가가 아니라 `docs/shared-postgres.md`를 고치는 커밋으로
+한다. 저장소별 적용 방식은 규정 본문이 아니라 여기 이 절에 적는다는 구분은
+그대로 유지한다.
 
 **Alembic 전략 선언 (규정 2의 예외 조항 사용).** 규정의 기본은 명시적 schema
 qualification(`MetaData(schema=…)` + `include_schemas=True` + allowlist +
@@ -559,8 +567,11 @@ autogenerate를 돌려 sentinel이 diff에 나타나지 않음을 CI가 매번 �
 저장소는 위에서 선언한 대로 search_path 전략을 쓰고, 기존 5개 revision이 모두
 schema-unqualified이므로 migrator의 `search_path`가 `tubedepth`를 포함하지 않으면
 모든 revision이 `public`에 테이블을 만든다. 그래서 `deploy/postgres-bootstrap.sql`은
-migrator와 runtime 둘 다 `search_path = tubedepth, pg_catalog`로 둔다. `docs/shared-postgres.md`는
-함대 공통 사본이라 이 차이를 반영해 고치지 않는다 — 이 문단이 그 대신이다.
+migrator와 runtime 둘 다 `search_path = tubedepth, pg_catalog`로 둔다. `docs/shared-postgres.md`의
+예시는 규정 기본형(명시적 schema qualification)을 쓰는 서비스를 위한 fail-closed 예시를
+그대로 둔다 — 다른 서비스가 그대로 채택할 수 있어야 하는 것은 그 예시 쪽이지, 이 저장소가
+예외 조항을 쓴 사정이 아니다. 그래서 이 차이를 규정 문서에 반영해 고치지 않는다 — 이
+문단이 그 대신이다.
 
 **규칙별 상태.**
 
