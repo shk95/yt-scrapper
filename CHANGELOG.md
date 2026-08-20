@@ -54,6 +54,21 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Added
 
+- **A Docker image, and a compose example that runs the whole thing (#22).**
+  One image, `ENTRYPOINT ["tubedepth"]`, so the four services in
+  `deploy/docker-compose.yml` — `migrate`, `api`, `worker`, `watch` — differ
+  only by their `command:`. `migrate` is a one-shot the other three wait to see
+  *complete successfully*, because the boot path issues no DDL (#14) and a
+  container that migrated on start would put that back. `api` and `worker`
+  share one env block through a YAML anchor rather than by review: the listing,
+  comment and trending caps are part of the cache key, and two processes that
+  disagree about them answer different questions. The image carries no
+  `HEALTHCHECK` — it would be wrong for a worker with no endpoint and for a
+  one-shot that is supposed to exit — so the API's lives in the compose file.
+  The database is the external fleet one by default; `--profile local` brings
+  up a PostgreSQL bootstrapped by `deploy/postgres-bootstrap.sql` itself.
+  `just compose-up` is the whole command. No registry publishing.
+
 - **`tubedepth watch <list>` — one schedule that collects by channel, by trend
   keyword and by region (#20).** The list is typed: `video`, `channel`,
   `search` or `trending`, then the target, one directive per line. A bare-id

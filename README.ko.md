@@ -136,6 +136,45 @@ API를 같이 죽인다.
 API는 기본적으로 **loopback에만** 바인딩한다. 이 프로젝트의 인증은 헤더이고 그건 TLS의
 대체물이 아니므로, 외부에 열려면 리버스 프록시를 앞에 둔다.
 
+## Docker로 돌리기
+
+이미지 하나, `deploy/docker-compose.yml`에 서비스 넷. `migrate`가 한 번 돌고,
+`api`·`worker`·`watch`가 그것이 성공적으로 끝나기를 기다린다. 이미지가
+`ENTRYPOINT ["tubedepth"]`라서 세 서비스는 `command:`만 다르다.
+
+```sh
+cp deploy/.env.example deploy/.env
+$EDITOR deploy/.env               # 데이터베이스 URL 둘, 그리고 로컬 비밀번호들
+just compose-up                   # --profile local이라 PostgreSQL도 같이 뜬다
+curl -s localhost:8080/healthz
+just compose-down
+```
+
+기본 전제는 외부 fleet PostgreSQL이다. `just compose-up`이 붙이는
+`--profile local`이 자체 PostgreSQL을 하나 띄우고, 그것을
+`deploy/postgres-bootstrap.sql` — 컨테이너용 사본이 아니라 실제 배포가 돌리는
+그 파일 — 로 세팅한다. 그래서 여기서 확인하는 모양이 프로덕션의 모양이다.
+
+자격증명은 전부 `deploy/.env`에 있다. compose 파일은 커밋되고 데이터베이스 URL은
+비밀번호를 품으므로, `deploy/docker-compose.yml`은 전부 `${...}`로 받고 비밀
+리터럴을 하나도 갖지 않는다 — 테스트가 그것을 확인한다.
+
+우연이 아닌 것 셋. 이미지에는 **`HEALTHCHECK`가 없다** — 포트를 열지 않는
+worker와 watch에게, 그리고 끝나는 게 정상인 one-shot `migrate`에게 틀린 검사이기
+때문이다. `/healthz`를 답하는 서비스는 `api` 하나뿐이므로 healthcheck는 compose에
+있다. 그 `api`는 `--host 0.0.0.0`으로 뜨는데, systemd 유닛이 loopback에 묶는 것과
+반대다: 컨테이너 네트워크는 포트를 게시하기 전까지 아무도 닿지 못하고, 그 결정이
+내려지는 곳이 `ports:` 한 줄이다. 그리고 `api`와 `worker`는 리뷰가 아니라 YAML
+anchor로 env block 하나를 공유한다. listing·comment·trending cap이 cache key의
+일부라서, 둘이 다른 값을 읽으면 서로 다른 키를 계산하고 API는 worker가 수집한 적
+없는 질문에 답하게 된다.
+
+payload store는 `api`와 `worker`가 공유하는 named volume이다. payload 바이트는
+데이터베이스 행이 아니라 디스크의 gzip 파일이고, API는 worker가 쓴 것을 서빙한다.
+
+레지스트리 배포는 없다. 이미지는 돌아가는 자리에서 빌드한다 —
+`just compose-up`이 빌드하고, CI가 push마다 여전히 빌드되는지 확인한다.
+
 ## 문서
 
 | | |

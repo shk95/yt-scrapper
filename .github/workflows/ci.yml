@@ -100,10 +100,103 @@ jobs:
       - name: Test
         run: tool/checks/test
 
+  # The image and the compose example, which `verify` cannot cover: every
+  # assertion in tests/test_compose.py is a file parse, on purpose (the suite
+  # refuses outbound sockets and never talks to a daemon), so nothing there
+  # would notice that the Dockerfile stopped building or that the stack no
+  # longer comes up. Without this job that is discovered at release time.
+  image:
+    name: Image and compose
+    runs-on: ubuntu-latest
+
+    # No `services:` block, unlike `verify` above: the database this job needs
+    # is the one the compose file's `local` profile brings up, which is the
+    # thing under test. Bootstrapping it is deploy/postgres-initdb's job, not a
+    # workflow step — the whole point of that wrapper is that a deployment and
+    # CI run the same deploy/postgres-bootstrap.sql.
+    env:
+      # Interpolated by compose. Check values, and this is a throwaway
+      # container on a runner that is destroyed afterwards — but they are still
+      # passed as environment rather than written into any file.
+      TUBEDEPTH_IMAGE: tubedepth:ci
+      TUBEDEPTH_API_PORT: 8080
+      TUBEDEPTH_DATABASE_URL: postgresql+psycopg://tubedepth_runtime:check-runtime@postgres:5432/fleet
+      TUBEDEPTH_MIGRATOR_DATABASE_URL: postgresql+psycopg://tubedepth_migrator:check@postgres:5432/fleet
+      TUBEDEPTH_LOCAL_SUPERUSER_PASSWORD: fleet
+      TUBEDEPTH_LOCAL_MIGRATOR_PASSWORD: check
+      TUBEDEPTH_LOCAL_RUNTIME_PASSWORD: check-runtime
+
+    steps:
+      - uses: actions/checkout@v7
+
+      # No `astral-sh/setup-uv` here, unlike `verify`, and no
+      # `actions/setup-python` either: nothing in this job runs uv or a runner
+      # Python. The Dockerfile brings its own uv (pinned, from uv's published
+      # image) and builds its own venv, which is the whole point — a step that
+      # installed a second toolchain nobody calls would read as setup and do
+      # nothing, which is worse than not being there.
+      - name: Build the image
+        run: docker build -t "$TUBEDEPTH_IMAGE" .
+
+      # The cheapest possible proof that the image can run its entrypoint:
+      # `ENTRYPOINT ["tubedepth"]`, so the argument is all that is passed. It
+      # catches a broken venv, a missing source tree and a console script that
+      # cannot import its package, none of which the build itself notices.
+      - name: Smoke test the entrypoint
+        run: |
+          docker run --rm "$TUBEDEPTH_IMAGE" --help
+          docker run --rm "$TUBEDEPTH_IMAGE" version
+
+      # One line, rather than the committed example this file otherwise
+      # mounts. The example's `channel`, `search` and `trending` directives
+      # each fan out to a job per video they find — up to
+      # TUBEDEPTH_LISTING_LIMIT of them — and a runner is a datacenter
+      # address, which AGENTS.md is explicit is the kind YouTube bot-checks.
+      # This job is about whether the stack comes up, and it should not also
+      # be about what YouTube thinks of the runner.
+      #
+      # Not an *empty* list: `watch` refuses one (`_watch_pass`: a watcher
+      # that watches nothing while reporting success is the failure the
+      # command is shaped against), so it would exit non-zero and
+      # `restart: unless-stopped` would turn this into a restart loop.
+      - name: A one-line watch list, to keep the stack off YouTube's radar
+        run: |
+          printf 'video dQw4w9WgXcQ\n' > /tmp/watchlist.txt
+          echo "TUBEDEPTH_WATCHLIST_FILE=/tmp/watchlist.txt" >> "$GITHUB_ENV"
+
+      # `--profile local`, so the stack brings up its own PostgreSQL and
+      # bootstraps it with the same file production runs. `--wait` blocks until
+      # every service is healthy or has completed, which is what makes
+      # `migrate` exiting non-zero — or the API failing its healthcheck — a
+      # failure here rather than a later curl that times out for reasons
+      # nobody can see.
+      - name: Bring up the local-profile stack
+        run: |
+          docker compose -f deploy/docker-compose.yml --profile local up -d --wait
+
+      - name: Check /healthz
+        run: |
+          set -e
+          code=$(curl -s -o /tmp/healthz.json -w '%{http_code}' \
+            "http://127.0.0.1:${TUBEDEPTH_API_PORT}/healthz")
+          cat /tmp/healthz.json
+          echo
+          test "$code" = "200"
+
+      # Runs even when a step above failed, which is the only moment the logs
+      # are worth anything: a stack that did not come up leaves no other trace.
+      - name: Logs
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml --profile local logs --no-color
+
+      - name: Tear down
+        if: always()
+        run: docker compose -f deploy/docker-compose.yml --profile local down -v
+
   required:
     name: Required checks
     runs-on: ubuntu-latest
-    needs: [verify]
+    needs: [verify, image]
     if: always()
     steps:
       # A stable job name for branch protection to require, so adding or
@@ -112,6 +205,10 @@ jobs:
         run: |
           if [ "${{ needs.verify.result }}" != "success" ]; then
             echo "verify did not succeed: ${{ needs.verify.result }}" >&2
+            exit 1
+          fi
+          if [ "${{ needs.image.result }}" != "success" ]; then
+            echo "image did not succeed: ${{ needs.image.result }}" >&2
             exit 1
           fi
           echo "all required checks passed"

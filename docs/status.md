@@ -783,6 +783,56 @@ IMMEDIATE를 "belt and braces"로 부르지 않는다 — guarded UPDATE와 rowc
 **Manifest**: [`service-db.json`](../service-db.json).
 
 
+### 컨테이너로 배포할 때 되돌리기 비싼 것들 (#22)
+
+이미지 하나에 `ENTRYPOINT ["tubedepth"]`, compose 서비스는 `command:`만 다르다.
+여기 적는 것은 나중에 바꾸려면 비싼 결정들이다.
+
+**`--concurrency`는 compose에서 플래그이고, 그래서 예산 교차 검증의 다섯 번째
+자리다.** `api`와 `worker`는 YAML anchor 하나로 env block을 공유해야 한다 —
+listing·comment·trending cap이 cache key의 일부라서, 두 프로세스가 다른 값을
+읽으면 API가 worker가 수집한 적 없는 질문에 답한다. worker에만
+`TUBEDEPTH_CONCURRENCY`를 env로 더하면 그 anchor가 깨지므로, 숫자를
+`command: work --poll 5 --concurrency 6`에 실었다.
+`test_the_connection_budget_agrees_everywhere_it_is_declared`가 이제 이 줄도
+regex로 읽어서 worker 유닛의 `TUBEDEPTH_CONCURRENCY`와 같은지 확인한다. 예산을
+올리려면 다섯 곳(`service-db.json`, `postgres-bootstrap.sql`, worker 유닛,
+`database.py` 주석, compose)을 함께 고쳐야 하고, 안 고치면 이 테스트가 빨개진다.
+
+**상주하는 `watch` 컨테이너는 manifest가 세지 않은 연결을 쓴다.**
+`service-db.json`은 32를 api 8 + worker 2C+4 + migration 1 + `service_spare` 7로
+쪼개면서 `workers_and_schedulers: 0`이라고 적는다. 그 0은 유일한 스케줄러가
+밀리초 살고 죽는 systemd one-shot이던 시절에는 참이었다. compose에는 타이머가
+없어서 `watch --every`가 상주하고, 다른 명령과 똑같이 `_database()`를 거치므로
+write engine(2+2)과 read engine(2+2)을 만들어 컨테이너 수명 내내 idle 연결을
+쥔다 — 정상 상태로는 2개(한 pass가 write session 하나, placement 확인이 read
+하나), pool 천장으로는 8개다. **`service_spare` 7에서 나가므로 산수는 여전히
+맞고, 그래서 manifest 숫자는 건드리지 않았다** — 네 파일이 그 숫자에 동의하고
+있고 교차 검증이 그걸 지킨다. compose 배포를 두 인스턴스로 늘리거나 watch를
+여러 개 띄우는 순간 이 여유는 사라지므로, 그때는 manifest의
+`workers_and_schedulers`를 실제 숫자로 올리고 fleet에 다시 요청하는 것이 순서다.
+
+**이미지에는 `HEALTHCHECK`가 없다.** 이미지 수준 healthcheck는 그 이미지로 뜨는
+모든 컨테이너에 붙는데, 이 이미지가 돌리는 넷 중 셋에게 틀린다 — `work`와
+`watch`는 포트를 열지 않고, `migrate`는 끝나는 게 정상인 one-shot이라 성공한
+migration이 unhealthy로 표시된다. `/healthz`를 실제로 답하는 서비스는 `api`
+하나뿐이므로 healthcheck는 compose에 있다.
+
+**이미지는 editable 설치를 그대로 담는다.** `uv sync`는 프로젝트를 editable로
+넣고(`.pth`가 `/app/src`를 가리킨다), `tubedepth migrate`는 `alembic.ini`와
+`migrations/`를 `Path(__file__).parent.parent.parent`로 찾는다(`cli.py`). 그래서
+runtime 스테이지가 `/app` 전체(venv + `src/` + `alembic.ini` + `migrations/`)를
+같은 절대 경로에 복사한다. `--no-editable`로 바꾸면 그 표현식이
+`.../lib/python3.13`을 가리키게 되어 `migrate`가 자기 script directory를 찾지
+못한다 — 바꾸려면 `cli.py`의 경로 해석을 함께 고쳐야 한다.
+
+**URL은 둘이다.** `migrate`는 migrator 자격증명으로, `api`/`worker`/`watch`는
+runtime 자격증명으로 붙는다(규정 1). 하나로 합치면 runtime이 DDL을 내거나
+migrator가 애플리케이션 DML을 내게 되고, 그건 이 저장소가 bootstrap SQL로 세운
+경계를 compose가 무르는 것이다. 둘 다 `deploy/.env`에서 `${...}`로 들어오고
+compose 파일에는 어떤 비밀 리터럴도 없다(`tests/test_compose.py`가 확인한다).
+
+
 ### Measured 2026-08-20: what the first PostgreSQL run found
 
 Step 1 was meant to be a yes-or-no about `batch_alter_table`. Batch mode was
