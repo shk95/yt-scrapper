@@ -39,7 +39,9 @@ gh issue create --label blocked --label blocked/<what-is-missing> \
 - [ ] A fresh clone runs `uv sync --extra dev` without error
 - [ ] `tool/doctor.sh` on a clone with no `core.hooksPath` exits non-zero and
       prints the exact command that fixes it
-- [ ] `tool/doctor.sh` reports the SQLite version and refuses one below 3.35
+- [ ] `tool/doctor.sh` reports whether `TUBEDEPTH_DATABASE_URL` is set and
+      whether the PostgreSQL server it names is reachable, failing on either
+      gap
 - [ ] `git commit -m "bad message"` is rejected by the `commit-msg` hook
 - [ ] `tool/checks/test` exits 69 on a host with no `uv`, and exits 1 when
       `REQUIRE_NATIVE=1` is set
@@ -61,6 +63,35 @@ gh issue create --label blocked --label blocked/<what-is-missing> \
 - [ ] A quarantined egress is not selected on the next attempt
 - [ ] `test_no_module_outside_the_egress_package_constructs_a_transport_directly`
       passes
+
+## M2 — PostgreSQL: join the fleet's shared server (#14, #15, #16)
+
+- [ ] `tubedepth_runtime` is refused `CREATE TABLE tubedepth.anything (id int)`
+      with a permission-denied error
+- [ ] `alembic_version` is in the `tubedepth` schema, not `public`
+- [ ] `SELECT tablename FROM pg_tables WHERE schemaname = 'public'` returns no
+      row this project created
+- [ ] A SQLite index seeded with one row in each of the six tables round-trips
+      through `tubedepth transfer` to a PostgreSQL target with every column of
+      every row equal — not merely the row count
+- [ ] `tubedepth prune` against a store with payload files and zero artifact
+      rows exits non-zero and deletes nothing, unless
+      `--sweep-without-an-index` is given
+- [ ] Opening a migrated database through `_database()` (any CLI command)
+      issues no `CREATE`/`ALTER`/`DROP`/`TRUNCATE` statement — asserted by
+      hooking every engine's `before_cursor_execute`, not inferred
+- [ ] `Database(url)` raises `ConfigurationError` for a SQLite URL;
+      `Database(url, allow_sqlite_source=True)` still opens one
+- [ ] A connection whose `search_path` does not lead with `tubedepth` is
+      refused by `verify_placement()` before any query runs
+- [ ] Running `alembic` autogenerate against a database holding a foreign
+      schema with a sentinel table does not propose touching it
+- [ ] Every column of every table under `information_schema.columns` for
+      `table_schema = 'tubedepth'` has `data_type = 'timestamp with time
+      zone'` for each instant column — none is `timestamp without time zone`
+- [ ] `TUBEDEPTH_DATABASE_URL` unset makes every command refuse before
+      opening a connection, naming the variable, rather than falling back to
+      a file
 
 ## M4.5 — Egress pool
 
@@ -86,4 +117,4 @@ gh issue create --label blocked --label blocked/<what-is-missing> \
 - [ ] A segment lookup queued behind three running harvests starts within one
       second — measured, not assumed
 - [ ] The payload is a gzip file on disk and no multi-megabyte row exists in
-      SQLite
+      the database

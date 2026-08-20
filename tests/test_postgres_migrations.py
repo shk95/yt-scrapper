@@ -30,6 +30,9 @@ SCHEMA = "tubedepth"
 
 pytestmark = pytest.mark.postgres
 
+# The migrator's URL — this module runs migrations, and only tubedepth_migrator
+# is allowed to. tests/test_postgres_privileges.py is what connects as
+# tubedepth_runtime.
 URL = os.environ.get("TUBEDEPTH_TEST_POSTGRES_URL")
 needs_postgres = pytest.mark.skipif(
     not URL, reason="set TUBEDEPTH_TEST_POSTGRES_URL, or run `just postgres`"
@@ -60,8 +63,21 @@ def empty_database() -> Iterator[None]:
     """
     engine = create_engine(URL or "")
     with engine.begin() as connection:
+        # SET ROLE first: only the owner (or a superuser) can drop a
+        # schema it owns; the migrator only gets owner privileges through
+        # an explicit SET ROLE (rule 1's NOINHERIT), not automatically via
+        # membership. RESET ROLE before CREATE SCHEMA: creating a schema
+        # needs CREATE on the database, which is granted to the migrator
+        # (harness-only) and not to the owner role.
+        connection.execute(text("SET ROLE tubedepth_owner"))
         connection.execute(text(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"))
-        connection.execute(text(f"CREATE SCHEMA {SCHEMA}"))
+        connection.execute(text("RESET ROLE"))
+        # AUTHORIZATION tubedepth_owner, not the migrator that runs this
+        # statement: without it the schema is owned by tubedepth_migrator, and
+        # the SET ROLE tubedepth_owner in migrations/env.py would then have no
+        # CREATE privilege on a schema it does not own, which fails every
+        # migration this fixture is meant to set up for.
+        connection.execute(text(f"CREATE SCHEMA {SCHEMA} AUTHORIZATION tubedepth_owner"))
     yield
     engine.dispose()
 
@@ -108,6 +124,12 @@ def test_the_migrated_schema_is_the_one_the_models_describe(empty_database: None
 
     engine = create_engine(URL or "")
     with engine.connect() as connection:
+        # The migrator has no USAGE on tubedepth outside of a migration's own
+        # SET ROLE (migrations/env.py) — without this, unqualified reflection
+        # skips a schema it cannot see and reports every table missing rather
+        # than comparing it.
+        connection.execute(text("SET ROLE tubedepth_owner"))
+        connection.commit()
         context = MigrationContext.configure(connection, opts={"include_schemas": False})
         difference = compare_metadata(context, Base.metadata)
     engine.dispose()
@@ -153,3 +175,209 @@ def test_the_version_table_lands_in_the_services_own_schema(empty_database: None
     engine.dispose()
 
     assert schemas == {SCHEMA}, f"the version table is not the service's own: {schemas}"
+
+
+@needs_postgres
+def test_autogenerate_never_proposes_touching_another_services_schema(
+    empty_database: None,
+) -> None:
+    """Rule 2's exception clause, discharged.
+
+    The danger the regulation's default strategy guards against is autogenerate
+    reflecting a schema it has no models for and proposing to drop it. A
+    `search_path` strategy is only equivalent if that cannot happen — and the
+    only honest way to know is to put a foreign schema in front of it.
+    """
+    engine = create_engine(URL or "")
+    with engine.begin() as connection:
+        connection.execute(text("DROP SCHEMA IF EXISTS foreign_sentinel CASCADE"))
+        connection.execute(text("CREATE SCHEMA foreign_sentinel"))
+        connection.execute(
+            text("CREATE TABLE foreign_sentinel.must_survive (id bigint PRIMARY KEY)")
+        )
+    assert alembic("upgrade", "head").returncode == 0
+
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+
+    from tubedepth.models import Base
+
+    with engine.connect() as connection:
+        # See test_the_migrated_schema_is_the_one_the_models_describe: the
+        # migrator only has USAGE on tubedepth via SET ROLE. RESET ROLE before
+        # the block ends: SET ROLE is session state a plain rollback does not
+        # undo, and this engine's pool would otherwise hand the next
+        # connection back out still running as tubedepth_owner — which has no
+        # access at all to foreign_sentinel, owned by the migrator — and the
+        # survivor check below would fail for a reason that has nothing to do
+        # with what it is testing.
+        connection.execute(text("SET ROLE tubedepth_owner"))
+        connection.commit()
+        context = MigrationContext.configure(connection, opts={"include_schemas": False})
+        difference = compare_metadata(context, Base.metadata)
+        connection.execute(text("RESET ROLE"))
+        connection.commit()
+
+    rendered = repr(difference)
+    assert "foreign_sentinel" not in rendered, f"autogenerate can see another service: {rendered}"
+    assert "must_survive" not in rendered
+    assert difference == [], f"and it proposed something besides: {difference}"
+
+    # The same defect running backwards: a downgrade that reaches outside its
+    # own schema is just as much a violation as an autogenerate proposal that
+    # does.
+    assert alembic("downgrade", "base").returncode == 0
+    with engine.connect() as connection:
+        survivors = connection.execute(
+            text("SELECT count(*) FROM foreign_sentinel.must_survive")
+        ).scalar_one()
+    engine.dispose()
+    assert survivors == 0, "the sentinel table is gone or was written to"
+
+
+@needs_postgres
+def test_every_instant_is_stored_as_timestamptz(empty_database: None) -> None:
+    """Rule 9. `UtcDateTime` refuses naive values in Python; the column is the
+    other half, and `sa.DateTime()` renders as `timestamp without time zone`
+    — the one type the regulation says must not represent an instant."""
+    assert alembic("upgrade", "head").returncode == 0
+
+    engine = create_engine(URL or "")
+    with engine.connect() as connection:
+        # See test_the_migrated_schema_is_the_one_the_models_describe: the
+        # migrator has no USAGE on tubedepth outside of a migration's own SET
+        # ROLE. Without this, information_schema.columns reports zero rows —
+        # not because every column is timestamptz, but because the migrator
+        # cannot see the schema at all, which would make this assertion pass
+        # for the wrong reason.
+        connection.execute(text("SET ROLE tubedepth_owner"))
+        naive = connection.execute(
+            text("""
+            SELECT table_name, column_name FROM information_schema.columns
+            WHERE table_schema = :schema AND data_type = 'timestamp without time zone'
+            ORDER BY table_name, column_name
+        """),
+            {"schema": SCHEMA},
+        ).all()
+    engine.dispose()
+
+    assert naive == [], f"these instants are not timestamptz: {naive}"
+
+
+@needs_postgres
+def test_the_migrations_have_exactly_one_head() -> None:
+    """Two heads is a merge nobody noticed, and it fails at deploy time on the
+    machine least able to fix it.
+
+    Needs a server like everything else in this file: `migrations/env.py`
+    runs `run_migrations_online()` at import for *every* Alembic command,
+    `heads` included, and since the cutover (#15) that means resolving
+    `TUBEDEPTH_DATABASE_URL` and opening it — there is no SQLite fallback
+    left for a command that touches no schema to fall back to.
+    """
+    result = alembic("heads")
+
+    assert result.returncode == 0, result.stderr
+    assert len([line for line in result.stdout.splitlines() if line.strip()]) == 1, result.stdout
+
+
+@needs_postgres
+def test_the_cli_upgrades_an_empty_schema(empty_database: None) -> None:
+    from typer.testing import CliRunner
+
+    from tubedepth.cli import application
+
+    result = CliRunner().invoke(application, ["migrate"], env={"TUBEDEPTH_DATABASE_URL": URL})
+
+    assert result.exit_code == 0, result.output
+    engine = create_engine(URL or "")
+    tables = inspect(engine).get_table_names(schema=SCHEMA)
+    engine.dispose()
+    assert "jobs" in tables
+
+
+@needs_postgres
+def test_the_cli_can_stamp_a_schema_that_predates_migrations(empty_database: None) -> None:
+    """The one-time problem every project gets exactly once.
+
+    This schema existed for a day before migrations did. Upgrading it would
+    try to create tables that are already there; the honest move is to record
+    which revision its schema already matches and migrate forward from then
+    on. Built by running the real migration and then removing its own
+    bookkeeping, which is the shape of the actual case: a schema that matches
+    the models with no `alembic_version` row to say so.
+    """
+    from typer.testing import CliRunner
+
+    from tubedepth.cli import application
+
+    assert alembic("upgrade", "head").returncode == 0
+    engine = create_engine(URL or "")
+    with engine.begin() as connection:
+        connection.execute(text("SET ROLE tubedepth_owner"))
+        connection.execute(text(f"DROP TABLE {SCHEMA}.alembic_version"))
+    engine.dispose()
+
+    result = CliRunner().invoke(
+        application, ["migrate", "--stamp"], env={"TUBEDEPTH_DATABASE_URL": URL}
+    )
+
+    assert result.exit_code == 0, result.output
+    engine = create_engine(URL or "")
+    with engine.connect() as connection:
+        connection.execute(text("SET ROLE tubedepth_owner"))
+        stamped = connection.execute(
+            text(f"SELECT version_num FROM {SCHEMA}.alembic_version")
+        ).scalar()
+    engine.dispose()
+    assert stamped, "nothing was recorded, so the next upgrade will try to create what exists"
+
+
+@needs_postgres
+def test_migrate_follows_the_operators_database_url_and_restores_it_afterwards(
+    empty_database: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`tubedepth migrate` sets `TUBEDEPTH_DATABASE_URL` around the Alembic
+    call because `migrations/env.py` reads it directly (Task 8 unified the two
+    resolvers into `tubedepth.settings.database_url`, which has no SQLite
+    fallback to prefer an operator's variable over any more). The variable
+    must come back out afterwards, restored to exactly what it was — otherwise
+    the first `tubedepth migrate` in a long-lived process would silently
+    redirect everything it runs next, `tubedepth work`/`serve` included.
+    """
+    from typer.testing import CliRunner
+
+    from tubedepth.cli import application
+
+    monkeypatch.setenv("TUBEDEPTH_DATABASE_URL", URL or "")
+
+    result = CliRunner().invoke(application, ["migrate", "--data-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert os.environ["TUBEDEPTH_DATABASE_URL"] == URL, (
+        "the variable was not restored to what it was set to before invoke()"
+    )
+
+
+@needs_postgres
+def test_migrate_refuses_cleanly_with_no_database_url_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The other half: since the cutover (#15) there is no fallback for
+    `migrate` to fall into, so an operator who forgot the variable gets a
+    named refusal — before `migrations/env.py` ever mutates the environment —
+    rather than a `tubedepth.db` created somewhere nobody asked for.
+    """
+    from typer.testing import CliRunner
+
+    from tubedepth.cli import application
+    from tubedepth.errors import ConfigurationError
+
+    monkeypatch.delenv("TUBEDEPTH_DATABASE_URL", raising=False)
+
+    result = CliRunner().invoke(application, ["migrate", "--data-dir", str(tmp_path)])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ConfigurationError)
+    assert "TUBEDEPTH_DATABASE_URL" in str(result.exception)
+    assert "TUBEDEPTH_DATABASE_URL" not in os.environ

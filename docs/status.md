@@ -3,7 +3,7 @@
 Rewritten freely as the project moves. Anything that must survive a rewrite —
 an error and its fix — belongs in [`troubleshooting.md`](troubleshooting.md).
 
-Last updated: 2026-08-19.
+Last updated: 2026-08-20.
 
 ---
 
@@ -384,31 +384,46 @@ Direct egress is a residential KT line in KR.
 
 ### PostgreSQL is where this is going, and why
 
-**Decided 2026-08-20.** The other scrapers in this fleet already run on
-PostgreSQL, and the intended shape is **one physical database with logical
-boundaries per service** — a schema and a role each, not a database each.
+**Decided 2026-08-20, corrected 2026-08-20.** The other scrapers in this
+fleet already run on PostgreSQL, and the intended shape is **one shared
+PostgreSQL server (cluster) with one database per service** — not one shared
+database with a schema and a role per service. Confirmed against reality:
+trend-radar's manifest declares `database: trend_radar`, `schema:
+trend_radar` — its own database on the same server. (An earlier version of
+this section had this backwards, describing the shared unit as "one physical
+database with logical boundaries per service"; that was wrong and this
+paragraph replaces it rather than sitting alongside it.)
 
 *The reason is not performance, and pretending otherwise would set the wrong
 priorities.* The rate controller is the binding constraint here, not the
 database: the first sustained run held its window at the ceiling with the
 quarantine streak at zero, so a faster claim buys nothing today. What decides
-it is that **SQLite cannot participate in that architecture at all.** A file has
-no story for "a logical boundary inside a shared physical database", so this
-service is currently excluded from the structure the rest of the fleet uses.
+it is that **SQLite cannot participate in that architecture at all**, for
+three reasons that all hold regardless of whether the shared unit is a
+database or a server:
 
-Two things it does buy, and they are real:
+*No shared connection budget, no central role management.* A file has neither
+`max_connections` nor roles, and both are exactly what the rest of the fleet
+coordinates through — this is rule 4, and it is the one rule that still
+crosses the per-service-database boundary, because roles and
+`max_connections` are cluster-global (see "규정 적용" below).
 
-*The write-lock class of bug stops existing.* `decisions/002` records it twice
-and this repository produced a third instance on 2026-08-20 — `POST
-/v1/jobs/batch` held a write session and called a cache lookup that opened the
-write engine, deadlocking a request against a lock it was already holding.
-Every new route on SQLite carries that landmine.
+*No shared operational story.* Backup, restore, monitoring are all things
+every other service gets by being a database on the fleet's server, and a
+file is not. With several scrapers, the one that is different is the one
+whose backup gets forgotten and whose restore nobody remembers. That tax does
+not shrink with scale.
 
-*One operational story.* With several scrapers, the one that is different is
-the one whose backup gets forgotten and whose restore nobody remembers. That
-tax does not shrink with scale.
+*The write-lock class of bug.* `decisions/002` records it twice and this
+repository produced a third instance on 2026-08-20 — `POST /v1/jobs/batch`
+held a write session and called a cache lookup that opened the write engine,
+deadlocking a request against a lock it was already holding. Every new route
+on SQLite carries that landmine. This one was never about the
+shared-database-vs-shared-server question at all — a file deadlocks against
+itself regardless of what anything else on the network looks like — but it
+is real and it is exactly the kind of thing PostgreSQL does not do.
 
-**The rules for the shared database are in [`shared-postgres.md`](shared-postgres.md).**
+**The rules for the shared server are in [`shared-postgres.md`](shared-postgres.md).**
 Two of them can damage another service — autogenerate dropping tables it cannot
 see the models for, and `alembic_version` collisions — so they are not optional.
 
@@ -451,14 +466,17 @@ Before the tag, in order:
 2. ~~**Stop reconnecting six times a minute**~~ — done. The worker was a poll
    loop made of process restarts, which is a local inefficiency against a file
    and a fleet-budget problem against a shared instance. See `Worker.serve`.
-3. **[#14](https://github.com/slopindustries/yt-scrapper/issues/14)** — no DDL
-   on the boot path. Small, independently useful, and it makes the next step
-   smaller.
-4. **[#15](https://github.com/slopindustries/yt-scrapper/issues/15)**, the
+3. ~~**[#14](https://github.com/slopindustries/yt-scrapper/issues/14)** — no
+   DDL on the boot path.~~ Done.
+4. ~~**[#15](https://github.com/slopindustries/yt-scrapper/issues/15)**, the
    cutover, deciding
    [#16](https://github.com/slopindustries/yt-scrapper/issues/16) along the way
-   rather than after it — both now shaped by the fleet regulation (see "규정
-   적용" below).
+   rather than after it — both shaped by the fleet regulation (see "규정
+   적용" below).~~ Done 2026-08-20 (Task 8): `Database` refuses a non-PostgreSQL
+   URL, `settings.database_url` has no fallback, and the SQLite branch is
+   gone from every path except `tubedepth transfer --from`'s source. #16's
+   `verify_placement()`-before-`is_migrated()` ordering landed in an earlier
+   task and is unchanged here.
 5. **The [release gate](https://github.com/slopindustries/yt-scrapper/milestone/4)** — the three conditions the owner
    set, in order: **[#20](https://github.com/slopindustries/yt-scrapper/issues/20)** a `watch` subcommand collecting by
    channel, search keyword and trending region; **[#21](https://github.com/slopindustries/yt-scrapper/issues/21)** the
@@ -535,22 +553,148 @@ autogenerate를 돌려 sentinel이 diff에 나타나지 않음을 CI가 매번 �
 규정 기본형에서는 `include_schemas=True`라 리플렉션이 실제 schema 이름을
 보고하므로 이 버그가 없다 — 두 전략은 섞으면 안 되고, 이 저장소는 섞지 않는다.
 
+**Migrator의 `search_path`는 규정 예시와 다르다 (#15에서 확정, 의도적).** 규정 1의
+예시는 migrator의 `search_path`를 `pg_catalog`만으로 둔다(fail-closed) — 규정
+기본형처럼 migration이 대상 schema를 명시적으로 qualify한다면 그것이 맞다. 이
+저장소는 위에서 선언한 대로 search_path 전략을 쓰고, 기존 5개 revision이 모두
+schema-unqualified이므로 migrator의 `search_path`가 `tubedepth`를 포함하지 않으면
+모든 revision이 `public`에 테이블을 만든다. 그래서 `deploy/postgres-bootstrap.sql`은
+migrator와 runtime 둘 다 `search_path = tubedepth, pg_catalog`로 둔다. `docs/shared-postgres.md`는
+함대 공통 사본이라 이 차이를 반영해 고치지 않는다 — 이 문단이 그 대신이다.
+
 **규칙별 상태.**
 
 | 규정 | 이 저장소 | 어디서 |
 | --- | --- | --- |
-| 0 schema+owner | `tubedepth` schema; 3-role 분리는 #15에서 bootstrap 재작성 | `deploy/postgres-bootstrap.sql` |
-| 1 owner/migrator/runtime | **미적용 — #15의 작업.** env.py가 postgres에서 `SET ROLE tubedepth_owner` + 명시적 `search_path` | #15 |
-| 2 autogenerate 격리 | search_path 전략 + sentinel 증명 (위 선언) | `tests/test_postgres_migrations.py` |
-| 3 version table 격리 | `tubedepth.alembic_version`, 테스트가 위치를 단언 | 같은 파일 |
-| 4 connection budget | manifest에 상한 20 선언; pool 수치는 #15에서 코드로 고정 후 여기 기록 | `deploy/service-manifest.yaml` |
-| 5 timeout | **미적용 — #15에서 bootstrap에 추가.** 워커는 이미 network 호출을 transaction 밖에서 한다 | #15 |
-| 6 startup DDL 금지 | **#14가 정확히 이것** | #14 |
+| 0 schema+owner | `tubedepth` schema; 3-role 분리 **적용됨(#15)** — `tubedepth_owner`가 schema와 그 안의 모든 객체를 소유. 각 서비스가 자기 database를 갖는 정정된 구조에서는 이 격리가 엄밀히는 불필요하다(database 하나에 서비스 하나뿐이므로 다른 서비스와 나눌 schema가 없다) — 그래도 **의도적으로 유지한다**: 비용이 없고, 언젠가 여러 서비스가 database 하나로 통합되거나 배포가 잘못된 database를 가리키는 날 값을 한다 | `deploy/postgres-bootstrap.sql` |
+| 1 owner/migrator/runtime | **적용됨(#15).** `tubedepth_owner`(NOLOGIN) / `tubedepth_migrator`(배포 전용, `GRANT tubedepth_owner`) / `tubedepth_runtime`(DML만) 3-role 분리. `migrations/env.py`가 postgres에서 `SET ROLE tubedepth_owner`; runtime의 부정 테스트 4종과 소유권 감사가 `tests/test_postgres_privileges.py` | `deploy/postgres-bootstrap.sql`, `migrations/env.py` |
+| 2 autogenerate 격리 | search_path 전략 + sentinel 증명 (위 선언, 테스트는 #15에서 실제로 작성됨). 서비스당 database 하나뿐인 정정된 구조에서는 다른 서비스의 모델을 볼 일 자체가 없어 무해하게 불필요하지만, sentinel 테스트와 `search_path` 전략은 **그대로 둔다** — 비용이 없고, `verify_placement()`와 함께 잘못된 schema뿐 아니라 잘못된 database에 연결된 경우도 잡아낸다 | `tests/test_postgres_migrations.py` |
+| 3 version table 격리 | `tubedepth.alembic_version`, 테스트가 위치를 단언. 같은 이유로 database-per-service 아래서는 불필요하지만 무해하므로 유지 | 같은 파일 |
+| 4 connection budget | **적용됨(#15, Task 7-8; 전체 브랜치 리뷰로 2026-08-20 재조정; #26으로 증액 요청, 같은 날 승인).** `Database`의 write engine은 `--concurrency`로 크기가 정해진다(`pool_size=max_overflow=TUBEDEPTH_CONCURRENCY`): `Worker.drain`이 concurrency당 claim thread 하나와 lease 갱신 thread 하나를 돌리고 둘 다 write engine에서 세션을 얻으므로, concurrency 8이면 순간적으로 최대 16개 세션이 4-연결 pool을 다툴 수 있다는 것을 실측으로 확인(16개 동시 세션 요청을 pool_size=2/max_overflow=2에 걸어 측정 — 4개씩 배치로 직렬화되고 뒤 배치일수록 앞 배치의 세션 점유 시간만큼 대기가 쌓임을 확인). AIMD 레이트 컨트롤러가 실측한 유효 상한은 6(위 §를 보라 — 6을 넘으면 병목이 이 서비스 쪽이 아니라 YouTube 쪽이다), 그리고 6은 기존 20 예산 안에 들어가지 않았다(2×6+4=16짜리 worker write만으로도 API 8과 합쳐 24). 그래서 이 서비스는 20→32 증액을 함대에 **요청했고**(#26), **승인받았다** — 실측 근거: 운영 중인 공유 서버에서 `max_connections=100`, `superuser_reserved_connections=3`, `reserved_connections=0`(가용 97); 서버의 다른 선언자는 trend-radar 하나뿐이고 그 자신의 manifest(`service-db.json`)가 12를 선언; tubedepth가 32를 쓰면 44 claimed, 53 spare. manifest 상한과 `tubedepth_runtime`의 `CONNECTION LIMIT`을 20에서 32로 올리고, `TUBEDEPTH_CONCURRENCY` 배포 기본값을 2에서 6으로 올렸다: API 8(write 4 + read 4) + worker 16(write 6×2=12 + read 4, read는 `Worker.reap`만 쓰므로 concurrency와 무관하게 기본값 유지) = 24, +migration 1, +rolling-overlap 0 = 25 ≤ 32, 여유 7. 이 값은 AIMD가 실측한 유효 상한 그 자체이지 임의로 고른 숫자가 아니다. **32를 더 올릴 근거는 없다** — 이번 요청이 상한이었고, 그 이상은 다시 함대에 요청할 사안이다 | `src/tubedepth/database.py`, `src/tubedepth/cli.py`, `deploy/service-manifest.yaml`, `deploy/postgres-bootstrap.sql`, `deploy/tubedepth-worker.service` |
+| 5 timeout | **적용됨(#15).** `tubedepth_runtime`에 `statement_timeout`(15s), `lock_timeout`(3s, statement보다 짧게), `idle_in_transaction_session_timeout`(30s), `transaction_timeout`(60s, PG17+이므로 무조건 설정)을 role-scoped로 부여. 워커는 이미 network 호출을 transaction 밖에서 한다. 예외 하나: `tubedepth transfer`의 rollback 방향(PostgreSQL 소스 → SQLite 대상)은 `artifacts`를 한 번의 `SELECT`로 읽는데, 실제 크기의 테이블에서는 15s를 넘는다 — role의 기본값을 올리는 대신 그 read의 트랜잭션에서만 `SET LOCAL statement_timeout = '5min'`을 실행(`transfer.py`의 `_copy_table`), 다른 세션에는 영향을 주지 않는다 | `deploy/postgres-bootstrap.sql`, `src/tubedepth/transfer.py` |
+| 6 startup DDL 금지 | **적용됨.** `_database()`가 더는 `create_schema()`를 호출하지 않는다; 스키마 경로는 `tubedepth migrate` 하나뿐 | #14 |
 | 7 외부 object 일관성 | payload는 content-addressed(불변 key), write-then-record 순서로 이미 규정 형태. grace period와 reconciliation은 #17에 병합 | `payload_store.py`, #17 |
 | 8 extension 중앙 관리 | 필요 extension 없음, manifest가 선언 | manifest |
-| 9 timestamptz | `UtcDateTime`이 naive를 거부. **단, postgres에서 `timestamptz`로 렌더되는지 #15에서 확인 필요** — 현재 `sa.DateTime()`은 timezone 없는 type이 된다 | #15 |
-| 10–13 cross-service 금지 | 단일 서비스라 위반 대상 없음. manifest가 빈 의존성을 선언하고, 규정의 감사 query가 gate | manifest |
-| 14 extraction test | **호스트 전환(post-release ops issue)의 통과 조건으로 편입** | ops issue |
+| 9 timestamptz | **적용됨(#15).** 확인 결과 `sa.DateTime()`은 실제로 postgres에서 `timestamp without time zone`으로 렌더되고 있었다(16개 컬럼 전부, `information_schema.columns` 실측). `render_item`이 `sa.DateTime(timezone=True)`를 내보내도록 고치고, 기존 16개 `UtcDateTime` 컬럼을 `ALTER ... TYPE timestamptz USING ... AT TIME ZONE 'UTC'`로 옮기는 손으로 쓴 revision을 추가; `UtcDateTime.impl`도 `DateTime(timezone=True)`로 맞춰 autogenerate no-diff 유지 | `migrations/env.py`, `migrations/versions/20260820_55a24ac7a270_instants_are_timestamptz.py`, `tests/test_postgres_migrations.py` |
+| 10–13 cross-service 금지 (FK, 공유 테이블, cross-service SQL, cross-schema transaction) | 정정된 구조(서비스당 자기 database)에서는 금지가 아니라 **구조적으로 불가능**하다 — cross-database query는 `dblink`나 `postgres_fdw`가 필요하고, 둘 다 extension인데 규정 8이 서비스 migration의 `CREATE EXTENSION`을 금지한다. manifest가 빈 의존성을 선언하고, 규정의 감사 query가 gate로 남는다 | manifest |
+| 14 extraction test | **호스트 전환(post-release ops issue)의 통과 조건으로 편입.** 서비스당 자기 database인 정정된 구조에서는 이 테스트가 더 쉬워진다 — 이미 서비스 하나 = database 하나이므로 추출이 `pg_dump` 한 번이다 | ops issue |
+
+**#14 — 부팅 경로에서 DDL 제거.** `Database.create_schema()`는 `Base.metadata.create_all`만
+호출한다. 예전에는 여기서 컬럼·인덱스 보수(`_repair_existing_tables`)까지 했는데, 이는
+migration 도구가 없던 시절 실제로 반복되던 drift — 파일이 이미 있는데 모델에 컬럼이
+추가된 경우 — 를 막던 장치였다. 지금은 `tests/test_migrations.py`가 migrate-from-nothing과
+create-from-models이 일치함을 확인하는 5개 revision이 있어서, 그 보수가 하던 일은 migration
+체인이 그대로 이어받는다. 보수를 남겨 두는 쪽의 비용이 더 컸다 — 컬럼을 추가하는 부팅이
+`alembic_version`은 그대로 두고 지나가서, 다음 `alembic upgrade`가 이미 있는 컬럼을 다시
+만들려다 `docs/troubleshooting.md`의 `duplicate column name`으로 죽는다. 그래서 `create_schema()`는
+남기되(테스트와 새 `--data-dir`가 쓴다) `cli._database()`에서는 뺐다 — 스키마를 바꿀 수 있는
+경로는 이제 `tubedepth migrate` 하나뿐이다.
+
+**Task 6 — 데이터 이동은 `pg_dump`가 아니라 model 기반이다.** #15의 "Data across:
+six tables"와 #24의 "여섯 테이블"이 이동에 관한 명세 전부였고, 이동 전용 도구도
+검증도 이 저장소에 없었다 — `tests/test_migrations.py`와
+`tests/test_postgres_migrations.py`는 DDL만 확인한다. `tubedepth.transfer.transfer()`가
+그 도구다: `Base.metadata.sorted_tables`를 돌며 각 행을 ORM으로 읽어 대상에 컬럼
+단위로 재구성한다. `pg_dump`로 SQLite 파일을 그대로 복원했다면 SQLite가 저장한
+naive datetime 문자열이 `timestamptz` 컬럼에 변환 없이 그대로 얹혔을 것이다 —
+`UtcDateTime.process_bind_param`이 naive 값을 거부하는 것은 애플리케이션 경로에서만
+그렇고, dump-and-restore는 그 경로를 통째로 건너뛴다. round-trip 테스트
+(`tests/test_transfer.py::test_a_sqlite_index_round_trips_through_postgresql`)가
+바로 이 실패를 잡도록 짜여 있다 — 개수가 아니라 모든 컬럼을 값으로 비교해서,
+naive/aware 불일치나 enum이 이름으로 도착하는 것 같은 type 실패를 숫자 하나로
+가리지 않는다.
+
+`transfer`는 `tubedepth_runtime`으로 대상에 연결해서 써야 한다. `tubedepth_migrator`는
+NOINHERIT이고(규정 1) `tubedepth`의 테이블에 직접 권한이 없다 — `migrations/env.py`의
+명시적 `SET ROLE tubedepth_owner`를 통해서만 owner로 행동한다. migrator credential로
+곧장 `INSERT`를 시도하면 `permission denied for schema tubedepth`로 거부되는 것을
+실측으로 확인했다(2026-08-20, `docker run postgres:18-alpine` + `deploy/postgres-bootstrap.sql`).
+runtime은 정확히 `SELECT, INSERT, UPDATE, DELETE`만 직접 grant 받은 role이라(같은
+파일) transfer가 필요로 하는 권한과 정확히 일치한다. 대상이 이미 행을 가지고 있으면
+거부한다 — `artifacts`는 `fingerprint`에 unique 제약이 의도적으로 없어서, 부분
+재실행이 관측을 조용히 중복시킬 수 있기 때문이다. payload store는 옮기지 않고
+`transfer.py`는 `PayloadStore`를 import조차 하지 않는다 — 규정 7의 "복구 세트는
+index와 object가 함께"라는 원칙에서, 이 도구는 절반만 옮기는 도구라는 뜻이다.
+
+**Task 7 — 테스트 스위트가 PostgreSQL 위에서 돈다.** #15가 말하는 "the tests
+move too"다: `tests/conftest.py`의 `database_url_for_tests`가 이제 테스트마다
+`TUBEDEPTH_TEST_POSTGRES_URL`(migrator) 서버에 schema 하나(`request.node.nodeid`를
+정규화 + 63자 제한에 대비한 sha1 접미사)를 만들고 그 schema를 가리키는 URL을
+`yield`한 뒤 테스트가 끝나면 지운다 — schema 하나가 이 seam의 유일한 산출물이라,
+59곳에 흩어졌던 `Database(tmp_path / "tubedepth.db")`를 한 곳으로 모은 Task 2의
+의도가 dialect가 바뀐 뒤에도 유지된다. 처음 구현은 `str(url)`로 URL을 만들었는데
+`sqlalchemy.engine.URL.__str__`이 기본으로 비밀번호를 `***`로 가려서 모든 연결이
+인증에서 죽었다 — 실제로 그 실패를 관찰하고 `url.render_as_string(hide_password=False)`로
+고쳤다.
+
+`tests/test_job_queue.py`의 두 lock 테스트(`sqlite3.connect(timeout=0)` +
+`OperationalError match="locked"`)는 SQLite 파일 lock 고유의 검증이라 PostgreSQL에
+대응이 없다 — MVCC라 그런 상황 자체가 없다. 포팅하지 않고, 그 테스트들이 실제로
+지키던 성질 둘로 다시 썼다: (1) `test_two_concurrent_claims_never_return_the_same_job`은
+`before_cursor_execute` 훅으로 한 worker의 UPDATE를 다른 worker가 SELECT+UPDATE+COMMIT을
+완전히 끝낼 때까지 강제로 멈춰 실제 interleaving을 만든다 — `JobRepository.claim`의
+rowcount 검사를 무력화하면 두 worker가 모두 claim에 성공해 실패하는 것으로 확인했다.
+(2) `test_a_readonly_session_does_not_block_a_concurrent_writer`는 readonly 세션이
+transaction을 연 채로 같은 job을 다른 세션이 claim하는 데 2초 이상 걸리지 않음을
+검증한다 — readonly 세션이 `LOCK TABLE ... IN ACCESS EXCLUSIVE MODE`를 잡도록
+일부러 망가뜨리면 10초 timeout까지 걸려 실패하는 것으로 확인했다. 두 검증 모두
+되돌리기 전에 실측했다.
+
+`tests/conftest.py`의 socket guard(`refuse_outbound_network`)는 marker 기반 예외
+(`live`/`postgres`)에서 주소 기반 allow-list(`127.0.0.1`/`::1`/`localhost`)로
+바뀌었다 — 이제 스위트 대부분이 실제 PostgreSQL 소켓을 열기 때문에, `postgres`
+marker가 붙은 소수만 예외 처리해서는 나머지가 전부 막힌다. `pyproject.toml`의
+`addopts`에서 `and not postgres`를 뺐다 — `postgres` marker는 더 이상 선택 필터가
+아니고(전체가 서버를 필요로 함), role/권한/`alembic_version` 위치 같은 PostgreSQL
+구조 자체를 검사하는 파일들의 이름표로만 남았다. `tool/checks/test`가 이제 서버가
+없으면 `just postgres`와 같은 방식으로 throwaway container를 직접 띄우고 정리한다
+(`tool/checks/postgres`는 그래서 사라졌고, CI도 `verify`/`postgres` 두 job을
+하나로 합쳤다).
+
+**Task 8 — 컷오버가 끝난다: SQLite가 없어진다.** #15 "a cutover, not a
+dual-dialect period"가 뜻하던 것은 여기서다. `Database`는 PostgreSQL이 아닌
+URL을 `ConfigurationError`로 거부한다 — 단 하나 의도된 예외는
+`allow_sqlite_source=True`이고, `tubedepth transfer --from`만 이것을 쓴다.
+실제 컷오버가 데이터를 옮겨오는 곳이 SQLite이므로, 이 지원은 애플리케이션이
+더 이상 SQLite에서 실행되지 않는데도 남는다 — 지운 것은 "SQLite로 서비스를
+운영한다"이지 "SQLite에서 옮겨온다"가 아니다. `settings.database_url()`은
+`data_directory` 인자와 SQLite 대체 경로를 잃고 `TUBEDEPTH_DATABASE_URL`이
+없으면 예외를 던진다. `migrations/env.py`는 자기 복사본 대신 그 함수를 부르고,
+SQLite 전용이던 `render_as_batch`를 뗐다.
+
+`tests/test_transfer.py`의 offline 메커니즘 테스트(개수, identifier 보존,
+부분 실패 메시지, 재확인)는 여전히 양끝 다 SQLite다 — 서버 없이도
+`tubedepth transfer`가 동작함을 증명하는 것이 그 테스트들의 존재 이유이고,
+`transfer()` 자체는 ORM으로 행을 옮기므로 dialect에 무관하기 때문이다. 실제
+운영 조합(SQLite in, PostgreSQL out, 진짜 migrator/runtime role)은 그 파일
+맨 아래 `test_a_sqlite_index_round_trips_through_postgresql`이 증명한다.
+
+`tests/test_cli.py`의 CLI 테스트 약 30개는 `--data-dir`의 SQLite 대체 경로에
+기대고 있었다. 이제 `verify_placement()`가 모든 `_database()` 호출을 통과하고
+그 검사는 고정된 스키마 이름(`"tubedepth"`)을 요구하므로, 임의의 per-test
+스키마로는 통과할 수 없다 — 그래서 이 파일은 실제 `tubedepth` 스키마를 테스트마다
+drop/재생성하는 autouse fixture 하나로 옮겼다(`test_postgres_migrations.py`의
+`empty_database`와 같은 모양). 결과적으로 Deferred Minor 5가 물었던 질문의
+답은 "강제로 옮겨간다"이다: 이 파일의 모든 명령이 이제 실제 PostgreSQL 위에서
+돈다 — 달리 열 곳이 없어서다.
+
+`tests/test_migrations.py`는 지웠다. 그 파일이 SQLite로 확인하던 성질들(head
+하나, 모델과 일치, 되돌릴 수 있음, drift 없음, version table 위치)은 이미
+`tests/test_postgres_migrations.py`가 PostgreSQL로 증명하고 있었고 — 그 파일
+자신의 docstring이 말하듯 SQLite는 애초에 PostgreSQL에만 있는 dialect 차이를
+볼 수 없었다. CLI 수준 성질(predates-migration stamp, 빈 스키마 upgrade,
+operator URL이 이기고 복원됨, 값 없으면 깨끗이 거부)은
+`test_postgres_migrations.py`로 옮겨 다시 썼다.
+
+`deploy/*.service` 세 유닛 모두 `TUBEDEPTH_DATABASE_URL`을 위한 필수
+`EnvironmentFile`을 갖는다(worker는 기존의 선택적 파일을 필수로 바꿈). manifest와
+`database.py`의 connection 산수는 규정 4의 나머지 두 항(migration 연결
++1, rolling-deploy overlap +0)을 명시해서 17 ≤ 20이 됐다 — 위 표 참고.
+`repositories.JobRepository.claim()`의 docstring은 더 이상 SQLite의 BEGIN
+IMMEDIATE를 "belt and braces"로 부르지 않는다 — guarded UPDATE와 rowcount
+확인이 이제 유일한 메커니즘이라고 고쳤다. `tests/conftest.py`의 socket guard는
+호스트 allow-list에 더해 `TUBEDEPTH_TEST_POSTGRES_URL`이 실제로 이름하는
+포트로 좁혔다.
 
 **Manifest**: [`deploy/service-manifest.yaml`](../deploy/service-manifest.yaml).
 
@@ -596,8 +740,8 @@ the cutover, a failed migration is a failed migration rather than a schema
 somebody has to reconstruct by hand.
 
 **Unpaid, and worth naming.** Placing tables by `search_path` means a missing
-`ALTER ROLE … SET search_path` sends them silently to `public` — the shared
-schema, on a shared database. The test asserts where `alembic_version` lands,
+`ALTER ROLE … SET search_path` sends them silently to `public` — the schema
+every database has by default. The test asserts where `alembic_version` lands,
 which catches it in CI; nothing catches it on a host where someone bootstrapped
 by hand. Tracked as
 [#16](https://github.com/slopindustries/yt-scrapper/issues/16), to be decided
@@ -1279,7 +1423,7 @@ first step for a fortnight for exactly the reason a README walkthrough exists to
 catch, and it passed on every laptop the whole time.
 
 **Where the work is tracked.** Milestones hold the two pieces of work large
-enough to have an order: *PostgreSQL: join the fleet's shared database*
+enough to have an order: *PostgreSQL: join the fleet's shared server*
 ([#14](https://github.com/slopindustries/yt-scrapper/issues/14),
 [#15](https://github.com/slopindustries/yt-scrapper/issues/15),
 [#16](https://github.com/slopindustries/yt-scrapper/issues/16)) and *Trends:

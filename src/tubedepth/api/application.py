@@ -101,7 +101,7 @@ class JobView(BaseModel):
     error_message: str | None = None
     # Which key submitted this, and which worker holds it. Both were written on
     # every job and readable from nowhere, so "identify the runaway client" and
-    # "which worker is stuck on this" meant opening SQLite by hand.
+    # "which worker is stuck on this" meant opening the database by hand.
     api_key_id: str | None = None
     claimed_by: str | None = None
     payload_bytes: int | None = None
@@ -664,9 +664,10 @@ def create_application(
             query = query.where(Job.created_at <= until)
         if cursor:
             moment, identifier = _decode_cursor(cursor)
-            # Keyset comparison spelled out rather than as a row value: SQLite
-            # supports the tuple form but the typed API wants columns on both
-            # sides, and the expanded form is what every planner optimises.
+            # Keyset comparison spelled out rather than as a row value:
+            # SQLAlchemy's typed API wants columns on both sides of the
+            # comparison, not a row constructor, and the expanded form is
+            # what every planner optimises regardless of dialect.
             query = query.where(
                 or_(
                     Job.created_at < moment,

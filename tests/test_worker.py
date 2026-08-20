@@ -73,9 +73,9 @@ class FailingSource:
         raise NotFoundError(f"nothing came back for: {target}")
 
 
-def build(tmp_path: Path, *sources: object) -> tuple[Database, Worker, PayloadStore]:
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
+def build(
+    tmp_path: Path, database: Database, *sources: object
+) -> tuple[Database, Worker, PayloadStore]:
     registry = SourceRegistry()
     for source in sources:
         registry.register(source)  # type: ignore[arg-type]
@@ -92,9 +92,11 @@ def enqueue(database: Database, kind: str, target: str, *, refresh: bool = False
         return job.identifier
 
 
-def test_running_one_job_collects_it_and_marks_it_succeeded(tmp_path: Path) -> None:
+def test_running_one_job_collects_it_and_marks_it_succeeded(
+    tmp_path: Path, database: Database
+) -> None:
     source = EchoSource()
-    database, worker, payloads = build(tmp_path, source)
+    database, worker, payloads = build(tmp_path, database, source)
     identifier = enqueue(database, "video.echo", "dQw4w9WgXcQ")
 
     assert worker.run_once() is True
@@ -108,17 +110,21 @@ def test_running_one_job_collects_it_and_marks_it_succeeded(tmp_path: Path) -> N
         assert payloads.read(job.payload_digest)
 
 
-def test_an_empty_queue_leaves_the_worker_with_nothing_to_do(tmp_path: Path) -> None:
-    _, worker, _ = build(tmp_path, EchoSource())
+def test_an_empty_queue_leaves_the_worker_with_nothing_to_do(
+    tmp_path: Path, database: Database
+) -> None:
+    _, worker, _ = build(tmp_path, database, EchoSource())
 
     assert worker.run_once() is False
 
 
-def test_a_failing_source_marks_the_job_failed_with_the_reason(tmp_path: Path) -> None:
+def test_a_failing_source_marks_the_job_failed_with_the_reason(
+    tmp_path: Path, database: Database
+) -> None:
     # The reason has to survive onto the row. A job that just says "failed"
     # sends whoever is on call to the logs to find out what everyone already
     # knew at the moment it happened.
-    database, worker, _ = build(tmp_path, FailingSource())
+    database, worker, _ = build(tmp_path, database, FailingSource())
     identifier = enqueue(database, "video.failing", "dQw4w9WgXcQ")
 
     assert worker.run_once() is True
@@ -133,8 +139,9 @@ def test_a_failing_source_marks_the_job_failed_with_the_reason(tmp_path: Path) -
 
 def test_a_job_naming_an_unregistered_kind_fails_rather_than_hanging(
     tmp_path: Path,
+    database: Database,
 ) -> None:
-    database, worker, _ = build(tmp_path, EchoSource())
+    database, worker, _ = build(tmp_path, database, EchoSource())
     identifier = enqueue(database, "video.nonexistent", "dQw4w9WgXcQ")
 
     assert worker.run_once() is True
@@ -145,9 +152,9 @@ def test_a_job_naming_an_unregistered_kind_fails_rather_than_hanging(
         assert job.state is JobState.FAILED
 
 
-def test_the_worker_drains_every_queued_job(tmp_path: Path) -> None:
+def test_the_worker_drains_every_queued_job(tmp_path: Path, database: Database) -> None:
     source = EchoSource()
-    database, worker, _ = build(tmp_path, source)
+    database, worker, _ = build(tmp_path, database, source)
     for index in range(5):
         enqueue(database, "video.echo", f"video{index:06d}")
 
@@ -178,14 +185,14 @@ class ListingSource:
         )
 
 
-def test_a_listing_job_can_queue_the_videos_it_found(tmp_path: Path) -> None:
+def test_a_listing_job_can_queue_the_videos_it_found(tmp_path: Path, database: Database) -> None:
     """The link that makes large-scale collection possible.
 
     Without it a listing is a report someone has to read and retype. With it,
     one enqueued channel becomes a hundred queued metadata jobs and the worker
     keeps going.
     """
-    database, worker, _ = build(tmp_path, ListingSource(), EchoSource())
+    database, worker, _ = build(tmp_path, database, ListingSource(), EchoSource())
     with database.session() as session:
         session.add(Job(kind="channel.fake", target="@someone", follow_up_kind="video.echo"))
 
@@ -202,10 +209,12 @@ def test_a_listing_job_can_queue_the_videos_it_found(tmp_path: Path) -> None:
         ]
 
 
-def test_a_listing_job_without_a_follow_up_queues_nothing(tmp_path: Path) -> None:
+def test_a_listing_job_without_a_follow_up_queues_nothing(
+    tmp_path: Path, database: Database
+) -> None:
     # Enumerating without collecting is a legitimate thing to want — checking
     # what a channel holds should not cost a hundred extractions.
-    database, worker, _ = build(tmp_path, ListingSource(), EchoSource())
+    database, worker, _ = build(tmp_path, database, ListingSource(), EchoSource())
     with database.session() as session:
         session.add(Job(kind="channel.fake", target="@someone"))
 
@@ -249,9 +258,9 @@ class SlowSource:
                 self.concurrent -= 1
 
 
-def test_a_concurrent_worker_runs_several_jobs_at_once(tmp_path: Path) -> None:
+def test_a_concurrent_worker_runs_several_jobs_at_once(tmp_path: Path, database: Database) -> None:
     source = SlowSource(seconds=0.2)
-    database, _, payloads = build(tmp_path, source)
+    database, _, payloads = build(tmp_path, database, source)
     for index in range(6):
         enqueue(database, "video.slow", f"video{index:06d}")
     worker = Worker(
@@ -275,7 +284,7 @@ def test_a_concurrent_worker_runs_several_jobs_at_once(tmp_path: Path) -> None:
     # docs/status.md.
 
 
-def test_the_rate_controller_caps_how_many_run_at_once(tmp_path: Path) -> None:
+def test_the_rate_controller_caps_how_many_run_at_once(tmp_path: Path, database: Database) -> None:
     """The AIMD window is a real limit, not a number kept for reporting.
 
     This is what connects the controller to anything: without it the worker's
@@ -283,7 +292,7 @@ def test_the_rate_controller_caps_how_many_run_at_once(tmp_path: Path) -> None:
     decoration.
     """
     source = SlowSource(seconds=0.2)
-    database, _, payloads = build(tmp_path, source)
+    database, _, payloads = build(tmp_path, database, source)
     for index in range(6):
         enqueue(database, "video.slow", f"video{index:06d}")
     controller = RateController(window_ceiling=2)
@@ -303,13 +312,14 @@ def test_the_rate_controller_caps_how_many_run_at_once(tmp_path: Path) -> None:
 
 def test_a_cheap_job_is_not_starved_by_a_queue_full_of_expensive_ones(
     tmp_path: Path,
+    database: Database,
 ) -> None:
     # The failure this prevents is the common one in a system built for
     # throughput: eight comment harvests take every slot and a sub-second
     # segment lookup waits minutes behind them.
     slow = SlowSource(seconds=0.4, cost=SourceCost.EXPENSIVE)
     quick = EchoSource()
-    database, _, payloads = build(tmp_path, slow, quick)
+    database, _, payloads = build(tmp_path, database, slow, quick)
     for index in range(8):
         enqueue(database, "video.slow", f"slow{index:07d}")
     enqueue(database, "video.echo", "quickone123")
@@ -333,6 +343,71 @@ def test_a_cheap_job_is_not_starved_by_a_queue_full_of_expensive_ones(
     # worker: with four threads and a half share, at most two may run at once,
     # so a slot was always free for the cheap job.
     assert slow.peak <= 2, f"expensive jobs took {slow.peak} of four slots"
+
+
+def test_disabling_the_claim_lock_lets_two_threads_exceed_the_reservation(
+    tmp_path: Path,
+    database: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What `Worker._claim`'s lock actually buys, forced rather than hoped for.
+
+    The neighbouring test shows the reservation holding under real
+    concurrency; it does not show *why* the lock is what makes that true
+    rather than luck. This one swaps the real lock for a no-op and forces
+    both worker threads past the reservation check before either registers,
+    which is exactly the race `_claim`'s docstring describes. With the real
+    lock this cannot happen; here, it does, every time.
+    """
+    import contextlib
+    import itertools
+
+    slow = SlowSource(seconds=0.2, cost=SourceCost.EXPENSIVE)
+    database, _, payloads = build(tmp_path, database, slow)
+    for index in range(2):
+        enqueue(database, "video.slow", f"slow{index:07d}")
+
+    worker = Worker(
+        database=database,
+        registry=_registry(slow),
+        payloads=payloads,
+        name="worker-1",
+        concurrency=2,
+        controller=RateController(window_ceiling=8),
+    )
+    # A no-op stand-in for the real lock: enters and exits without excluding
+    # anyone, which is what "no lock" means for two threads racing the same
+    # check-then-increment.
+    monkeypatch.setattr(worker, "_lock", contextlib.nullcontext())
+    # The AIMD window starts at 1.0 and only grows after a success, so with
+    # only two jobs it would gate the second thread on its own, confounding
+    # a test about the cost reservation specifically. Not what this test is
+    # about, so it is bypassed rather than tuned around.
+    monkeypatch.setattr(RateController, "acquire", lambda self, egress, lane: True)
+
+    # Both EXPENSIVE-cost jobs are meant to be capped at one concurrent
+    # (share 0.5 of concurrency=2), so the race window is: both threads read
+    # the reservation as "not yet full", both proceed, both increment.
+    # Rendezvous only the first call from each thread — later calls, made
+    # once the queue is empty, must not block waiting for a third party.
+    barrier = threading.Barrier(2, timeout=5)
+    call_count = itertools.count()
+    real_admissible = worker._admissible_kinds_unlocked
+
+    def _racing_admissible_kinds_unlocked() -> list[str] | None:
+        result = real_admissible()
+        if next(call_count) < 2:
+            barrier.wait()
+        return result
+
+    monkeypatch.setattr(worker, "_admissible_kinds_unlocked", _racing_admissible_kinds_unlocked)
+
+    worker.drain()
+
+    assert slow.peak > 1, (
+        "the reservation held even with no lock — the forced race did not "
+        "reproduce, so this test is not proving what it claims to"
+    )
 
 
 def _identifier_of(session, kind: str) -> str:  # type: ignore[no-untyped-def]
@@ -386,9 +461,11 @@ class UnretryableSource:
         raise NotFoundError(f"no caption track for language: en ({target})")
 
 
-def test_a_retryable_failure_goes_back_to_the_queue_with_a_delay(tmp_path: Path) -> None:
+def test_a_retryable_failure_goes_back_to_the_queue_with_a_delay(
+    tmp_path: Path, database: Database
+) -> None:
     source = FlakySource(failures=1)
-    database, worker, _ = build(tmp_path, source)
+    database, worker, _ = build(tmp_path, database, source)
     enqueue(database, "video.flaky", "dQw4w9WgXcQ")
 
     worker.run_once()
@@ -402,11 +479,12 @@ def test_a_retryable_failure_goes_back_to_the_queue_with_a_delay(tmp_path: Path)
 
 def test_a_delayed_retry_is_not_claimable_until_its_delay_has_passed(
     tmp_path: Path,
+    database: Database,
 ) -> None:
     # The backoff has to be enforced by the claim, not merely recorded. A
     # worker that picks the job straight back up has waited zero seconds.
     source = FlakySource(failures=1)
-    database, worker, _ = build(tmp_path, source)
+    database, worker, _ = build(tmp_path, database, source)
     enqueue(database, "video.flaky", "dQw4w9WgXcQ")
 
     worker.run_once()
@@ -415,9 +493,9 @@ def test_a_delayed_retry_is_not_claimable_until_its_delay_has_passed(
     assert source.attempts == 1
 
 
-def test_an_unretryable_failure_is_not_tried_again(tmp_path: Path) -> None:
+def test_an_unretryable_failure_is_not_tried_again(tmp_path: Path, database: Database) -> None:
     source = UnretryableSource()
-    database, worker, _ = build(tmp_path, source)
+    database, worker, _ = build(tmp_path, database, source)
     enqueue(database, "video.unretryable", "dQw4w9WgXcQ")
 
     worker.run_once()
@@ -429,9 +507,9 @@ def test_an_unretryable_failure_is_not_tried_again(tmp_path: Path) -> None:
     assert source.attempts == 1
 
 
-def test_a_job_that_exhausts_its_attempts_finally_fails(tmp_path: Path) -> None:
+def test_a_job_that_exhausts_its_attempts_finally_fails(tmp_path: Path, database: Database) -> None:
     source = FlakySource(failures=99)
-    database, worker, _ = build(tmp_path, source)
+    database, worker, _ = build(tmp_path, database, source)
     with database.session() as session:
         session.add(Job(kind="video.flaky", target="dQw4w9WgXcQ", max_attempts=2))
 
@@ -446,9 +524,9 @@ def test_a_job_that_exhausts_its_attempts_finally_fails(tmp_path: Path) -> None:
         assert "connection reset" in (job.error_message or "")
 
 
-def test_a_retried_job_eventually_succeeds(tmp_path: Path) -> None:
+def test_a_retried_job_eventually_succeeds(tmp_path: Path, database: Database) -> None:
     source = FlakySource(failures=1)
-    database, worker, _ = build(tmp_path, source)
+    database, worker, _ = build(tmp_path, database, source)
     enqueue(database, "video.flaky", "dQw4w9WgXcQ")
 
     worker.run_once()
@@ -469,15 +547,15 @@ def _clear_backoff(database) -> None:  # type: ignore[no-untyped-def]
             job.scheduled_at = utcnow()
 
 
-def test_the_worker_reuses_a_cached_answer_rather_than_refetching(tmp_path: Path) -> None:
+def test_the_worker_reuses_a_cached_answer_rather_than_refetching(
+    tmp_path: Path, database: Database
+) -> None:
     """The queue must go through the same cache the CLI does.
 
     Two collection paths mean one of them caches and the other does not, and
     the one that does not is the one running a hundred jobs unattended.
     """
     source = EchoSource()
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
     registry = _registry(source)
     payloads = PayloadStore(tmp_path / "payloads")
     worker = Worker(
@@ -491,7 +569,7 @@ def test_the_worker_reuses_a_cached_answer_rather_than_refetching(tmp_path: Path
     assert source.calls == ["dQw4w9WgXcQ"], "the second job refetched an answer already held"
 
 
-def test_a_job_that_asked_for_a_refresh_collects_again(tmp_path: Path) -> None:
+def test_a_job_that_asked_for_a_refresh_collects_again(tmp_path: Path, database: Database) -> None:
     """The mirror image of the test above, and the whole point of the flag.
 
     Counts move, and sometimes the current number is the point. A submission
@@ -500,8 +578,6 @@ def test_a_job_that_asked_for_a_refresh_collects_again(tmp_path: Path) -> None:
     another process minutes after the request that asked for it.
     """
     source = EchoSource()
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
     worker = Worker(
         database=database,
         registry=_registry(source),
@@ -519,7 +595,7 @@ def test_a_job_that_asked_for_a_refresh_collects_again(tmp_path: Path) -> None:
     )
 
 
-def test_a_refresh_job_that_is_retried_still_refreshes(tmp_path: Path) -> None:
+def test_a_refresh_job_that_is_retried_still_refreshes(tmp_path: Path, database: Database) -> None:
     """A retry is the same request again, so it keeps the same intent.
 
     The flag lives on the row rather than in the claim, so this falls out
@@ -528,8 +604,6 @@ def test_a_refresh_job_that_is_retried_still_refreshes(tmp_path: Path) -> None:
     the moment a job needed a second attempt.
     """
     source = FlakySource(failures=1)
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
     worker = Worker(
         database=database,
         registry=_registry(source),
@@ -550,7 +624,9 @@ def test_a_refresh_job_that_is_retried_still_refreshes(tmp_path: Path) -> None:
         assert job.refresh is True, "the retry lost the intent the submission recorded"
 
 
-def test_a_cached_listing_still_queues_the_videos_it_holds(tmp_path: Path) -> None:
+def test_a_cached_listing_still_queues_the_videos_it_holds(
+    tmp_path: Path, database: Database
+) -> None:
     """Re-sweeping a channel must re-check it, cheaply — not skip it.
 
     Suppressing fan-out on a cache hit looks like a saving and is actually a
@@ -560,8 +636,6 @@ def test_a_cached_listing_still_queues_the_videos_it_holds(tmp_path: Path) -> No
     """
     listing = ListingSource()
     echo = EchoSource()
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
     worker = Worker(
         database=database,
         registry=_registry(listing, echo),
@@ -590,6 +664,7 @@ def test_a_cached_listing_still_queues_the_videos_it_holds(tmp_path: Path) -> No
 
 def test_a_job_put_back_because_the_route_was_busy_keeps_its_attempts(
     tmp_path: Path,
+    database: Database,
 ) -> None:
     """The attempt is counted at claim, and nothing was attempted.
 
@@ -601,7 +676,7 @@ def test_a_job_put_back_because_the_route_was_busy_keeps_its_attempts(
     its budget.
     """
     source = EchoSource()
-    database, _, payloads = build(tmp_path, source)
+    database, _, payloads = build(tmp_path, database, source)
     identifier = enqueue(database, "video.echo", "video000001")
     quarantined = RateController(window_ceiling=1)
     quarantined.record("direct", Lane.YOUTUBE, Verdict.BLOCKED)
@@ -626,6 +701,7 @@ def test_a_job_put_back_because_the_route_was_busy_keeps_its_attempts(
 
 def test_a_failure_that_can_never_succeed_says_so_rather_than_counting_attempts(
     tmp_path: Path,
+    database: Database,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """`exhausted its attempts` reads as "we tried and gave up".
@@ -635,7 +711,7 @@ def test_a_failure_that_can_never_succeed_says_so_rather_than_counting_attempts(
     flaky network instead of a video with no captions.
     """
     source = FailingSource()
-    database, worker, _ = build(tmp_path, source)
+    database, worker, _ = build(tmp_path, database, source)
     identifier = enqueue(database, "video.failing", "video000001")
     with database.session() as session:
         job = session.get(Job, identifier)
@@ -651,6 +727,7 @@ def test_a_failure_that_can_never_succeed_says_so_rather_than_counting_attempts(
 
 def test_a_video_with_nothing_to_collect_does_not_slow_the_route_down(
     tmp_path: Path,
+    database: Database,
 ) -> None:
     """Measured, then reproduced here.
 
@@ -662,7 +739,7 @@ def test_a_video_with_nothing_to_collect_does_not_slow_the_route_down(
     minimum interval each time until it reached the tail rate above.
     """
     source = FailingSource()
-    database, _, payloads = build(tmp_path, source)
+    database, _, payloads = build(tmp_path, database, source)
     for index in range(3):
         enqueue(database, "video.failing", f"video{index:06d}")
     controller = RateController(window_ceiling=6)
@@ -683,7 +760,9 @@ def test_a_video_with_nothing_to_collect_does_not_slow_the_route_down(
     assert controller.is_available("direct", Lane.YOUTUBE)
 
 
-def test_the_jobs_a_listing_fans_out_carry_their_own_kinds_bound(tmp_path: Path) -> None:
+def test_the_jobs_a_listing_fans_out_carry_their_own_kinds_bound(
+    tmp_path: Path, database: Database
+) -> None:
     """The fan-out is where forgetting this is most expensive.
 
     One channel becomes a job per video it holds, so a bound that is not
@@ -694,8 +773,6 @@ def test_the_jobs_a_listing_fans_out_carry_their_own_kinds_bound(tmp_path: Path)
     expensive = EchoSource()
     expensive.kind = "video.expensive"  # type: ignore[misc]
     expensive.cost = SourceCost.EXPENSIVE  # type: ignore[misc]
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
     worker = Worker(
         database=database,
         registry=_registry(listing, expensive),
@@ -718,7 +795,7 @@ def test_the_jobs_a_listing_fans_out_carry_their_own_kinds_bound(tmp_path: Path)
     )
 
 
-def test_a_paused_worker_claims_nothing(tmp_path: Path) -> None:
+def test_a_paused_worker_claims_nothing(tmp_path: Path, database: Database) -> None:
     """The one control an operator actually needs, and the only shared channel is the row.
 
     The worker is a separate process from the API — that split is deliberate,
@@ -730,7 +807,7 @@ def test_a_paused_worker_claims_nothing(tmp_path: Path) -> None:
     from tubedepth.models import WorkerControl
 
     source = EchoSource()
-    database, worker, _ = build(tmp_path, source)
+    database, worker, _ = build(tmp_path, database, source)
     enqueue(database, "video.echo", "dQw4w9WgXcQ")
     with database.session() as session:
         session.add(WorkerControl(identifier="worker", paused=True))
@@ -743,13 +820,13 @@ def test_a_paused_worker_claims_nothing(tmp_path: Path) -> None:
         assert session.query(Job).filter(Job.state == JobState.QUEUED).count() == 1
 
 
-def test_resuming_lets_the_queue_move_again(tmp_path: Path) -> None:
+def test_resuming_lets_the_queue_move_again(tmp_path: Path, database: Database) -> None:
     """Paused is a state, not a discarded queue: nothing is failed or cancelled
     on the way in, so resuming is the whole of the undo."""
     from tubedepth.models import WorkerControl
 
     source = EchoSource()
-    database, worker, _ = build(tmp_path, source)
+    database, worker, _ = build(tmp_path, database, source)
     enqueue(database, "video.echo", "dQw4w9WgXcQ")
     with database.session() as session:
         session.add(WorkerControl(identifier="worker", paused=True))
@@ -763,7 +840,7 @@ def test_resuming_lets_the_queue_move_again(tmp_path: Path) -> None:
     assert source.calls == ["dQw4w9WgXcQ"]
 
 
-def test_pausing_partway_through_stops_the_drain(tmp_path: Path) -> None:
+def test_pausing_partway_through_stops_the_drain(tmp_path: Path, database: Database) -> None:
     """A pause has to bite during a sweep, which is the only time it is wanted.
 
     The check used to run once, at the top of the drain. That was defensible
@@ -774,9 +851,6 @@ def test_pausing_partway_through_stops_the_drain(tmp_path: Path) -> None:
     the sweep it is trying to stop has finished".
     """
     from tubedepth.models import WorkerControl
-
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
 
     class PausesItself(EchoSource):
         kind = "video.pauses"
@@ -804,7 +878,9 @@ def test_pausing_partway_through_stops_the_drain(tmp_path: Path) -> None:
         assert session.query(Job).filter(Job.state == JobState.QUEUED).count() == 3
 
 
-def test_a_paused_worker_still_announces_what_it_already_finished(tmp_path: Path) -> None:
+def test_a_paused_worker_still_announces_what_it_already_finished(
+    tmp_path: Path, database: Database
+) -> None:
     """Pause means claim nothing. It does not mean stop talking.
 
     A job that succeeded moments before the pause is owed a callback, and a
@@ -819,8 +895,6 @@ def test_a_paused_worker_still_announces_what_it_already_finished(tmp_path: Path
 
     with respx.mock:
         route = respx.post("https://example.invalid/hook").respond(200)
-        database = Database(tmp_path / "tubedepth.db")
-        database.create_schema()
         with database.session() as session:
             session.add(
                 Job(
@@ -890,7 +964,9 @@ def serving(worker: Worker, *, poll: float = 0.01) -> Iterator[list[int]]:
         assert not thread.is_alive(), "serve did not return after its stop event was set"
 
 
-def test_a_job_queued_after_the_queue_emptied_is_still_collected(tmp_path: Path) -> None:
+def test_a_job_queued_after_the_queue_emptied_is_still_collected(
+    tmp_path: Path, database: Database
+) -> None:
     """The whole point: an empty queue is not a reason to exit.
 
     The job is queued after the worker has already started and found nothing,
@@ -898,7 +974,7 @@ def test_a_job_queued_after_the_queue_emptied_is_still_collected(tmp_path: Path)
     restart loop unnecessary rather than merely cheaper.
     """
     source = EchoSource()
-    database, worker, _ = build(tmp_path, source)
+    database, worker, _ = build(tmp_path, database, source)
 
     with serving(worker):
         assert until(lambda: worker.drains > 0), "the first drain never ran"
@@ -909,14 +985,16 @@ def test_a_job_queued_after_the_queue_emptied_is_still_collected(tmp_path: Path)
         )
 
 
-def test_serving_reports_what_it_collected_across_every_drain(tmp_path: Path) -> None:
+def test_serving_reports_what_it_collected_across_every_drain(
+    tmp_path: Path, database: Database
+) -> None:
     """One number for the whole run, not the last drain's.
 
     The CLI prints it, and a resident worker reporting `0 job(s)` after an hour
     of collecting would make the one line an operator reads a lie.
     """
     source = EchoSource()
-    database, worker, _ = build(tmp_path, source)
+    database, worker, _ = build(tmp_path, database, source)
 
     with serving(worker) as completed:
         enqueue(database, "video.echo", "dQw4w9WgXcQ")
@@ -927,7 +1005,9 @@ def test_serving_reports_what_it_collected_across_every_drain(tmp_path: Path) ->
     assert completed == [2]
 
 
-def test_a_stop_during_the_wait_is_not_made_to_wait_it_out(tmp_path: Path) -> None:
+def test_a_stop_during_the_wait_is_not_made_to_wait_it_out(
+    tmp_path: Path, database: Database
+) -> None:
     """SIGINT has to be prompt, and a plain sleep would make it take `poll`.
 
     The unit sends SIGINT and allows 120 seconds, so a sleeping worker would
@@ -935,7 +1015,7 @@ def test_a_stop_during_the_wait_is_not_made_to_wait_it_out(tmp_path: Path) -> No
     and the operator watching `systemctl stop` cannot tell that from a hang.
     The wait is the stop event's own, so setting it returns at once.
     """
-    _, worker, _ = build(tmp_path, EchoSource())
+    _, worker, _ = build(tmp_path, database, EchoSource())
     stop = threading.Event()
     threading.Timer(0.05, stop.set).start()
 
@@ -946,7 +1026,9 @@ def test_a_stop_during_the_wait_is_not_made_to_wait_it_out(tmp_path: Path) -> No
     assert elapsed < 5.0, f"a 30s poll made a stop take {elapsed:.1f}s"
 
 
-def test_a_drain_that_did_work_goes_straight_round_again(tmp_path: Path) -> None:
+def test_a_drain_that_did_work_goes_straight_round_again(
+    tmp_path: Path, database: Database
+) -> None:
     """No pause while there is work.
 
     A listing fans out to a job per video, so the drain that collects the
@@ -954,7 +1036,7 @@ def test_a_drain_that_did_work_goes_straight_round_again(tmp_path: Path) -> None
     there would add an interval per level of fan-out for nothing.
     """
     source = EchoSource()
-    database, worker, _ = build(tmp_path, source)
+    database, worker, _ = build(tmp_path, database, source)
     for index in range(3):
         enqueue(database, "video.echo", f"video-idx{index}")
     waits: list[float] = []
@@ -971,7 +1053,7 @@ def test_a_drain_that_did_work_goes_straight_round_again(tmp_path: Path) -> None
     assert waits == [7.0], f"it waited between drains that had work: {waits}"
 
 
-def test_serving_survives_a_drain_that_raises(tmp_path: Path) -> None:
+def test_serving_survives_a_drain_that_raises(tmp_path: Path, database: Database) -> None:
     """A resident worker cannot inherit the restart loop's forgiveness.
 
     Under `Restart=always` an unhandled exception was a ten-second gap and a
@@ -983,7 +1065,7 @@ def test_serving_survives_a_drain_that_raises(tmp_path: Path) -> None:
     exception from a drain ends the loop, and naming a subset would be a list
     to keep in step with everything a source might raise.
     """
-    _, worker, _ = build(tmp_path, EchoSource())
+    _, worker, _ = build(tmp_path, database, EchoSource())
     stop = threading.Event()
     attempts = 0
 

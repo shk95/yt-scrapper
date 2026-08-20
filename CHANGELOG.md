@@ -20,6 +20,20 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+### Changed
+
+- **The boot path issues no DDL any more (#14).** `_database()`, which every
+  CLI entry point goes through, used to call `create_schema()` — a
+  convenience while this owned a SQLite file. On a database shared with other
+  services that is rule 6 of `docs/shared-postgres.md`, and it silently broke
+  migrations: a boot that added a column left `alembic_version` untouched, so
+  the next `alembic upgrade` tried to add a column that was already there.
+  `Database.create_schema()` still exists — it is how tests and a fresh
+  `--data-dir` get a database — but it now only creates what is missing; the
+  column and index repair it used to do is gone, because `tubedepth migrate`
+  now covers the same gap and keeps `alembic_version` honest while doing it.
+  The only schema path is `tubedepth migrate`.
+
 ### Fixed
 
 - **`prune` refuses to sweep a payload store whose index has no rows at all.**
@@ -40,6 +54,27 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Added
 
+- **`tubedepth transfer --from <url> --to <url>`, and `tubedepth.transfer.transfer()` behind it.**
+  #15 and #24 both specify the PostgreSQL cutover's data move as one line —
+  "Data across: six tables" — and until now nothing in this repository has
+  ever moved a row from one database to another; the alternative was a
+  `pg_dump`-and-hope run by hand against 248 targets whose repeated
+  observations cannot be re-collected at any price. The transfer is
+  model-driven rather than a dialect-level dump: every row is read through
+  the ORM and reconstructed on the target column by column, which is what
+  preserves `identifier` primary keys and `fetched_at` verbatim to the
+  microsecond, and — the failure a `pg_dump` cannot see coming — routes every
+  instant back through `UtcDateTime`, which refuses a naive datetime rather
+  than letting SQLite's timezone-less storage silently become the wrong
+  instant under PostgreSQL's `timestamptz`. It refuses a target that already
+  holds any rows, since `artifacts` deliberately carries no unique constraint
+  on `fingerprint` and a partial second run would duplicate every
+  observation with nothing to catch it. It never imports the payload store —
+  rule 7 of `docs/shared-postgres.md` treats the index and the payload bytes
+  under `TUBEDEPTH_DATA_DIR/payloads` as one recovery set, and this moves
+  only the index half of it. `--dry-run` counts every table in the source
+  and writes nothing, so an operator sees six numbers before committing to a
+  cutover.
 - **A sampler, so a history starts accumulating.** `tubedepth-sample.timer` in
   `deploy/` forces a re-collection of a watch list every hour; the list is
   `~/.config/tubedepth/watchlist.txt`, one video id per line, and
@@ -197,6 +232,20 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
   table does stay behind, and the next `tubedepth migrate` then fails with
   `duplicate column name` — see `docs/troubleshooting.md`, which says how to
   tell whether the answer is `--stamp` or an upgrade.
+
+### Removed
+
+- **SQLite support (#15).** The cutover completes: `Database` refuses any URL
+  that is not PostgreSQL, with one deliberate exception —
+  `tubedepth transfer --from` still accepts a SQLite source, because that is
+  what a real cutover moves data out of. `TUBEDEPTH_DATABASE_URL` has no
+  fallback any more and is required; a checkout with nothing configured now
+  gets a named refusal instead of a `var/tubedepth.db` it never asked for.
+  `psycopg[binary]` moved from an optional extra into `dependencies`.
+  Deployment units gain a mandatory `EnvironmentFile` for the URL.
+  `tool/doctor.sh`'s SQLite version check became a PostgreSQL reachability
+  check. `docs/troubleshooting.md`'s SQLite entries are kept, marked
+  historical.
 
 ## [0.1.0] - 2026-08-19
 

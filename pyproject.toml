@@ -32,17 +32,14 @@ dependencies = [
   # friction you do not want at the moment extraction has stopped working.
   # The lock file still pins an exact version, so builds stay reproducible.
   "yt-dlp>=2026.7",
+  # PostgreSQL is the only backend since the cutover (#15, docs/status.md) —
+  # `Database` refuses any other dialect for the application's own connection.
+  # This used to be the `postgres` extra so a SQLite-only checkout could skip
+  # the compiled driver; there is no SQLite-only checkout left to serve.
+  "psycopg[binary]>=3.2,<4",
 ]
 
 [project.optional-dependencies]
-# The driver is an extra rather than a dependency because this project runs on
-# SQLite today and PostgreSQL is where it is going (`docs/status.md`). An extra
-# lets `tests/test_postgres_migrations.py` and a PostgreSQL deployment install
-# it without putting a compiled driver in the path of anyone running the
-# SQLite one. It moves into `dependencies` at the cutover, not before.
-postgres = [
-  "psycopg[binary]>=3.2,<4",
-]
 dev = [
   "pytest>=8,<9",
   "pytest-asyncio>=0.24,<2",
@@ -93,11 +90,23 @@ testpaths = ["tests"]
 # project talks to YouTube, and a suite that actually does so is red on any
 # datacenter address for reasons unrelated to the change under test. A check
 # that is red for unrelated reasons is one people learn to ignore.
-addopts = "-q -m 'not live and not postgres'"
+#
+# `and not postgres` used to sit here too, deselecting the suite's only
+# server-backed tests by default. Task 7 (issue #15 — "the tests move too")
+# moved `database_url_for_tests` itself onto a real PostgreSQL server, which
+# means every test through the `database` fixture needs one now, not just the
+# handful marked `postgres` — deselecting the marker would deselect almost
+# the whole suite. `tool/checks/test` (and so `just check`) now needs Docker;
+# `tool/checks/prerequisite` says so.
+addopts = "-q -m 'not live'"
 asyncio_mode = "auto"
 markers = [
   "live: reaches YouTube or a third-party service; never runs in CI. Use `just contract`.",
-  "postgres: needs a PostgreSQL server. Use `just postgres`; CI runs it in a service container.",
+  # No longer a selection filter (every test needs the server now) — kept as
+  # a label for the tests that check PostgreSQL's own structure (roles,
+  # privileges, `alembic_version` placement) rather than merely running
+  # against it, so `pytest -m postgres` can still single those out.
+  "postgres: exercises PostgreSQL structure directly (roles, privileges, migrations), not just as a backing store.",
 ]
 
 [tool.coverage.run]

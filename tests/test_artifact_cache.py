@@ -8,7 +8,6 @@ re-collection that refetches all of it spends the whole budget learning that.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 from tubedepth.database import Database
 from tubedepth.repositories import ArtifactRepository
@@ -27,15 +26,8 @@ class FakeClock:
         self._now += delta
 
 
-def prepared(tmp_path: Path) -> Database:
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
-    return database
-
-
-def test_a_recorded_artifact_is_found_again_by_its_fingerprint(tmp_path: Path) -> None:
+def test_a_recorded_artifact_is_found_again_by_its_fingerprint(database: Database) -> None:
     clock = FakeClock()
-    database = prepared(tmp_path)
 
     with database.session() as session:
         ArtifactRepository(session, clock=clock).record(
@@ -55,9 +47,8 @@ def test_a_recorded_artifact_is_found_again_by_its_fingerprint(tmp_path: Path) -
         assert found.byte_count == 1234
 
 
-def test_an_artifact_past_its_freshness_is_not_served(tmp_path: Path) -> None:
+def test_an_artifact_past_its_freshness_is_not_served(database: Database) -> None:
     clock = FakeClock()
-    database = prepared(tmp_path)
     with database.session() as session:
         ArtifactRepository(session, clock=clock).record(
             kind="video.metadata",
@@ -75,9 +66,8 @@ def test_an_artifact_past_its_freshness_is_not_served(tmp_path: Path) -> None:
         assert ArtifactRepository(session, clock=clock).fresh("abc123") is None
 
 
-def test_a_different_question_does_not_hit_the_cache(tmp_path: Path) -> None:
+def test_a_different_question_does_not_hit_the_cache(database: Database) -> None:
     clock = FakeClock()
-    database = prepared(tmp_path)
     with database.session() as session:
         ArtifactRepository(session, clock=clock).record(
             kind="video.metadata",
@@ -93,7 +83,7 @@ def test_a_different_question_does_not_hit_the_cache(tmp_path: Path) -> None:
         assert ArtifactRepository(session, clock=clock).fresh("different") is None
 
 
-def test_recollecting_records_a_new_row_rather_than_overwriting(tmp_path: Path) -> None:
+def test_recollecting_records_a_new_row_rather_than_overwriting(database: Database) -> None:
     """History is a by-product worth keeping.
 
     View, like and comment counts move, and keeping each observation makes how
@@ -101,7 +91,6 @@ def test_recollecting_records_a_new_row_rather_than_overwriting(tmp_path: Path) 
     The cost is disk, which retention bounds.
     """
     clock = FakeClock()
-    database = prepared(tmp_path)
     for digest in ("first", "second"):
         with database.session() as session:
             ArtifactRepository(session, clock=clock).record(

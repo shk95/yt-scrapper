@@ -11,13 +11,44 @@ the offending test is written.
 
 from __future__ import annotations
 
+import hashlib
+import os
+import re
 import socket
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
+from sqlalchemy import create_engine, text
+from sqlalchemy.engine import make_url
+
+from tubedepth.database import Database
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
+
+
+# A connection's host is only known here after DNS resolution — `localhost`
+# in a URL arrives as `127.0.0.1` or `::1` by the time `socket.connect` sees
+# it — so the host half of the allow-list stays these three forms rather than
+# whatever `TUBEDEPTH_TEST_POSTGRES_URL` happened to spell.
+LOCAL_DATABASE_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _test_database_port() -> int | None:
+    """The one port this suite is allowed to reach on a local host.
+
+    Task 7 widened the guard to "any local host, any port" suite-wide, which
+    let a test open a socket to *any* local service, not only the PostgreSQL
+    server this suite actually names — a stray Postgres on the default port
+    would have gone unnoticed. Narrowing to the port `TUBEDEPTH_TEST_POSTGRES_URL`
+    actually names restores that half of the original strength; the host stays
+    an allow-list (see `LOCAL_DATABASE_HOSTS`) because DNS resolution, not this
+    guard, is what turns `localhost` into a concrete address.
+    """
+    server_url = os.environ.get("TUBEDEPTH_TEST_POSTGRES_URL")
+    if not server_url:
+        return None
+    return make_url(server_url).port or 5432
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -40,20 +71,30 @@ def pytest_addoption(parser: pytest.Parser) -> None:
 def refuse_outbound_network(
     request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> Iterator[None]:
-    """Fail any test not marked `live` that tries to open a socket.
+    """Fail any test not marked `live` that tries to reach a real network address.
 
     httpx's ASGITransport and MockTransport never reach this, and neither does
     anything reading a fixture, so nothing legitimate is affected.
+
+    A connection to a `LOCAL_DATABASE_HOSTS` address on the exact port
+    `TUBEDEPTH_TEST_POSTGRES_URL` names is let through rather than refused
+    outright. Now that `database_url_for_tests` names a real PostgreSQL server
+    (`just postgres`, or CI's service container) instead of a SQLite file, the
+    whole default suite opens a socket to it — that traffic is neither the
+    network nor the hazard this guard exists for. Anything else, including a
+    *different* local service on a different port, is still refused.
     """
-    # `postgres` too: those tests talk to a database server on localhost, which
-    # is neither the network nor the hazard this guard exists for. They are
-    # deselected by default for the same reason `live` is — they need something
-    # the offline suite must not assume is there.
-    if any(request.node.get_closest_marker(name) for name in ("live", "postgres")):
+    if request.node.get_closest_marker("live"):
         yield
         return
 
-    def refuse(self: socket.socket, address: object) -> None:
+    database_port = _test_database_port()
+    original_connect = socket.socket.connect
+
+    def refuse(self: socket.socket, address: object) -> object:
+        host, port = (address[0], address[1]) if isinstance(address, tuple) else (address, None)
+        if host in LOCAL_DATABASE_HOSTS and port is not None and port == database_port:
+            return original_connect(self, address)  # type: ignore[arg-type]
         raise RuntimeError(
             f"test attempted a network connection to {address!r}; "
             "use a fixture, respx, or mark the test with @pytest.mark.live"
@@ -63,6 +104,100 @@ def refuse_outbound_network(
     yield
 
 
+@pytest.fixture(autouse=True)
+def refuse_an_ambient_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator's shell is not a fixture, and must not become one.
+
+    `_database()` honours `TUBEDEPTH_DATABASE_URL` now (that is the point of
+    this cutover), which means a value already sitting in the environment —
+    naming the shared fleet PostgreSQL, say — used to be inert here and is not
+    any more: it would redirect every test that goes through `_database()` or
+    constructs a bare `Database(...)`, `just check` included. Deleting it for
+    every test is what keeps `database_url_for_tests` the only seam that names
+    a database in this suite, the same discipline `refuse_outbound_network`
+    applies to sockets.
+    """
+    monkeypatch.delenv("TUBEDEPTH_DATABASE_URL", raising=False)
+
+
 @pytest.fixture
 def fixture_root() -> Path:
     return FIXTURE_ROOT
+
+
+def _schema_name_for(nodeid: str) -> str:
+    """A PostgreSQL identifier derived from a test's node id.
+
+    Readable where it can be — a failure in `psql \\dn` output should still
+    say roughly which test left a schema behind — but PostgreSQL identifiers
+    top out at 63 bytes and a parametrized node id routinely blows past that,
+    so the digest is what actually guarantees two different tests never
+    collide on a truncated prefix.
+    """
+    slug = re.sub(r"[^0-9a-zA-Z]+", "_", nodeid).strip("_").lower()
+    digest = hashlib.sha1(nodeid.encode()).hexdigest()[:10]
+    return f"t_{slug[: 63 - len(digest) - 2]}_{digest}"
+
+
+@pytest.fixture
+def database_url_for_tests(request: pytest.FixtureRequest) -> Iterator[str]:
+    """The one place the suite names a database.
+
+    Every test module used to write `Database(tmp_path / "tubedepth.db")`,
+    fifty-nine times across eighteen files, so "the tests move to PostgreSQL"
+    meant fifty-nine edits. It is one now.
+
+    A schema per test, not a database per test: creating a PostgreSQL database
+    is seconds each, and this suite has hundreds of tests. The schema is named
+    for the test itself, created on the server named by
+    `TUBEDEPTH_TEST_POSTGRES_URL` (the migrator — the same credential the
+    `postgres`-marked structural tests use, so it already has `CREATE ON
+    DATABASE` from the test harness) and dropped again on teardown regardless
+    of outcome, so a failed test does not leave the next run something to trip
+    over.
+
+    Connected to directly, with no `SET ROLE`: the schema is created with no
+    explicit `AUTHORIZATION`, so it is owned by the connecting role outright,
+    and the migrator can create and touch tables in it without borrowing
+    `tubedepth_owner`'s privileges the way `migrations/env.py` has to. The
+    three-role separation this buys production is proven against the literal
+    `tubedepth` schema by `tests/test_postgres_privileges.py`, not by every
+    other test in the suite reconstructing it.
+
+    The yielded URL points the connection's `search_path` at the new schema
+    via `options`, not by naming it in `Database.SCHEMA` (which stays
+    `"tubedepth"` — that constant is what `verify_placement()` and
+    `is_migrated()` check against production's fixed schema name, and no
+    ordinary test through this fixture calls either).
+    """
+    server_url = os.environ.get("TUBEDEPTH_TEST_POSTGRES_URL")
+    if not server_url:
+        pytest.skip("set TUBEDEPTH_TEST_POSTGRES_URL, or run `just postgres`")
+
+    schema = _schema_name_for(request.node.nodeid)
+    admin_engine = create_engine(server_url)
+    with admin_engine.begin() as connection:
+        connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        connection.execute(text(f'CREATE SCHEMA "{schema}"'))
+    admin_engine.dispose()
+
+    url = make_url(server_url).update_query_dict({"options": f"-csearch_path={schema},pg_catalog"})
+
+    try:
+        # Not `str(url)`: SQLAlchemy's `URL.__str__` masks the password as
+        # `***` by default (it is written where it might end up in a log), so
+        # every connection through the yielded URL would fail authentication
+        # rather than reach the schema this fixture just created.
+        yield url.render_as_string(hide_password=False)
+    finally:
+        admin_engine = create_engine(server_url)
+        with admin_engine.begin() as connection:
+            connection.execute(text(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE'))
+        admin_engine.dispose()
+
+
+@pytest.fixture
+def database(database_url_for_tests: str) -> Database:
+    database = Database(database_url_for_tests)
+    database.create_schema()
+    return database

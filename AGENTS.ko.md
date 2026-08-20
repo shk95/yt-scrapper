@@ -1,15 +1,15 @@
 # 이 저장소에서 작업하기
 
 YouTube Data API가 주지 않는 영상·채널 상세 데이터를 수집하는 **비동기 작업 큐 API**.
-Python + FastAPI + SQLAlchemy + SQLite, 패키지는 `tubedepth`, 실행은 전부 `uv`.
+Python + FastAPI + SQLAlchemy + PostgreSQL, 패키지는 `tubedepth`, 실행은 전부 `uv`.
 
 *[English](AGENTS.md)* — 정본은 영어이고 이 문서는 번역이다.
 
 ## 매 세션 시작할 때
 
 1. `tool/doctor.sh` — 툴체인과 git 훅이 켜져 있는지 확인한다. 건너뛰지 말 것: 클론은
-   `core.hooksPath`를 설정하기 전까지 훅이 없고, SQLite가 낡았으면 워커 안에서
-   `OperationalError`로 알게 된다.
+   `core.hooksPath`를 설정하기 전까지 훅이 없고, `TUBEDEPTH_DATABASE_URL`이 없거나
+   닿지 않으면 맥락 없는 거부로 워커 안에서 알게 된다.
 2. `gh issue list --label blocked` — 이 호스트에 없던 것이 필요해서 이전 세션이 끝내지 못한 일.
 3. `docs/status.md` — 현재 상태와 되돌리기 비싼 결정들.
 
@@ -53,8 +53,10 @@ API로 읽는 쪽에서는 풀리지 않는다.
 - **WireGuard config는 저장소 바깥에 산다.** `~/.config/tubedepth/wireguard/` (0700). 렌더링된 런타임
   config는 `$XDG_RUNTIME_DIR`(tmpfs, 0600)에 쓰고 종료 시 지운다. `.gitignore`는 방어가 아니라 backstop이다 —
   히스토리에 닿은 키는 파일을 지워도 남는다.
-- **DB는 리눅스 파일시스템에 둔다.** `/mnt/c`(drvfs)는 WAL이 요구하는 POSIX 잠금을 신뢰성 있게 제공하지 않고,
-  증상은 간헐적 `database is locked`다. `tool/doctor.sh`가 확인한다.
+- **`TUBEDEPTH_DATA_DIR`(payload store)는 리눅스 파일시스템에 둔다.** `/mnt/c`(drvfs)는
+  POSIX 시맨틱을 신뢰성 있게 제공하지 않는다. `tool/doctor.sh`가 확인한다. DB는 이제
+  PostgreSQL이라(#15) TCP로 붙으므로 더 이상 SQLite의 WAL 잠금 이야기가 아니다 — 예전
+  모습은 `docs/troubleshooting.md`의 SQLite 절(역사로 남겨둠)에 있다.
 
 ## 워크플로
 
@@ -105,8 +107,9 @@ tool/worktree.sh list
 tool/worktree.sh done <name>
 ```
 
-**병렬화되지 않는 것**: 하나의 SQLite 데이터베이스 파일, wireproxy가 바인드하는 포트 대역(`27100+`),
-그리고 ProtonVPN의 동시 접속 할당량. 한 번에 한 세션만 이것들을 쥘 수 있다.
+**병렬화되지 않는 것**: 공유 PostgreSQL 인스턴스 위의 이 저장소 migration 상태(워크트리
+둘에서 동시에 `tubedepth migrate`를 돌리면 경합한다), wireproxy가 바인드하는 포트
+대역(`27100+`), 그리고 ProtonVPN의 동시 접속 할당량. 한 번에 한 세션만 이것들을 쥘 수 있다.
 
 ## 레이아웃
 

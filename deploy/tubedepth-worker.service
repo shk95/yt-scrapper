@@ -21,6 +21,18 @@ WorkingDirectory=%h/github_prj/yt-scrapper
 # first time it is enabled.
 Environment=PATH=%h/.nix-profile/bin:/usr/local/bin:/usr/bin:/bin
 Environment=TUBEDEPTH_DATA_DIR=%h/github_prj/yt-scrapper/var
+# Required since the PostgreSQL cutover (#15) — tubedepth has no SQLite
+# fallback, and this unit refuses to start without TUBEDEPTH_DATABASE_URL. A
+# URL is a credential (it embeds a password), so it belongs in an
+# EnvironmentFile with mode 0600 rather than directly in this file, which is
+# world-readable in the unit directory — the same file the (optional) webhook
+# signing secret below already lives in:
+#
+#   mkdir -p ~/.config/tubedepth
+#   echo 'TUBEDEPTH_DATABASE_URL=postgresql+psycopg://tubedepth_runtime:...@host/db' \
+#     > ~/.config/tubedepth/worker.env
+#   chmod 0600 ~/.config/tubedepth/worker.env
+EnvironmentFile=%h/.config/tubedepth/worker.env
 # How many items a listing kind collects, and how many comments a harvest
 # takes. Deployment-wide caps rather than per-request, and **set them the same
 # in the api unit and the worker unit**: each process reads them once, and if
@@ -35,19 +47,26 @@ Environment=TUBEDEPTH_DATA_DIR=%h/github_prj/yt-scrapper/var
 #Environment=TUBEDEPTH_LISTING_LIMIT=100
 #Environment=TUBEDEPTH_COMMENT_LIMIT=200
 # Concurrency is an upper bound, not a target: the rate controller narrows it
-# whenever YouTube pushes back. Eight was measured, not chosen — see
-# docs/status.md, where the figure and the sweep that produced it are recorded.
-Environment=TUBEDEPTH_CONCURRENCY=8
-# Set this to sign job callbacks. Without it none are sent, which is the safe
-# default — an unsigned callback is one the receiver cannot attribute. Prefer
-# an EnvironmentFile with mode 0600 over putting the secret in this file, which
-# is world-readable in the unit directory.
-#EnvironmentFile=%h/.config/tubedepth/worker.env
+# whenever YouTube pushes back. docs/status.md measured a *useful* ceiling of
+# 6 — past that the bottleneck is YouTube's side, not this worker's threads.
+# The write-engine connection pool scales 1:1 with this number (database.py's
+# Database, sized by cli.work off --concurrency), and this service's
+# PostgreSQL connection budget is 32, granted by the fleet on request (#26,
+# deploy/service-manifest.yaml, docs/shared-postgres.md rule 4) specifically
+# so 6 fits: total = 2C + 13 = 25 at C=6, leaving a margin of 7 against 32.
+# Raising this past 6 buys nothing (past 6 the bottleneck moves to YouTube's
+# side, not this worker's) and raising the budget past 32 is not this
+# service's call to make.
+Environment=TUBEDEPTH_CONCURRENCY=6
+# TUBEDEPTH_WEBHOOK_SECRET, to sign job callbacks — set it in the
+# EnvironmentFile above (worker.env), which already exists for
+# TUBEDEPTH_DATABASE_URL. Without it no callback is signed, which is the safe
+# default: an unsigned callback is one the receiver cannot attribute.
 # `trending.videos` needs a YouTube Data API key. It spends Google's quota —
 # 10,000 units a day, one per request — and none of the per-address budget the
 # other lanes compete for, which is why it has a lane of its own. Without the
 # key that kind fails as a configuration error and nothing else is affected.
-# Put it in the EnvironmentFile above rather than here: TUBEDEPTH_DATA_API_KEY.
+# Put it in the EnvironmentFile above too, as TUBEDEPTH_DATA_API_KEY.
 # `--poll` is what keeps this process up. Without it `tubedepth work` drains
 # the queue and exits, and this unit's Restart=always turned that into a poll
 # loop made of process launches: measured at ~520 ms of CPU and a 68 MB peak

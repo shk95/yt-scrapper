@@ -9,6 +9,14 @@ name: CI
 # REQUIRE_NATIVE=1 turns tool/checks/prerequisite's "unverified on this host"
 # exit 69 back into a failure, so the merge gate can never accept a change that
 # was silently unchecked.
+#
+# One job, not two, since Task 7 (issue #15 — "the tests move too"):
+# `database_url_for_tests` names a schema on a real PostgreSQL server for
+# nearly every test in the suite now, not just the handful that used to be
+# marked `postgres` and run in a separate job. Format and lint do not need the
+# server, but splitting them off to avoid a few seconds of container start-up
+# would be a second job definition to keep in sync with the first for no
+# benefit — `tool/checks/test` already needs Docker locally too.
 
 on:
   push:
@@ -26,39 +34,6 @@ env:
 jobs:
   verify:
     name: Format, lint, test
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v5
-        with:
-          enable-cache: true
-
-      - name: Format
-        run: tool/checks/format
-
-      - name: Lint
-        run: tool/checks/lint
-
-      # The suite is offline by construction: tests/conftest.py refuses to open
-      # a socket for any test not marked `live`, and `live` is deselected by
-      # pyproject's addopts. A GitHub runner is a datacenter address, so a
-      # network-dependent suite here would be red for reasons that have nothing
-      # to do with the diff.
-      - name: Test
-        run: tool/checks/test
-
-  # The migration checks against the database this project is moving to. A
-  # separate job because it needs a server: folding it into `verify` would make
-  # every run wait on a container for checks that do not use one, and a red
-  # PostgreSQL job would then be indistinguishable from a red lint.
-  #
-  # It is required all the same. A migration that applies on SQLite and fails on
-  # PostgreSQL is exactly the failure this is here to catch, and it is only ever
-  # discovered at deploy time by whoever is least able to fix it.
-  postgres:
-    name: Migrations on PostgreSQL
     runs-on: ubuntu-latest
 
     services:
@@ -80,7 +55,8 @@ jobs:
 
     env:
       PGPASSWORD: fleet
-      TUBEDEPTH_TEST_POSTGRES_URL: postgresql+psycopg://tubedepth:check@localhost:5432/fleet
+      TUBEDEPTH_TEST_POSTGRES_URL: postgresql+psycopg://tubedepth_migrator:check@localhost:5432/fleet
+      TUBEDEPTH_TEST_POSTGRES_RUNTIME_URL: postgresql+psycopg://tubedepth_runtime:check-runtime@localhost:5432/fleet
 
     steps:
       - uses: actions/checkout@v7
@@ -93,22 +69,41 @@ jobs:
       # The same file a real deployment runs, so what CI checks is the shape
       # production has — the `search_path` in particular, which is what decides
       # whether this service's `alembic_version` lands in its own schema.
-      - name: Bootstrap the role and schema
+      - name: Bootstrap the roles and schema
         run: |
           psql -h localhost -U fleet -d fleet -v ON_ERROR_STOP=1 \
-            -v password="'check'" -f deploy/postgres-bootstrap.sql
-          # Harness only, and deliberately not in that file: the tests drop and
-          # recreate the schema between cases. In production the service role
-          # has no business creating schemas.
-          psql -h localhost -U fleet -d fleet -c 'GRANT CREATE ON DATABASE fleet TO tubedepth'
+            -v password="'check'" -v runtime_password="'check-runtime'" -v database=fleet \
+            -f deploy/postgres-bootstrap.sql
+          # Harness only, and deliberately not in that file: the suite drops
+          # and recreates a schema per test for isolation. In production the
+          # service role has no business creating schemas.
+          psql -h localhost -U fleet -d fleet -c 'GRANT CREATE ON DATABASE fleet TO tubedepth_migrator'
 
-      - name: Migrations
-        run: tool/checks/postgres
+      - name: Format
+        run: tool/checks/format
+
+      - name: Lint
+        run: tool/checks/lint
+
+      # The suite is offline by construction: tests/conftest.py refuses to open
+      # a socket for any test not marked `live`, and `live` is deselected by
+      # pyproject's addopts — except to the PostgreSQL service container above,
+      # which `refuse_outbound_network` allow-lists by address. A GitHub
+      # runner is a datacenter address, so a network-dependent suite here
+      # would be red for reasons that have nothing to do with the diff.
+      #
+      # `TUBEDEPTH_TEST_POSTGRES_URL` is already set (above), so
+      # `tool/checks/test` uses this server rather than bringing up its own —
+      # the same bootstrap file, so what is checked is the shape production
+      # has, including a migration that applies on SQLite and fails on
+      # PostgreSQL, which used to only be caught at deploy time.
+      - name: Test
+        run: tool/checks/test
 
   required:
     name: Required checks
     runs-on: ubuntu-latest
-    needs: [verify, postgres]
+    needs: [verify]
     if: always()
     steps:
       # A stable job name for branch protection to require, so adding or
@@ -117,10 +112,6 @@ jobs:
         run: |
           if [ "${{ needs.verify.result }}" != "success" ]; then
             echo "verify did not succeed: ${{ needs.verify.result }}" >&2
-            exit 1
-          fi
-          if [ "${{ needs.postgres.result }}" != "success" ]; then
-            echo "postgres did not succeed: ${{ needs.postgres.result }}" >&2
             exit 1
           fi
           echo "all required checks passed"

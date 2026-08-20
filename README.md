@@ -51,9 +51,9 @@ Comments are available and cost more quota than bulk collection can afford.
 
 ```sh
 git config core.hooksPath .githooks   # a fresh clone arrives with hooks off
-tool/doctor.sh                        # toolchain, SQLite, hooks
+tool/doctor.sh                        # toolchain, PostgreSQL reachability, hooks
 uv sync --extra dev
-just check                            # format + lint + the offline suite
+just check                            # format + lint + the test suite (needs Docker)
 
 uv run tubedepth key create --label local   # the secret is printed once
 uv run tubedepth serve --port 8080 &        # the API, on 127.0.0.1 by default
@@ -92,11 +92,22 @@ systemd **user** units live in `deploy/`. None needs root, and none can quietly
 acquire it. Two of them are the service itself:
 
 ```sh
+mkdir -p ~/.config/tubedepth
+echo 'TUBEDEPTH_DATABASE_URL=postgresql+psycopg://tubedepth_runtime:...@host/db' \
+  > ~/.config/tubedepth/worker.env
+cp ~/.config/tubedepth/worker.env ~/.config/tubedepth/database.env   # api.service reads this one
+chmod 0600 ~/.config/tubedepth/worker.env ~/.config/tubedepth/database.env
+
 cp deploy/tubedepth-api.service deploy/tubedepth-worker.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now tubedepth-api tubedepth-worker
 loginctl enable-linger $USER    # or a reboot looks exactly like a crash
 ```
+
+There is no SQLite fallback: every unit refuses to start without a working
+`TUBEDEPTH_DATABASE_URL`. `deploy/postgres-bootstrap.sql` is what provisions
+the roles and schema that URL points at, and `docs/shared-postgres.md` is the
+regulation behind it.
 
 The third is optional and off by default: `tubedepth-sample.timer` re-collects
 a list of videos every hour, forcing past the freshness window so that each
@@ -241,8 +252,9 @@ estimates was removed on purpose — the reasons are in
 
 **Checked and unchecked.** Verified by hand on this machine during planning: 78
 yt-dlp keys, caption json3 retrieval, 20 comments in 6.7s, SponsorBlock 200 and
-404 both, InnerTube `/next` and `/browse` reachable, SQLite 3.46.1, wireproxy
-1.1.3 available, four parallel metadata extractions in 3.11s.
+404 both, InnerTube `/next` and `/browse` reachable, PostgreSQL reachable
+(SQLite 3.46.1 back when that was still the backend), wireproxy 1.1.3
+available, four parallel metadata extractions in 3.11s.
 
 Since then, under sustained load: 474 jobs, none failed, the AIMD window at its
 ceiling and the quarantine streak at zero — so the controller settles rather

@@ -14,28 +14,31 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from sqlalchemy import func, select, text
 
 from . import __version__
 from .api.application import create_application
 from .collection import CollectionService
-from .database import Database
+from .database import _MAX_OVERFLOW, _POOL_SIZE, Database
 from .egress.control import RateController
 from .egress.transport import DirectEgress
-from .errors import TubedepthError, ValidationError
+from .errors import ConfigurationError, TubedepthError, ValidationError
 from .fixture_capture import redact_for_fixture
 from .identifiers import normalize_target, normalize_video_identifier
 from .innertube.client import InnerTubeClient
-from .models import WORKER_CONTROL_ID, Artifact, Job, JobState, WorkerControl, utcnow
+from .models import WORKER_CONTROL_ID, Artifact, Base, Job, JobState, WorkerControl, utcnow
 from .observability import configure_logging
 from .payload_store import PayloadStore
 from .repositories import JobRepository
 from .retention import RetentionPolicy, RetentionService
 from .schema_versions import SchemaVersionBackfill
 from .services.keys import ApiKeyService
+from .settings import database_url
 from .sources import default_registry
 from .sources.innertube_sources import RECORDABLE_SURFACES, record_surface
 from .sources.registry import attempts_for
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime
+from .transfer import mapped_models, transfer
 from .worker import Worker
 
 logger = logging.getLogger(__name__)
@@ -119,10 +122,41 @@ def collect(
         typer.echo(json.dumps(body, indent=2, ensure_ascii=False))
 
 
-def _database(data_directory: Path) -> Database:
+def _database(
+    data_directory: Path, *, pool_size: int = _POOL_SIZE, max_overflow: int = _MAX_OVERFLOW
+) -> Database:
+    """Open the database every CLI entry point uses.
+
+    Creates no schema (#14) — but a database with none is not a database
+    this can do anything useful against, and letting the first query fail
+    with `no such table` inside SQLAlchemy is a traceback, not a refusal.
+    `is_migrated()` only reflects, so checking it here does not reintroduce
+    DDL on the boot path; it just turns the eventual failure into one that
+    names the fix.
+
+    `verify_placement()` runs first, ahead of `is_migrated()`: on the wrong
+    `search_path`, `is_migrated()` would also see no `jobs` table — the
+    schema this connection can reach is the wrong one, or none — and telling
+    an operator to run `tubedepth migrate` would be the wrong diagnosis when
+    the real schema already exists, fully migrated, just unreachable from
+    here. Placement is a precondition for the migration check meaning
+    anything at all, so it is asked first (#16).
+
+    The URL comes from `settings.database_url`, the one resolver Alembic also
+    calls (`migrate` below) — so `tubedepth work` and `tubedepth migrate`
+    always agree on which database they mean. `data_directory` no longer
+    contributes to that URL at all (there is no SQLite fallback under it to
+    contribute, since the cutover, #15); it is created here only because most
+    callers of `_database()` also open the payload store under the same path.
+    """
     data_directory.mkdir(parents=True, exist_ok=True)
-    database = Database(data_directory / "tubedepth.db")
-    database.create_schema()
+    url = database_url()
+    database = Database(url, pool_size=pool_size, max_overflow=max_overflow)
+    database.verify_placement()
+    if not database.is_migrated():
+        raise ConfigurationError(
+            f"no schema at {url} — run: tubedepth migrate --data-dir {data_directory}"
+        )
     return database
 
 
@@ -265,8 +299,15 @@ def work(
     just as often. `Worker.serve` has the measurements.
     """
     configure_logging()
+    # Sized to `--concurrency`, not the API's fixed default: `Worker.drain`
+    # runs one claim thread and one lease-renewal thread per unit of
+    # concurrency (`worker.py`'s `pump` and `_holding_lease`), both against
+    # the write engine, so a fixed pool of 4 starves at concurrency > 2 —
+    # measured directly (`docs/status.md`), not assumed from the thread
+    # count. `deploy/service-manifest.yaml` carries this term in the
+    # connection budget.
     worker = Worker(
-        database=_database(data_directory),
+        database=_database(data_directory, pool_size=concurrency, max_overflow=concurrency),
         payloads=_payload_store(data_directory),
         name=f"cli-{os.getpid()}",
         concurrency=concurrency,
@@ -395,9 +436,9 @@ def migrate(
     that are already there, so instead it records which revision its schema
     already matches and migrates forward from then on.
 
-    `create_schema` still runs on startup and still adds nullable columns and
-    missing indexes. That is a development convenience and this is the
-    deployment path; where they disagree, a test says so.
+    Nothing else changes a schema. `create_schema` no longer runs on the boot
+    path: a boot that adds a column leaves `alembic_version` untouched, and the
+    next upgrade then tries to create what is already there.
     """
     from alembic import command
     from alembic.config import Config
@@ -406,20 +447,51 @@ def migrate(
     root = Path(__file__).resolve().parent.parent.parent
     configuration = Config(str(root / "alembic.ini"))
     configuration.set_main_option("script_location", str(root / "migrations"))
-    os.environ["TUBEDEPTH_DATABASE_URL"] = f"sqlite+pysqlite:///{data_directory / 'tubedepth.db'}"
+    url = database_url()
 
-    if stamp:
-        command.stamp(configuration, "head")
-        typer.echo(f"✓ stamped {data_directory / 'tubedepth.db'} at the current revision")
-        return
-    command.upgrade(configuration, "head")
-    typer.echo(f"✓ {data_directory / 'tubedepth.db'} is at the current schema")
+    # Not passed to `configuration` — `ConfigParser.set` validates `%`
+    # interpolation syntax, and a percent-encoded password (the ordinary shape
+    # of a fleet credential) makes that call raise. It would also be dead code
+    # today regardless: `migrations/env.py` does not read the Config object,
+    # it has its own copy of this resolver and calls it directly (Task 8
+    # unifies the two, and is where a `%`-escaped version of this belongs).
+    # Until then, this environment variable is the only thing that actually
+    # reaches it: without it, env.py falls back to `TUBEDEPTH_DATA_DIR`
+    # (default `var`), silently ignoring whatever `--data-dir` named here.
+    # Restored afterwards rather than left set — this process now honours
+    # `TUBEDEPTH_DATABASE_URL` everywhere (that is the point of this change),
+    # so a value left behind here would silently redirect every later call in
+    # the same process, `tubedepth serve`/`work` included.
+    previous_url = os.environ.get("TUBEDEPTH_DATABASE_URL")
+    os.environ["TUBEDEPTH_DATABASE_URL"] = url
+    try:
+        if stamp:
+            command.stamp(configuration, "head")
+            typer.echo(f"✓ stamped {url} at the current revision")
+            return
+        command.upgrade(configuration, "head")
+        typer.echo(f"✓ {url} is at the current schema")
+    finally:
+        if previous_url is None:
+            os.environ.pop("TUBEDEPTH_DATABASE_URL", None)
+        else:
+            os.environ["TUBEDEPTH_DATABASE_URL"] = previous_url
 
     # A separate command is a command that gets skipped, and the window for
     # this one closes: attribution works by recomputing fingerprints against
     # the versions a kind has had, and retention ages out the rows it would
     # attribute. Say so here, where someone is already standing.
-    with _database(data_directory).session(readonly=True) as session:
+    database = _database(data_directory)
+    with database.session(readonly=True) as session:
+        # tubedepth migrate runs under the migrator credential in a real
+        # deployment — the same one env.py just did SET ROLE tubedepth_owner
+        # with, above, for the upgrade. That role is deployment-only (rule 1)
+        # and has no direct SELECT on tubedepth's tables; without becoming
+        # the owner again here, this query only works by accident, when
+        # --data-dir happens to resolve to a URL that is actually the
+        # runtime role's rather than the migrator's.
+        if database.dialect == "postgresql":
+            session.execute(text("SET ROLE tubedepth_owner"))
         unattributed = session.query(Artifact).filter(Artifact.schema_version.is_(None)).count()
     if unattributed:
         typer.echo(f"· {unattributed} artifact(s) do not name the schema version that wrote them")
@@ -454,6 +526,68 @@ def backfill_schema_versions(
         typer.echo(f"· {count} {kind} artifact(s) matched no known version")
     if outcome.unattributed:
         typer.echo("  a version missing from PREVIOUS_VERSIONS looks exactly like this")
+
+
+@application.command(name="transfer")
+def transfer_command(
+    source_url: Annotated[
+        str, typer.Option("--from", help="The database to carry the index out of")
+    ],
+    target_url: Annotated[
+        str, typer.Option("--to", help="The database to carry the index into; must hold no rows")
+    ],
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Count what would move and write nothing"),
+    ] = False,
+) -> None:
+    """Carry the index between databases. Payloads stay where they are.
+
+    The one tool #15 and #24 both assume exists for the PostgreSQL cutover:
+    six tables, moved row for row with `identifier` and `fetched_at`
+    preserved verbatim, rather than a `pg_dump` run by hand at 2am — see
+    `tubedepth.transfer` for why that would silently corrupt every instant.
+
+    `--from` is the one place a SQLite URL is still accepted anywhere in this
+    project (`Database` otherwise refuses one since the cutover, #15): a real
+    cutover's source is the SQLite file this deployment used to run on, and
+    that is the whole point of the tool. `--to` is never SQLite — it is always
+    refused, the same as every other database this application opens.
+
+    `--to` names the database the connection will actually write through, so
+    in a real cutover that is the runtime credential: the migrator is
+    deployment-only (rule 1) and has no direct DML grant on `tubedepth`'s
+    tables outside `migrations/env.py`'s `SET ROLE`.
+
+    `--dry-run` counts each table in the source and reports it without
+    opening the target for writing — an operator standing in front of a
+    cutover wants to see six numbers before committing to them.
+    """
+    source = Database(source_url, allow_sqlite_source=True)
+    # `transfer()` itself calls this on both ends (see its docstring), but
+    # `--dry-run` returns before ever calling `transfer()` — without this, a
+    # PostgreSQL source on the wrong `search_path` prints six confident zeros
+    # (every table genuinely empty *from this connection*) instead of the
+    # refusal that would tell an operator the URL is pointed at the wrong
+    # place before they trust what it reports.
+    source.verify_placement()
+
+    if dry_run:
+        models = mapped_models()
+        with source.session(readonly=True) as session:
+            for table in Base.metadata.sorted_tables:
+                count = session.scalar(select(func.count()).select_from(models[table.name]))
+                typer.echo(f"· {table.name}: {count} row(s) would move")
+        return
+
+    target = Database(target_url)
+    target.verify_placement()
+    if not target.is_migrated():
+        raise ConfigurationError(f"no schema at {target_url} — run: tubedepth migrate")
+
+    outcome = transfer(source=source, target=target)
+    for table_name, count in outcome.rows.items():
+        typer.echo(f"✓ {table_name}: {count} row(s) moved")
 
 
 @application.command()
@@ -551,7 +685,7 @@ def key_list(
         state = " (revoked)" if entry.revoked else ""
         # The allowance is here because the error a client sees names it —
         # "over its allowance of N requests per minute" — and finding N for a
-        # key otherwise means opening SQLite. `created_at` is what this listing
+        # key otherwise means opening the database by hand. `created_at` is what this listing
         # is ordered by, so showing it is what makes the order readable.
         typer.echo(
             f"{entry.identifier}  {entry.key_prefix}…  "

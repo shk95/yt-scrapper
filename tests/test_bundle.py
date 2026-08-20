@@ -109,15 +109,13 @@ def test_a_bundle_whose_every_part_fails_is_a_failure(tmp_path: Path) -> None:
         service(tmp_path, part("video.first", fails=True)).collect("video.bundle", "dQw4w9WgXcQ")
 
 
-def test_a_bundle_reuses_what_was_already_collected(tmp_path: Path) -> None:
+def test_a_bundle_reuses_what_was_already_collected(tmp_path: Path, database: Database) -> None:
     """Fanning out through the collection service is what buys this.
 
     Calling the sources directly would refetch a metadata payload collected
     seconds earlier, which on the one budget that caps this system is the
     expensive kind of convenience.
     """
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
     first = part("video.first")
     collector = service(tmp_path, first, database=database)
     collector.collect("video.first", "dQw4w9WgXcQ")

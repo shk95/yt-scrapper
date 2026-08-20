@@ -17,6 +17,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **부팅 경로가 더 이상 DDL을 내지 않는다 (#14).** 모든 CLI 진입점이 거치는
+  `_database()`는 `create_schema()`를 호출했는데, 이것은 이 프로젝트가 SQLite 파일을
+  독점하던 시절의 편의 기능이었다. 다른 서비스와 공유하는 데이터베이스에서는
+  `docs/shared-postgres.md`의 규정 6번이 이를 금지하고, 조용히 migration을 깨기도
+  했다 — 컬럼을 추가하는 부팅이 `alembic_version`은 건드리지 않고 지나가서, 다음
+  `alembic upgrade`가 이미 있는 컬럼을 다시 만들려 했다. `Database.create_schema()`는
+  여전히 존재한다 — 테스트와 새 `--data-dir`가 데이터베이스를 얻는 방법이다 — 하지만
+  이제는 없는 것만 만든다. 예전에 하던 컬럼·인덱스 보수는 사라졌는데, 같은 공백을
+  `tubedepth migrate`가 이제 메우면서 `alembic_version`도 정확하게 유지하기 때문이다.
+  유일한 스키마 경로는 `tubedepth migrate`다.
+
 ### Fixed
 
 - **`prune`은 행이 하나도 없는 index로는 payload store를 sweep하지 않고 거부한다.** orphan
@@ -34,6 +47,21 @@
 
 ### Added
 
+- **`tubedepth transfer --from <url> --to <url>`, 그리고 그 뒤의 `tubedepth.transfer.transfer()`.**
+  #15와 #24는 PostgreSQL 컷오버의 데이터 이동을 "데이터를 옮긴다. 여섯 테이블." 한 줄로만
+  명시하는데, 지금까지 이 저장소에는 한 데이터베이스에서 다른 데이터베이스로 행을 옮긴 코드가
+  전혀 없었다 — 대안은 재수집이 불가능한 248개 타깃의 관측을 손으로 `pg_dump`-and-hope 하는
+  것이었다. 이 transfer는 dialect 수준 dump가 아니라 model 기반이다 — 모든 행을 ORM으로 읽어
+  타깃에 컬럼 단위로 재구성하며, 이것이 `identifier` primary key와 `fetched_at`을 microsecond
+  까지 그대로 보존하는 방법이고 — `pg_dump`가 보지 못하는 실패인데 — 모든 instant를
+  `UtcDateTime`을 통해 다시 흘려보내 naive datetime을 거부하게 만든다. 그렇지 않으면 SQLite의
+  timezone 없는 저장이 PostgreSQL의 `timestamptz` 아래에서 조용히 잘못된 instant가 된다.
+  `artifacts`는 `fingerprint`에 unique 제약이 의도적으로 없으므로, 이미 행을 가진 타깃은
+  거부한다 — 부분적으로 두 번 실행되면 아무것도 걸러내지 못한 채 모든 관측이 중복된다.
+  payload store는 절대 import하지 않는다 — `docs/shared-postgres.md` 규정 7은 index와
+  `TUBEDEPTH_DATA_DIR/payloads`의 payload bytes를 하나의 복구 세트로 다루고, 이 transfer는
+  그중 index 절반만 옮긴다. `--dry-run`은 소스의 모든 테이블 개수를 세고 아무것도 쓰지 않아서,
+  운영자가 컷오버를 실행하기 전에 숫자 여섯 개를 먼저 보게 한다.
 - **샘플러 — 이력이 쌓이기 시작한다.** `deploy/`의 `tubedepth-sample.timer`가 매시간 watch
   list를 강제로 다시 수집한다. 목록은 `~/.config/tubedepth/watchlist.txt`이고 한 줄에 영상 id
   하나이며, 형식은 `deploy/watchlist.example.txt`에 있다. 켜지 않으면 동작하지 않는다.
@@ -147,6 +175,17 @@
   붙여주므로 돌고 있는 배포가 깨지지는 않는다. 다만 Alembic 버전 테이블은 뒤처지고, 다음
   `tubedepth migrate`가 `duplicate column name`으로 실패한다 — `--stamp`가 답인지 upgrade가
   답인지 구분하는 방법은 `docs/troubleshooting.md`에 있다.
+
+### Removed
+
+- **SQLite 지원 (#15).** 컷오버가 완료됐다: `Database`는 PostgreSQL이 아닌 URL을 전부
+  거부한다. 단 하나 의도된 예외는 `tubedepth transfer --from`인데, 실제 컷오버가 데이터를
+  옮겨오는 곳이 SQLite이기 때문이다. `TUBEDEPTH_DATABASE_URL`에는 더 이상 대체 경로가
+  없고 필수다 — 아무것도 설정하지 않은 체크아웃은 이제 묻지도 않은 `var/tubedepth.db`
+  대신 이름이 붙은 거부를 받는다. `psycopg[binary]`는 선택 extra에서 `dependencies`로
+  옮겼다. 배포 유닛들은 그 URL을 위한 필수 `EnvironmentFile`을 갖는다. `tool/doctor.sh`의
+  SQLite 버전 확인은 PostgreSQL 접속 확인이 됐다. `docs/troubleshooting.md`의 SQLite
+  항목들은 지우지 않고 역사로 표시해 남겼다.
 
 ## [0.1.0] - 2026-08-19
 

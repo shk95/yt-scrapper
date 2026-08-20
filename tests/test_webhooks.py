@@ -16,7 +16,6 @@ from datetime import UTC, datetime
 from pathlib import Path
 
 import httpx
-import pytest
 import respx
 
 from tubedepth.database import Database
@@ -30,13 +29,6 @@ def job_row(database: Database, **fields: object) -> str:
         session.add(job)
         session.flush()
         return job.identifier
-
-
-@pytest.fixture
-def database(tmp_path: Path) -> Database:
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
-    return database
 
 
 @respx.mock
@@ -143,12 +135,12 @@ def test_the_signature_is_stable_for_the_same_input() -> None:
 
 
 @respx.mock
-def test_a_submission_can_ask_to_be_called_back(tmp_path: Path) -> None:
+def test_a_submission_can_ask_to_be_called_back(tmp_path: Path, database: Database) -> None:
     """The URL travels with the job, so a submitter chooses per request rather
     than the operator choosing once for everyone."""
     from test_api import build_api
 
-    client, key, database = build_api(tmp_path)
+    client, key, database = build_api(tmp_path, database)
     response = client.post(
         "/v1/jobs",
         headers={"X-API-Key": key},
@@ -166,11 +158,11 @@ def test_a_submission_can_ask_to_be_called_back(tmp_path: Path) -> None:
         assert job.webhook_url == "https://example.invalid/hook"
 
 
-def test_a_webhook_url_that_is_not_a_url_is_refused(tmp_path: Path) -> None:
+def test_a_webhook_url_that_is_not_a_url_is_refused(tmp_path: Path, database: Database) -> None:
     """A malformed callback stored is a delivery that fails forever."""
     from test_api import build_api
 
-    client, key, _ = build_api(tmp_path)
+    client, key, _ = build_api(tmp_path, database)
 
     response = client.post(
         "/v1/jobs",
@@ -182,7 +174,9 @@ def test_a_webhook_url_that_is_not_a_url_is_refused(tmp_path: Path) -> None:
 
 
 @respx.mock
-def test_the_worker_delivers_callbacks_as_it_finishes_jobs(tmp_path: Path) -> None:
+def test_the_worker_delivers_callbacks_as_it_finishes_jobs(
+    tmp_path: Path, database: Database
+) -> None:
     """The check that `renew_lease` did not have.
 
     A sender nothing calls is a feature that exists in the tests and not in the
@@ -194,8 +188,6 @@ def test_the_worker_delivers_callbacks_as_it_finishes_jobs(tmp_path: Path) -> No
     from tubedepth.worker import Worker
 
     route = respx.post("https://example.invalid/hook").respond(200)
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
     with database.session() as session:
         session.add(
             Job(
@@ -216,7 +208,9 @@ def test_the_worker_delivers_callbacks_as_it_finishes_jobs(tmp_path: Path) -> No
     assert route.called, "the job finished and its callback was never sent"
 
 
-def test_a_worker_with_no_secret_configured_sends_nothing(tmp_path: Path) -> None:
+def test_a_worker_with_no_secret_configured_sends_nothing(
+    tmp_path: Path, database: Database
+) -> None:
     """Unsigned deliveries are worse than none: a receiver cannot tell them
     from anyone else who learned the URL, so silence is the safer default."""
     from test_worker import EchoSource, _registry
@@ -224,8 +218,6 @@ def test_a_worker_with_no_secret_configured_sends_nothing(tmp_path: Path) -> Non
     from tubedepth.payload_store import PayloadStore
     from tubedepth.worker import Worker
 
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
     worker = Worker(
         database=database,
         registry=_registry(EchoSource()),
@@ -237,7 +229,9 @@ def test_a_worker_with_no_secret_configured_sends_nothing(tmp_path: Path) -> Non
 
 
 @respx.mock
-def test_taking_one_job_and_stopping_still_delivers_its_callback(tmp_path: Path) -> None:
+def test_taking_one_job_and_stopping_still_delivers_its_callback(
+    tmp_path: Path, database: Database
+) -> None:
     """`--once` is the invocation with no next run to catch up.
 
     `drain` says so itself — it delivers on exit "so jobs this run finished are
@@ -252,8 +246,6 @@ def test_taking_one_job_and_stopping_still_delivers_its_callback(tmp_path: Path)
     from tubedepth.worker import Worker
 
     route = respx.post("https://example.invalid/hook").respond(200)
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
     with database.session() as session:
         session.add(
             Job(

@@ -24,9 +24,7 @@ from tubedepth.repositories import JobRepository
 from tubedepth.sources.ytdlp_runtime import YtdlpRuntime
 
 
-def database_with(tmp_path: Path, **fields: object) -> tuple[Database, str]:
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
+def database_with(database: Database, **fields: object) -> tuple[Database, str]:
     with database.session() as session:
         job = Job(kind="video.metadata", target="video000001", **fields)
         session.add(job)
@@ -34,8 +32,8 @@ def database_with(tmp_path: Path, **fields: object) -> tuple[Database, str]:
         return database, job.identifier
 
 
-def test_a_queued_job_is_cancelled_outright(tmp_path: Path) -> None:
-    database, identifier = database_with(tmp_path)
+def test_a_queued_job_is_cancelled_outright(tmp_path: Path, database: Database) -> None:
+    database, identifier = database_with(database)
 
     with database.session() as session:
         JobRepository(session).cancel(identifier)
@@ -49,9 +47,10 @@ def test_a_queued_job_is_cancelled_outright(tmp_path: Path) -> None:
 
 def test_a_running_job_is_marked_for_cancellation_but_not_declared_stopped(
     tmp_path: Path,
+    database: Database,
 ) -> None:
     """The honest half. The extraction is inside a thread and keeps going."""
-    database, identifier = database_with(tmp_path, state=JobState.RUNNING)
+    database, identifier = database_with(database, state=JobState.RUNNING)
 
     with database.session() as session:
         JobRepository(session).cancel(identifier)
@@ -63,28 +62,30 @@ def test_a_running_job_is_marked_for_cancellation_but_not_declared_stopped(
         assert job.cancel_requested_at is not None
 
 
-def test_a_finished_job_cannot_be_cancelled(tmp_path: Path) -> None:
+def test_a_finished_job_cannot_be_cancelled(tmp_path: Path, database: Database) -> None:
     database, identifier = database_with(
-        tmp_path, state=JobState.SUCCEEDED, payload_digest="a" * 64, payload_bytes=1
+        database, state=JobState.SUCCEEDED, payload_digest="a" * 64, payload_bytes=1
     )
 
     with database.session() as session, pytest.raises(ConflictError, match="already finished"):
         JobRepository(session).cancel(identifier)
 
 
-def test_cancelling_a_job_that_does_not_exist_is_reported(tmp_path: Path) -> None:
-    database, _ = database_with(tmp_path)
+def test_cancelling_a_job_that_does_not_exist_is_reported(
+    tmp_path: Path, database: Database
+) -> None:
+    database, _ = database_with(database)
 
     with database.session() as session, pytest.raises(NotFoundError):
         JobRepository(session).cancel("0" * 32)
 
 
-def test_a_cancelled_job_is_never_claimed(tmp_path: Path) -> None:
+def test_a_cancelled_job_is_never_claimed(tmp_path: Path, database: Database) -> None:
     """The point of the state. A cancelled job that a worker can still pick up
     has not been cancelled."""
     from datetime import timedelta
 
-    database, identifier = database_with(tmp_path)
+    database, identifier = database_with(database)
     with database.session() as session:
         JobRepository(session).cancel(identifier)
 
@@ -94,14 +95,16 @@ def test_a_cancelled_job_is_never_claimed(tmp_path: Path) -> None:
     assert claimed is None
 
 
-def test_a_job_cancelled_before_the_worker_reaches_it_is_not_run(tmp_path: Path) -> None:
+def test_a_job_cancelled_before_the_worker_reaches_it_is_not_run(
+    tmp_path: Path, database: Database
+) -> None:
     from test_worker import EchoSource, _registry
 
     from tubedepth.payload_store import PayloadStore
     from tubedepth.worker import Worker
 
     source = EchoSource()
-    database, identifier = database_with(tmp_path)
+    database, identifier = database_with(database)
     with database.session() as session:
         JobRepository(session).cancel(identifier)
 
@@ -118,6 +121,7 @@ def test_a_job_cancelled_before_the_worker_reaches_it_is_not_run(tmp_path: Path)
 
 def test_a_running_job_cancelled_mid_flight_settles_cancelled_without_a_result(
     tmp_path: Path,
+    database: Database,
 ) -> None:
     """The job carries no result; the cache keeps what was already fetched.
 
@@ -152,8 +156,6 @@ def test_a_running_job_cancelled_mid_flight_settles_cancelled_without_a_result(
                     JobRepository(session).cancel(job.identifier)
             return super().collect(target, egress, runtime)
 
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
     identifier = enqueue(database, "video.echo", "video000001")
     source = CancellingSource(database)
     worker = Worker(
@@ -175,7 +177,7 @@ def test_a_running_job_cancelled_mid_flight_settles_cancelled_without_a_result(
         assert session.query(Artifact).count() == 1, "the request was paid for and then thrown away"
 
 
-def test_a_cancelled_job_that_fails_is_not_retried(tmp_path: Path) -> None:
+def test_a_cancelled_job_that_fails_is_not_retried(tmp_path: Path, database: Database) -> None:
     from test_worker import EchoPayload, FailingSource, _registry, enqueue
 
     from tubedepth.payload_store import PayloadStore
@@ -187,8 +189,6 @@ def test_a_cancelled_job_that_fails_is_not_retried(tmp_path: Path) -> None:
 
             raise UpstreamError(f"connection reset for: {target}")
 
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
     identifier = enqueue(database, "video.failing", "video000001")
     with database.session() as session:
         job = session.get(Job, identifier)
