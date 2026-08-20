@@ -435,13 +435,22 @@ CI service container are the whole cost.
 
 1. ~~**Check it runs here**~~ — done 2026-08-20, and it found two things. See
    below.
-2. **The migration itself** — dialect branches, `_repair_existing_tables` gone,
-   schema and role, data across. The CI service container and the role setup
-   arrived with step 1, since the checks that found the bug needed them.
-3. **Issue #13** (a bundle's parts bypass every lane but its own). Independent
-   of the database, and currently dormant — nothing runs bundles, since the
-   sampler collects `video.metadata` only. It wakes the moment anything does.
-4. **Issue #3 route A**, the delta layer, where the accumulated history pays.
+2. ~~**Stop reconnecting six times a minute**~~ — done. The worker was a poll
+   loop made of process restarts, which is a local inefficiency against a file
+   and a fleet-budget problem against a shared instance. See `Worker.serve`.
+3. **[#14](https://github.com/slopindustries/yt-scrapper/issues/14)** — no DDL
+   on the boot path. Small, independently useful, and it makes the next step
+   smaller.
+4. **[#15](https://github.com/slopindustries/yt-scrapper/issues/15)**, the
+   cutover, deciding
+   [#16](https://github.com/slopindustries/yt-scrapper/issues/16) along the way
+   rather than after it.
+5. **[#13](https://github.com/slopindustries/yt-scrapper/issues/13)** (a
+   bundle's parts bypass every lane but its own). Independent of the database
+   and currently dormant — nothing runs bundles, since the sampler collects
+   `video.metadata` only. It wakes the moment anything does.
+6. **[#3](https://github.com/slopindustries/yt-scrapper/issues/3) route A**,
+   the delta layer, where the accumulated history pays.
 
 #13 sits after the migration rather than before it because it is dormant while
 SQLite-shaped decisions keep accruing — 2026-08-20 alone added four, one of
@@ -492,7 +501,9 @@ somebody has to reconstruct by hand.
 `ALTER ROLE … SET search_path` sends them silently to `public` — the shared
 schema, on a shared database. The test asserts where `alembic_version` lands,
 which catches it in CI; nothing catches it on a host where someone bootstrapped
-by hand.
+by hand. Tracked as
+[#16](https://github.com/slopindustries/yt-scrapper/issues/16), to be decided
+during the cutover rather than after it.
 
 
 Three of these have since been paid for and moved to
@@ -1149,21 +1160,35 @@ first example for a day, against a route that never existed. The `GET`/`POST`
 split is the part worth having if they are ever added: it lets a client ask
 "have you got this" without being able to trigger a fetch by accident.
 
-**Never verified, in order of how likely it is to bite.**
+**Never verified.** Two of the four entries this list opened with are now
+answered, and the two that remain are GitHub issues rather than paragraphs here
+— a list in a status file is not a thing anyone is assigned.
 
-1. **Nothing here is measured beyond a few hundred jobs.** Every figure in this
-   file comes from sweeps of 20–50. How the rate controller behaves over hours,
-   where the bot-check threshold sits under sustained load, and whether the
-   AIMD window settles or oscillates are all unknown — and they decide whether
-   this works at the scale it was built for.
-2. **Verify a fresh clone** per project-scaffold `decisions/006`: follow the
-   README in order using nothing you happen to know. Never done here.
-3. **The units have never actually run.** `systemd-analyze verify` passes and
-   the tests check what units get wrong, but nothing has been installed,
-   enabled, or survived a reboot.
-4. **Retention has never evicted anything.** The orphan sweep has now run for
-   real, but no artifact has ever aged out, so the age path is untested against
-   volume.
+*Answered.* Sustained load is measured: 474 jobs, 0 failed, 430 s, **~3,100
+jobs/hour**, the lane window at its ceiling and the quarantine streak at zero.
+That replaces the ~2,150 figure quoted from sweeps of 20–50. And the units have
+run — both were broken the first time they were enabled (`status=127` from a
+PATH systemd does not inherit, then `Read-only file system` from
+`ProtectHome=read-only` over `~/.cache/uv`), which is the argument for enabling
+a unit rather than verifying it.
+
+*Open.* **[#17](https://github.com/slopindustries/yt-scrapper/issues/17)** —
+retention has never deleted for age; the first real run is currently scheduled
+for whenever the store turns 30 days old, which is the wrong way to find out.
+**[#18](https://github.com/slopindustries/yt-scrapper/issues/18)** — nobody has
+followed the README from a fresh clone. That one is overdue: CI was red at its
+first step for a fortnight for exactly the reason a README walkthrough exists to
+catch, and it passed on every laptop the whole time.
+
+**Where the work is tracked.** Milestones hold the two pieces of work large
+enough to have an order: *PostgreSQL: join the fleet's shared database*
+([#14](https://github.com/slopindustries/yt-scrapper/issues/14),
+[#15](https://github.com/slopindustries/yt-scrapper/issues/15),
+[#16](https://github.com/slopindustries/yt-scrapper/issues/16)) and *Trends:
+answer what is rising* ([#3](https://github.com/slopindustries/yt-scrapper/issues/3),
+where routes B and C are built and route A — the delta layer — is what is
+left). This file keeps the reasoning; the issues keep the state, so that
+updating one does not silently contradict the other.
 
 **Known and deliberate.** The rate controller's state is still per process and
 per run: a restart forgets which routes were in trouble, and two workers do not
