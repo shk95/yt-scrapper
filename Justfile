@@ -72,13 +72,15 @@ postgres:
         sleep 1
     done
     docker exec -i "$name" psql -U fleet -d fleet -v ON_ERROR_STOP=1 \
-        -v password="'check'" -q < deploy/postgres-bootstrap.sql
+        -v password="'check'" -v runtime_password="'check-runtime'" -v database=fleet \
+        -q < deploy/postgres-bootstrap.sql
     # Harness only, and deliberately not in the bootstrap file: the tests drop
     # and recreate the schema between cases so a half-applied migration cannot
     # decide what the next one starts from. In production the service role has
     # no business creating schemas.
-    docker exec "$name" psql -U fleet -d fleet -q -c 'GRANT CREATE ON DATABASE fleet TO tubedepth'
-    TUBEDEPTH_TEST_POSTGRES_URL='postgresql+psycopg://tubedepth:check@localhost:55432/fleet' \
+    docker exec "$name" psql -U fleet -d fleet -q -c 'GRANT CREATE ON DATABASE fleet TO tubedepth_migrator'
+    TUBEDEPTH_TEST_POSTGRES_URL='postgresql+psycopg://tubedepth_migrator:check@localhost:55432/fleet' \
+        TUBEDEPTH_TEST_POSTGRES_RUNTIME_URL='postgresql+psycopg://tubedepth_runtime:check-runtime@localhost:55432/fleet' \
         tool/checks/postgres
 
 ############################################################################

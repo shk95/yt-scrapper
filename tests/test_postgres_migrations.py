@@ -30,6 +30,9 @@ SCHEMA = "tubedepth"
 
 pytestmark = pytest.mark.postgres
 
+# The migrator's URL — this module runs migrations, and only tubedepth_migrator
+# is allowed to. tests/test_postgres_privileges.py is what connects as
+# tubedepth_runtime.
 URL = os.environ.get("TUBEDEPTH_TEST_POSTGRES_URL")
 needs_postgres = pytest.mark.skipif(
     not URL, reason="set TUBEDEPTH_TEST_POSTGRES_URL, or run `just postgres`"
@@ -60,8 +63,21 @@ def empty_database() -> Iterator[None]:
     """
     engine = create_engine(URL or "")
     with engine.begin() as connection:
+        # SET ROLE first: only the owner (or a superuser) can drop a
+        # schema it owns; the migrator only gets owner privileges through
+        # an explicit SET ROLE (rule 1's NOINHERIT), not automatically via
+        # membership. RESET ROLE before CREATE SCHEMA: creating a schema
+        # needs CREATE on the database, which is granted to the migrator
+        # (harness-only) and not to the owner role.
+        connection.execute(text("SET ROLE tubedepth_owner"))
         connection.execute(text(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"))
-        connection.execute(text(f"CREATE SCHEMA {SCHEMA}"))
+        connection.execute(text("RESET ROLE"))
+        # AUTHORIZATION tubedepth_owner, not the migrator that runs this
+        # statement: without it the schema is owned by tubedepth_migrator, and
+        # the SET ROLE tubedepth_owner in migrations/env.py would then have no
+        # CREATE privilege on a schema it does not own, which fails every
+        # migration this fixture is meant to set up for.
+        connection.execute(text(f"CREATE SCHEMA {SCHEMA} AUTHORIZATION tubedepth_owner"))
     yield
     engine.dispose()
 
@@ -108,6 +124,12 @@ def test_the_migrated_schema_is_the_one_the_models_describe(empty_database: None
 
     engine = create_engine(URL or "")
     with engine.connect() as connection:
+        # The migrator has no USAGE on tubedepth outside of a migration's own
+        # SET ROLE (migrations/env.py) — without this, unqualified reflection
+        # skips a schema it cannot see and reports every table missing rather
+        # than comparing it.
+        connection.execute(text("SET ROLE tubedepth_owner"))
+        connection.commit()
         context = MigrationContext.configure(connection, opts={"include_schemas": False})
         difference = compare_metadata(context, Base.metadata)
     engine.dispose()
@@ -153,3 +175,61 @@ def test_the_version_table_lands_in_the_services_own_schema(empty_database: None
     engine.dispose()
 
     assert schemas == {SCHEMA}, f"the version table is not the service's own: {schemas}"
+
+
+@needs_postgres
+def test_autogenerate_never_proposes_touching_another_services_schema(
+    empty_database: None,
+) -> None:
+    """Rule 2's exception clause, discharged.
+
+    The danger the regulation's default strategy guards against is autogenerate
+    reflecting a schema it has no models for and proposing to drop it. A
+    `search_path` strategy is only equivalent if that cannot happen — and the
+    only honest way to know is to put a foreign schema in front of it.
+    """
+    engine = create_engine(URL or "")
+    with engine.begin() as connection:
+        connection.execute(text("DROP SCHEMA IF EXISTS foreign_sentinel CASCADE"))
+        connection.execute(text("CREATE SCHEMA foreign_sentinel"))
+        connection.execute(
+            text("CREATE TABLE foreign_sentinel.must_survive (id bigint PRIMARY KEY)")
+        )
+    assert alembic("upgrade", "head").returncode == 0
+
+    from alembic.autogenerate import compare_metadata
+    from alembic.migration import MigrationContext
+
+    from tubedepth.models import Base
+
+    with engine.connect() as connection:
+        # See test_the_migrated_schema_is_the_one_the_models_describe: the
+        # migrator only has USAGE on tubedepth via SET ROLE. RESET ROLE before
+        # the block ends: SET ROLE is session state a plain rollback does not
+        # undo, and this engine's pool would otherwise hand the next
+        # connection back out still running as tubedepth_owner — which has no
+        # access at all to foreign_sentinel, owned by the migrator — and the
+        # survivor check below would fail for a reason that has nothing to do
+        # with what it is testing.
+        connection.execute(text("SET ROLE tubedepth_owner"))
+        connection.commit()
+        context = MigrationContext.configure(connection, opts={"include_schemas": False})
+        difference = compare_metadata(context, Base.metadata)
+        connection.execute(text("RESET ROLE"))
+        connection.commit()
+
+    rendered = repr(difference)
+    assert "foreign_sentinel" not in rendered, f"autogenerate can see another service: {rendered}"
+    assert "must_survive" not in rendered
+    assert difference == [], f"and it proposed something besides: {difference}"
+
+    # The same defect running backwards: a downgrade that reaches outside its
+    # own schema is just as much a violation as an autogenerate proposal that
+    # does.
+    assert alembic("downgrade", "base").returncode == 0
+    with engine.connect() as connection:
+        survivors = connection.execute(
+            text("SELECT count(*) FROM foreign_sentinel.must_survive")
+        ).scalar_one()
+    engine.dispose()
+    assert survivors == 0, "the sentinel table is gone or was written to"

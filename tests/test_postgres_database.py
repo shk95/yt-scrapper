@@ -25,15 +25,23 @@ from sqlalchemy import create_engine, text
 from sqlalchemy.exc import DBAPIError
 
 from tubedepth.database import Database
-from tubedepth.models import Job
+from tubedepth.models import Base, Job
 
 SCHEMA = "tubedepth"
 
 pytestmark = pytest.mark.postgres
 
+# The migrator's URL builds the schema. `Database` itself, though, is
+# ordinary application traffic — in production that always runs as
+# tubedepth_runtime, which is the only role granted DML on tubedepth's tables
+# and USAGE on the schema, so it is also the only role whose unqualified
+# reflection or search_path-implicit access to tubedepth works outside of
+# migrations/env.py's `SET ROLE`.
 URL = os.environ.get("TUBEDEPTH_TEST_POSTGRES_URL")
+RUNTIME_URL = os.environ.get("TUBEDEPTH_TEST_POSTGRES_RUNTIME_URL")
 needs_postgres = pytest.mark.skipif(
-    not URL, reason="set TUBEDEPTH_TEST_POSTGRES_URL, or run `just postgres`"
+    not URL or not RUNTIME_URL,
+    reason="set TUBEDEPTH_TEST_POSTGRES_URL and _RUNTIME_URL, or run `just postgres`",
 )
 
 
@@ -44,12 +52,45 @@ def database() -> Iterator[Database]:
     through one test must not decide what the next one starts from."""
     engine = create_engine(URL or "")
     with engine.begin() as connection:
+        # SET ROLE first: only the owner (or a superuser) can drop a
+        # schema it owns; the migrator only gets owner privileges through
+        # an explicit SET ROLE (rule 1's NOINHERIT), not automatically via
+        # membership. RESET ROLE before CREATE SCHEMA: creating a schema
+        # needs CREATE on the database, which is granted to the migrator
+        # (harness-only) and not to the owner role.
+        connection.execute(text("SET ROLE tubedepth_owner"))
         connection.execute(text(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"))
-        connection.execute(text(f"CREATE SCHEMA {SCHEMA}"))
+        connection.execute(text("RESET ROLE"))
+        # AUTHORIZATION tubedepth_owner: this connects with the migrator's
+        # credential, and a schema it creates without this clause is owned by
+        # the migrator rather than the owner role the bootstrap SQL uses in
+        # production.
+        connection.execute(text(f"CREATE SCHEMA {SCHEMA} AUTHORIZATION tubedepth_owner"))
+        # SET ROLE again: create_all needs the owner's privileges on the
+        # schema it just created, the same rule migrations/env.py follows,
+        # rather than going through Database.create_schema() on a raw
+        # migrator connection, which would fail with permission denied.
+        connection.execute(text("SET ROLE tubedepth_owner"))
+        Base.metadata.create_all(bind=connection)
+        # A schema DROP ... CASCADE takes the GRANTs deploy/postgres-bootstrap.sql
+        # made on the old schema object with it — a fresh schema, even of the
+        # same name, is a new object with none of them. Without these, every
+        # ordinary read or write this file does as tubedepth_runtime fails
+        # with "permission denied", for a reason that has nothing to do with
+        # what each test is actually checking.
+        connection.execute(text(f"GRANT USAGE ON SCHEMA {SCHEMA} TO tubedepth_runtime"))
+        connection.execute(
+            text(
+                f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {SCHEMA} "
+                "TO tubedepth_runtime"
+            )
+        )
+        connection.execute(
+            text(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {SCHEMA} TO tubedepth_runtime")
+        )
     engine.dispose()
 
-    database = Database(URL or "")
-    database.create_schema()
+    database = Database(RUNTIME_URL or "")
     yield database
 
 

@@ -535,16 +535,25 @@ autogenerate를 돌려 sentinel이 diff에 나타나지 않음을 CI가 매번 �
 규정 기본형에서는 `include_schemas=True`라 리플렉션이 실제 schema 이름을
 보고하므로 이 버그가 없다 — 두 전략은 섞으면 안 되고, 이 저장소는 섞지 않는다.
 
+**Migrator의 `search_path`는 규정 예시와 다르다 (#15에서 확정, 의도적).** 규정 1의
+예시는 migrator의 `search_path`를 `pg_catalog`만으로 둔다(fail-closed) — 규정
+기본형처럼 migration이 대상 schema를 명시적으로 qualify한다면 그것이 맞다. 이
+저장소는 위에서 선언한 대로 search_path 전략을 쓰고, 기존 5개 revision이 모두
+schema-unqualified이므로 migrator의 `search_path`가 `tubedepth`를 포함하지 않으면
+모든 revision이 `public`에 테이블을 만든다. 그래서 `deploy/postgres-bootstrap.sql`은
+migrator와 runtime 둘 다 `search_path = tubedepth, pg_catalog`로 둔다. `docs/shared-postgres.md`는
+함대 공통 사본이라 이 차이를 반영해 고치지 않는다 — 이 문단이 그 대신이다.
+
 **규칙별 상태.**
 
 | 규정 | 이 저장소 | 어디서 |
 | --- | --- | --- |
-| 0 schema+owner | `tubedepth` schema; 3-role 분리는 #15에서 bootstrap 재작성 | `deploy/postgres-bootstrap.sql` |
-| 1 owner/migrator/runtime | **미적용 — #15의 작업.** env.py가 postgres에서 `SET ROLE tubedepth_owner` + 명시적 `search_path` | #15 |
-| 2 autogenerate 격리 | search_path 전략 + sentinel 증명 (위 선언) | `tests/test_postgres_migrations.py` |
+| 0 schema+owner | `tubedepth` schema; 3-role 분리 **적용됨(#15)** — `tubedepth_owner`가 schema와 그 안의 모든 객체를 소유 | `deploy/postgres-bootstrap.sql` |
+| 1 owner/migrator/runtime | **적용됨(#15).** `tubedepth_owner`(NOLOGIN) / `tubedepth_migrator`(배포 전용, `GRANT tubedepth_owner`) / `tubedepth_runtime`(DML만) 3-role 분리. `migrations/env.py`가 postgres에서 `SET ROLE tubedepth_owner`; runtime의 부정 테스트 4종과 소유권 감사가 `tests/test_postgres_privileges.py` | `deploy/postgres-bootstrap.sql`, `migrations/env.py` |
+| 2 autogenerate 격리 | search_path 전략 + sentinel 증명 (위 선언, 테스트는 #15에서 실제로 작성됨) | `tests/test_postgres_migrations.py` |
 | 3 version table 격리 | `tubedepth.alembic_version`, 테스트가 위치를 단언 | 같은 파일 |
-| 4 connection budget | manifest에 상한 20 선언; pool 수치는 #15에서 코드로 고정 후 여기 기록 | `deploy/service-manifest.yaml` |
-| 5 timeout | **미적용 — #15에서 bootstrap에 추가.** 워커는 이미 network 호출을 transaction 밖에서 한다 | #15 |
+| 4 connection budget | manifest에 상한 20 선언; `tubedepth_runtime`에 `CONNECTION LIMIT 20` 적용(#15). per-engine pool 수치는 아직 코드로 고정되지 않음 — Task 7 | `deploy/service-manifest.yaml`, `deploy/postgres-bootstrap.sql` |
+| 5 timeout | **적용됨(#15).** `tubedepth_runtime`에 `statement_timeout`(15s), `lock_timeout`(3s, statement보다 짧게), `idle_in_transaction_session_timeout`(30s), `transaction_timeout`(60s, PG17+이므로 무조건 설정)을 role-scoped로 부여. 워커는 이미 network 호출을 transaction 밖에서 한다 | `deploy/postgres-bootstrap.sql` |
 | 6 startup DDL 금지 | **적용됨.** `_database()`가 더는 `create_schema()`를 호출하지 않는다; 스키마 경로는 `tubedepth migrate` 하나뿐 | #14 |
 | 7 외부 object 일관성 | payload는 content-addressed(불변 key), write-then-record 순서로 이미 규정 형태. grace period와 reconciliation은 #17에 병합 | `payload_store.py`, #17 |
 | 8 extension 중앙 관리 | 필요 extension 없음, manifest가 선언 | manifest |

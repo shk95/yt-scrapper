@@ -80,7 +80,8 @@ jobs:
 
     env:
       PGPASSWORD: fleet
-      TUBEDEPTH_TEST_POSTGRES_URL: postgresql+psycopg://tubedepth:check@localhost:5432/fleet
+      TUBEDEPTH_TEST_POSTGRES_URL: postgresql+psycopg://tubedepth_migrator:check@localhost:5432/fleet
+      TUBEDEPTH_TEST_POSTGRES_RUNTIME_URL: postgresql+psycopg://tubedepth_runtime:check-runtime@localhost:5432/fleet
 
     steps:
       - uses: actions/checkout@v7
@@ -93,14 +94,15 @@ jobs:
       # The same file a real deployment runs, so what CI checks is the shape
       # production has — the `search_path` in particular, which is what decides
       # whether this service's `alembic_version` lands in its own schema.
-      - name: Bootstrap the role and schema
+      - name: Bootstrap the roles and schema
         run: |
           psql -h localhost -U fleet -d fleet -v ON_ERROR_STOP=1 \
-            -v password="'check'" -f deploy/postgres-bootstrap.sql
+            -v password="'check'" -v runtime_password="'check-runtime'" -v database=fleet \
+            -f deploy/postgres-bootstrap.sql
           # Harness only, and deliberately not in that file: the tests drop and
           # recreate the schema between cases. In production the service role
           # has no business creating schemas.
-          psql -h localhost -U fleet -d fleet -c 'GRANT CREATE ON DATABASE fleet TO tubedepth'
+          psql -h localhost -U fleet -d fleet -c 'GRANT CREATE ON DATABASE fleet TO tubedepth_migrator'
 
       - name: Migrations
         run: tool/checks/postgres

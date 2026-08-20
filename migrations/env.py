@@ -81,6 +81,21 @@ def run_migrations_online() -> None:
     engine = engine_from_config(section, prefix="sqlalchemy.", poolclass=pool.NullPool)
 
     with engine.connect() as connection:
+        if connection.dialect.name == "postgresql":
+            # Rule 1: objects a migration creates must be owned by the owner
+            # role, not by whichever migrator happened to run it. Without this
+            # the ownership audit finds rows and the next migrator cannot ALTER
+            # what the last one created.
+            connection.exec_driver_sql("SET ROLE tubedepth_owner")
+            # SQLAlchemy 2.x connections auto-begin a transaction on the first
+            # statement. Left open, Alembic's begin_transaction() below finds
+            # one already active and nests inside it as a SAVEPOINT instead of
+            # opening the real transaction it commits at the end — so the
+            # whole migration would appear to succeed and then silently roll
+            # back when the connection closes. Committing here (SET ROLE is a
+            # session-level setting, unaffected by COMMIT) closes that
+            # transaction so Alembic starts its own.
+            connection.commit()
         context.configure(
             connection=connection,
             target_metadata=target_metadata,
