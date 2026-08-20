@@ -20,6 +20,16 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`docker compose up` against an external server no longer demands the
+  local profile's passwords.** Compose interpolates the whole file before
+  applying profiles, so the `:?` required-variable markers on the `postgres`
+  service's three `TUBEDEPTH_LOCAL_*` passwords failed the default — external
+  database — deployment over values it was never going to use. They are `:-`
+  now; `--profile local` without them still fails naming the variable, at the
+  postgres image and the initdb wrapper, which is where the values are used.
+
 ## [1.0.1] - 2026-08-21
 
 ### Fixed
