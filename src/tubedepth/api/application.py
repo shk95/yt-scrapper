@@ -796,8 +796,18 @@ def create_application(
         try:
             body = json.loads(payloads.read(artifact.digest))
         except FileNotFoundError as error:
+            # Two explanations, and this route can check neither: retention
+            # removed the bytes, or the index and the payload store are not the
+            # pair they were built as — a cutover that moved
+            # TUBEDEPTH_DATABASE_URL and left TUBEDEPTH_DATA_DIR behind. It
+            # used to assert the first one unconditionally, which sends whoever
+            # is on call to look for a retention bug that is not there while
+            # every payload in the store is unreachable for the other reason.
             raise NotFoundError(
-                f"the payload for {digest} is no longer stored: it has aged out of retention"
+                f"the {artifact.kind} index has a row for {digest} but the payload store has "
+                f"no bytes for it — either it aged out of retention, or TUBEDEPTH_DATA_DIR is "
+                f"not the store this index was built against "
+                f"(observed {artifact.fetched_at:%Y-%m-%d %H:%M} UTC)"
             ) from error
 
         return ArtifactPayloadView(

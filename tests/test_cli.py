@@ -14,6 +14,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from tubedepth.cli import application
+from tubedepth.errors import ConfigurationError
 
 runner = CliRunner()
 
@@ -389,3 +390,33 @@ def test_the_key_list_shows_the_allowance_it_is_about_to_be_asked_for(
 
     assert result.exit_code == 0, result.output
     assert "240" in result.output, result.output
+
+
+def test_prune_refuses_a_store_whose_index_is_somewhere_else(tmp_path: Path) -> None:
+    """The half-finished cutover, from the command line.
+
+    The payloads are on disk and the index the operator pointed at holds
+    nothing. Sweeping here deletes the whole store, so the command fails and
+    names the flag that means "no, this store really has no index".
+    """
+    (tmp_path / "payloads" / "video.metadata" / "ab").mkdir(parents=True)
+    (tmp_path / "payloads" / "video.metadata" / "ab" / f"{'ab' * 32}.json.gz").write_bytes(b"x")
+
+    result = runner.invoke(application, ["prune", "--data-dir", str(tmp_path)])
+
+    # `main()` is what turns a TubedepthError into the "✗ …" line and exit 1;
+    # CliRunner invokes the Typer app directly, one level inside that.
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ConfigurationError)
+    assert "--sweep-without-an-index" in str(result.exception)
+
+
+def test_prune_sweeps_an_indexless_store_when_told_to(tmp_path: Path) -> None:
+    (tmp_path / "payloads" / "video.metadata" / "ab").mkdir(parents=True)
+    (tmp_path / "payloads" / "video.metadata" / "ab" / f"{'ab' * 32}.json.gz").write_bytes(b"x")
+
+    result = runner.invoke(
+        application, ["prune", "--data-dir", str(tmp_path), "--sweep-without-an-index"]
+    )
+
+    assert result.exit_code == 0, result.output

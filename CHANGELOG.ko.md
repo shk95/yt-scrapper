@@ -17,6 +17,21 @@
 
 ## [Unreleased]
 
+### Fixed
+
+- **`prune`은 행이 하나도 없는 index로는 payload store를 sweep하지 않고 거부한다.** orphan
+  sweep은 부재로 판단한다 — artifact 행이 가리키지 않는 payload는 쓰레기다 — 그리고 그 추론은
+  index가 비었을 때 조용히 뒤집힌다. 모든 파일이 orphan이 되고, 로그는 정상적인 sweep처럼
+  읽히는 동안 store 전체가 지워진다. 이것은 데이터베이스 컷오버가 절반만 끝난 모습이기도 하다.
+  `TUBEDEPTH_DATABASE_URL`은 새 인스턴스로 옮겼고 `TUBEDEPTH_DATA_DIR`에는 옛 index가 알던
+  payload가 그대로 남아 있는 상태다. 거부는 운영자에게 명령 하나를 물리지만, 잘못 추측하면
+  지금까지 수집한 모든 관측을 잃고 3주 전 조회수는 어떤 재수집으로도 돌아오지 않는다.
+  index가 정말로 없는 store는 `--sweep-without-an-index`를 쓴다.
+- **`GET /v1/artifacts/{digest}`가 찾지 못한 바이트를 retention 탓으로 단정하지 않는다.**
+  30일 정책 아래 이틀 된 관측에도 "retention을 지나 사라졌다"고 단언하고 있었다. 이제 두 가지
+  설명을 모두 제시하고 — retention이거나, index가 payload store와 분리됐거나 — 관측 시각을
+  함께 말한다.
+
 ### Added
 
 - **샘플러 — 이력이 쌓이기 시작한다.** `deploy/`의 `tubedepth-sample.timer`가 매시간 watch

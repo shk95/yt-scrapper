@@ -20,6 +20,24 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **`prune` refuses to sweep a payload store whose index has no rows at all.**
+  The orphan sweep decides by absence — a payload no artifact row points at is
+  rubbish — and that inference inverts silently when the index is empty:
+  every file is an orphan and the whole store is deleted while the log reads
+  like a successful sweep. It is also exactly what a half-finished database
+  cutover looks like, with `TUBEDEPTH_DATABASE_URL` moved to a fresh instance
+  and `TUBEDEPTH_DATA_DIR` still holding the payloads the old index knew about.
+  Refusing costs one command; guessing wrong costs every observation ever
+  collected, and no re-collection recovers a view count from three weeks ago.
+  A store that genuinely has no index passes `--sweep-without-an-index`.
+- **`GET /v1/artifacts/{digest}` no longer blames retention for bytes it cannot
+  find.** The message asserted "it has aged out of retention" unconditionally,
+  including for an observation two days old under a thirty-day policy. It now
+  offers both explanations — retention, or an index separated from its payload
+  store — and says when the observation was made.
+
 ### Added
 
 - **A sampler, so a history starts accumulating.** `tubedepth-sample.timer` in

@@ -517,8 +517,10 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/artifacts/b9f4c0e2...
 null 버전은 "괜찮다"가 아니라 "모른다"이고, 버전을 철회한 kind에는 컬럼보다 오래된 행이 있어서
 둘 중 어느 쪽인지 알 수 없다. `tubedepth backfill-schema-versions`를 돌린 뒤 다시 물으면 된다.
 
-이 인스턴스가 저장한 적 없는 digest, 그리고 payload가 retention을 지나 사라진 digest는
-404 `not_found`.
+이 인스턴스가 저장한 적 없는 digest, 그리고 index에는 행이 있으나 payload store에 바이트가
+없는 digest는 404 `not_found`. 메시지는 원인을 단정하지 않고 두 가지를 모두 제시한다 —
+retention이 바이트를 지웠거나, `TUBEDEPTH_DATA_DIR`가 이 index가 만들어질 때의 store가
+아니거나. index와 store는 한 쌍이고, 어느 쪽이 움직였는지는 운영자만 안다.
 
 ## 페이지네이션
 

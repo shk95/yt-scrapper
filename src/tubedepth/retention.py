@@ -18,9 +18,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from .database import Database
+from .errors import ConfigurationError
 from .models import Artifact, utcnow
 from .payload_store import PayloadStore
 
@@ -39,6 +40,11 @@ class RetentionPolicy:
     # collection committing its row is never mistaken for rubbish; short enough
     # that a crashed worker's leftovers do not accumulate for a day.
     orphan_grace: timedelta = timedelta(hours=1)
+    # Whether a store may be swept while the index has no rows at all. Off,
+    # because that state is indistinguishable from being pointed at the wrong
+    # database — see `RetentionService._refuse_to_sweep_without_an_index`. On
+    # only for a host that genuinely collects without one.
+    sweep_without_an_index: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -104,7 +110,44 @@ class RetentionService:
             total += path.stat().st_size
         return orphans, total
 
+    def _refuse_to_sweep_without_an_index(self) -> None:
+        """Stop before the sweep when there is no index to judge orphans against.
+
+        The sweep decides by absence: a payload no artifact row points at is
+        rubbish. That inference holds only while the rows it consults are the
+        rows that belong to this store. An index with **no rows at all** is the
+        one input for which it silently inverts — every file is an orphan, and
+        the whole store is deleted while the log reads like a successful sweep.
+
+        That is not a hypothetical shape. It is a database cutover half-done:
+        `TUBEDEPTH_DATABASE_URL` moved to a freshly migrated PostgreSQL and
+        `TUBEDEPTH_DATA_DIR` still holding the payloads the old index knew
+        about. The two are a pair — `docs/shared-postgres.md` says a restore is
+        a pair — and this is the one code path that can break the pair without
+        anyone asking it to.
+
+        The asymmetry decides the default. Refusing costs an operator one
+        command; guessing wrong costs every observation ever collected, and no
+        re-collection recovers a view count from three weeks ago. A host that
+        really has no index says so with `sweep_without_an_index`.
+        """
+        if self._policy.sweep_without_an_index:
+            return
+        with self._database.session(readonly=True) as session:
+            if session.scalar(select(func.count()).select_from(Artifact)):
+                return
+        stranded = sum(1 for _ in self._payloads.stored_files())
+        if not stranded:
+            return
+        raise ConfigurationError(
+            f"refusing to sweep: the artifact index is empty and {stranded} payload file(s) "
+            "are on disk, which is what a half-finished database cutover looks like. "
+            "Check TUBEDEPTH_DATABASE_URL points at the index these payloads belong to. "
+            "If this store genuinely has no index, pass --sweep-without-an-index"
+        )
+
     def prune(self) -> RetentionOutcome:
+        self._refuse_to_sweep_without_an_index()
         cutoff = self._clock() - self._policy.maximum_age
         removed = 0
         freed = 0

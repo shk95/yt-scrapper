@@ -465,12 +465,18 @@ def prune(
         int, typer.Option("--max-age-days", envvar="TUBEDEPTH_MAX_AGE_DAYS")
     ] = 30,
     maximum_gigabytes: Annotated[float, typer.Option("--max-gb", envvar="TUBEDEPTH_MAX_GB")] = 50.0,
+    sweep_without_an_index: Annotated[bool, typer.Option("--sweep-without-an-index")] = False,
 ) -> None:
     """Remove artifacts past their retention age.
 
     The size limit is a backstop rather than a target: nothing here tries to
     fill it, and reaching it means the age policy is not keeping up, so it is
     reported rather than quietly absorbed by evicting whatever is nearest.
+
+    `--sweep-without-an-index` is the operator saying that a payload store with
+    no artifact rows behind it is the truth rather than a mistake. Without it
+    that state is refused, because it is also what a database cutover looks
+    like halfway through — and the sweep does not undo.
     """
     configure_logging()
     outcome = RetentionService(
@@ -479,6 +485,7 @@ def prune(
         policy=RetentionPolicy(
             maximum_age=timedelta(days=maximum_age_days),
             maximum_bytes=int(maximum_gigabytes * 1024**3),
+            sweep_without_an_index=sweep_without_an_index,
         ),
     ).prune()
 
