@@ -552,7 +552,7 @@ migrator와 runtime 둘 다 `search_path = tubedepth, pg_catalog`로 둔다. `do
 | 1 owner/migrator/runtime | **적용됨(#15).** `tubedepth_owner`(NOLOGIN) / `tubedepth_migrator`(배포 전용, `GRANT tubedepth_owner`) / `tubedepth_runtime`(DML만) 3-role 분리. `migrations/env.py`가 postgres에서 `SET ROLE tubedepth_owner`; runtime의 부정 테스트 4종과 소유권 감사가 `tests/test_postgres_privileges.py` | `deploy/postgres-bootstrap.sql`, `migrations/env.py` |
 | 2 autogenerate 격리 | search_path 전략 + sentinel 증명 (위 선언, 테스트는 #15에서 실제로 작성됨) | `tests/test_postgres_migrations.py` |
 | 3 version table 격리 | `tubedepth.alembic_version`, 테스트가 위치를 단언 | 같은 파일 |
-| 4 connection budget | manifest에 상한 20 선언; `tubedepth_runtime`에 `CONNECTION LIMIT 20` 적용(#15). per-engine pool 수치는 아직 코드로 고정되지 않음 — Task 7 | `deploy/service-manifest.yaml`, `deploy/postgres-bootstrap.sql` |
+| 4 connection budget | **적용됨(#15, Task 7).** manifest에 상한 20 선언; `tubedepth_runtime`에 `CONNECTION LIMIT 20`. `Database`가 PostgreSQL 대상일 때 write/read 두 engine 모두 `pool_size=2, max_overflow=2`(engine당 상한 4)로 명시적으로 생성 — API 프로세스 1개 + worker 프로세스 1개, 각각 write/read engine 하나씩이라 engine은 총 4개. 4 × 4 = 16 ≤ 20, 여유 4는 규정이 요구하는 운영 안전 여유. SQLite는 pool 상한을 두지 않는다(로컬 파일이라 예산과 무관) | `src/tubedepth/database.py`, `deploy/service-manifest.yaml`, `deploy/postgres-bootstrap.sql` |
 | 5 timeout | **적용됨(#15).** `tubedepth_runtime`에 `statement_timeout`(15s), `lock_timeout`(3s, statement보다 짧게), `idle_in_transaction_session_timeout`(30s), `transaction_timeout`(60s, PG17+이므로 무조건 설정)을 role-scoped로 부여. 워커는 이미 network 호출을 transaction 밖에서 한다 | `deploy/postgres-bootstrap.sql` |
 | 6 startup DDL 금지 | **적용됨.** `_database()`가 더는 `create_schema()`를 호출하지 않는다; 스키마 경로는 `tubedepth migrate` 하나뿐 | #14 |
 | 7 외부 object 일관성 | payload는 content-addressed(불변 key), write-then-record 순서로 이미 규정 형태. grace period와 reconciliation은 #17에 병합 | `payload_store.py`, #17 |
@@ -597,6 +597,41 @@ runtime은 정확히 `SELECT, INSERT, UPDATE, DELETE`만 직접 grant 받은 rol
 재실행이 관측을 조용히 중복시킬 수 있기 때문이다. payload store는 옮기지 않고
 `transfer.py`는 `PayloadStore`를 import조차 하지 않는다 — 규정 7의 "복구 세트는
 index와 object가 함께"라는 원칙에서, 이 도구는 절반만 옮기는 도구라는 뜻이다.
+
+**Task 7 — 테스트 스위트가 PostgreSQL 위에서 돈다.** #15가 말하는 "the tests
+move too"다: `tests/conftest.py`의 `database_url_for_tests`가 이제 테스트마다
+`TUBEDEPTH_TEST_POSTGRES_URL`(migrator) 서버에 schema 하나(`request.node.nodeid`를
+정규화 + 63자 제한에 대비한 sha1 접미사)를 만들고 그 schema를 가리키는 URL을
+`yield`한 뒤 테스트가 끝나면 지운다 — schema 하나가 이 seam의 유일한 산출물이라,
+59곳에 흩어졌던 `Database(tmp_path / "tubedepth.db")`를 한 곳으로 모은 Task 2의
+의도가 dialect가 바뀐 뒤에도 유지된다. 처음 구현은 `str(url)`로 URL을 만들었는데
+`sqlalchemy.engine.URL.__str__`이 기본으로 비밀번호를 `***`로 가려서 모든 연결이
+인증에서 죽었다 — 실제로 그 실패를 관찰하고 `url.render_as_string(hide_password=False)`로
+고쳤다.
+
+`tests/test_job_queue.py`의 두 lock 테스트(`sqlite3.connect(timeout=0)` +
+`OperationalError match="locked"`)는 SQLite 파일 lock 고유의 검증이라 PostgreSQL에
+대응이 없다 — MVCC라 그런 상황 자체가 없다. 포팅하지 않고, 그 테스트들이 실제로
+지키던 성질 둘로 다시 썼다: (1) `test_two_concurrent_claims_never_return_the_same_job`은
+`before_cursor_execute` 훅으로 한 worker의 UPDATE를 다른 worker가 SELECT+UPDATE+COMMIT을
+완전히 끝낼 때까지 강제로 멈춰 실제 interleaving을 만든다 — `JobRepository.claim`의
+rowcount 검사를 무력화하면 두 worker가 모두 claim에 성공해 실패하는 것으로 확인했다.
+(2) `test_a_readonly_session_does_not_block_a_concurrent_writer`는 readonly 세션이
+transaction을 연 채로 같은 job을 다른 세션이 claim하는 데 2초 이상 걸리지 않음을
+검증한다 — readonly 세션이 `LOCK TABLE ... IN ACCESS EXCLUSIVE MODE`를 잡도록
+일부러 망가뜨리면 10초 timeout까지 걸려 실패하는 것으로 확인했다. 두 검증 모두
+되돌리기 전에 실측했다.
+
+`tests/conftest.py`의 socket guard(`refuse_outbound_network`)는 marker 기반 예외
+(`live`/`postgres`)에서 주소 기반 allow-list(`127.0.0.1`/`::1`/`localhost`)로
+바뀌었다 — 이제 스위트 대부분이 실제 PostgreSQL 소켓을 열기 때문에, `postgres`
+marker가 붙은 소수만 예외 처리해서는 나머지가 전부 막힌다. `pyproject.toml`의
+`addopts`에서 `and not postgres`를 뺐다 — `postgres` marker는 더 이상 선택 필터가
+아니고(전체가 서버를 필요로 함), role/권한/`alembic_version` 위치 같은 PostgreSQL
+구조 자체를 검사하는 파일들의 이름표로만 남았다. `tool/checks/test`가 이제 서버가
+없으면 `just postgres`와 같은 방식으로 throwaway container를 직접 띄우고 정리한다
+(`tool/checks/postgres`는 그래서 사라졌고, CI도 `verify`/`postgres` 두 job을
+하나로 합쳤다).
 
 **Manifest**: [`deploy/service-manifest.yaml`](../deploy/service-manifest.yaml).
 

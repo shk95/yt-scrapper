@@ -112,21 +112,26 @@ def test_the_models_and_the_migrations_have_not_drifted(tmp_path: Path) -> None:
     assert difference == [], f"models and migrations disagree: {difference}"
 
 
-def test_the_cli_can_stamp_a_database_that_predates_migrations(
-    tmp_path: Path, database_url_for_tests: str
-) -> None:
+def test_the_cli_can_stamp_a_database_that_predates_migrations(tmp_path: Path) -> None:
     """The one-time problem every project gets exactly once.
 
     This database existed for a day before migrations did. Upgrading it would
     try to create tables that are already there; the honest move is to record
     which revision its schema already matches and migrate forward from then on.
+
+    Built directly against the SQLite file `--data-dir` falls back to, not
+    through `database_url_for_tests`: that fixture names an unrelated
+    PostgreSQL schema now (Task 7), and this test needs the *exact* file the
+    CLI's `migrate --stamp` will open with no `TUBEDEPTH_DATABASE_URL` set —
+    the SQLite fallback under `--data-dir` is itself the behaviour under test
+    here, not incidental plumbing.
     """
     from typer.testing import CliRunner
 
     from tubedepth.cli import application
     from tubedepth.database import Database
 
-    Database(database_url_for_tests).create_schema()
+    Database(f"sqlite+pysqlite:///{tmp_path / 'tubedepth.db'}").create_schema()
 
     result = CliRunner().invoke(application, ["migrate", "--stamp", "--data-dir", str(tmp_path)])
 

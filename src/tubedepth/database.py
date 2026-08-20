@@ -6,10 +6,31 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 
 from sqlalchemy import Connection, create_engine, event, inspect
+from sqlalchemy.engine import make_url
 from sqlalchemy.orm import Session, sessionmaker
 
 from .errors import ConfigurationError
 from .models import Base
+
+# docs/shared-postgres.md rule 4: the connection budget is a number written
+# down, not an assertion. `deploy/service-manifest.yaml` declares 20 as the
+# hard ceiling for this service (also `CONNECTION LIMIT 20` on
+# `tubedepth_runtime` in deploy/postgres-bootstrap.sql, so a miscount here is
+# caught by the database itself rather than trusted).
+#
+# One process holds two engines — a writer and a reader (see the class
+# docstring for why they are separate) — and the deployment is one API
+# process plus one worker process (deploy/service-manifest.yaml), so the
+# ceiling below is spent four times over:
+#
+#   ceiling per engine = pool_size + max_overflow = 2 + 2 = 4
+#   engines            = 2 processes x 2 engines each = 4
+#   total ceiling      = 4 engines x 4 = 16
+#
+# 16 <= 20, with 4 left over as the operational safety margin
+# docs/shared-postgres.md rule 4 asks for, not spent down to the wire.
+_POOL_SIZE = 2
+_MAX_OVERFLOW = 2
 
 
 class Database:
@@ -35,7 +56,19 @@ class Database:
 
     def __init__(self, url: str) -> None:
         self._url = url
-        self._engine = create_engine(url)
+        # Explicit pool ceilings only on PostgreSQL: `_POOL_SIZE`/
+        # `_MAX_OVERFLOW` are what the arithmetic above is spent against, and
+        # SQLite's default pooling needs no ceiling — it is a local file, not
+        # a budget every other service on a shared server is also drawing
+        # from. Read from the URL rather than after `create_engine` because
+        # the pool class is chosen at construction time; there is no
+        # reconfiguring it afterwards.
+        pool_kwargs = (
+            {"pool_size": _POOL_SIZE, "max_overflow": _MAX_OVERFLOW}
+            if make_url(url).get_backend_name() == "postgresql"
+            else {}
+        )
+        self._engine = create_engine(url, **pool_kwargs)
         # A second engine, and it earns its keep. On SQLite the BEGIN IMMEDIATE
         # below is what makes claiming safe, but it applies to every
         # transaction the engine opens — so a route that only counts rows took
@@ -60,7 +93,7 @@ class Database:
         # is then structural: this engine has no IMMEDIATE hook to forget, and
         # on SQLite `query_only` is set once per connection instead of per
         # transaction.
-        self._read_engine = create_engine(url)
+        self._read_engine = create_engine(url, **pool_kwargs)
         self.dialect = self._engine.dialect.name
         self.sqlite_hooks_installed = self.dialect == "sqlite"
 

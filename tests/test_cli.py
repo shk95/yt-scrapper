@@ -6,19 +6,36 @@ cannot honour. Anything that would reach YouTube belongs in the live contracts.
 
 from __future__ import annotations
 
-import sqlite3
 import subprocess
 import sys
 from pathlib import Path
 
+from sqlalchemy import func, select
+from sqlalchemy.exc import OperationalError
 from typer.testing import CliRunner
 
 from tubedepth.cli import application
 from tubedepth.database import Database
 from tubedepth.errors import ConfigurationError
+from tubedepth.models import Artifact, Job, WorkerControl
 from tubedepth.settings import database_url
 
 runner = CliRunner()
+
+
+def _database(data_directory: Path) -> Database:
+    """The same database a CLI invocation against `data_directory` would open.
+
+    Reads and writes through SQLAlchemy rather than the raw `sqlite3` driver
+    this file used to reach for directly: it is the same behaviour these tests
+    ultimately assert on — a table's contents — through the one interface the
+    application itself uses, so a query here breaks the same way a query in
+    the application would. This still deliberately talks to the SQLite file
+    `--data-dir` falls back to (`database_url_for_tests`, since Task 7, names
+    an unrelated PostgreSQL schema); that fallback, and the CLI's own boot
+    behaviour around it, is what this file is testing.
+    """
+    return Database(database_url(data_directory))
 
 
 def queued_targets(data_directory: Path) -> list[str]:
@@ -27,11 +44,11 @@ def queued_targets(data_directory: Path) -> list[str]:
     A command that refuses its arguments should not have created a database,
     so "no such table" is the same answer as "no rows" for these tests.
     """
-    with sqlite3.connect(data_directory / "tubedepth.db") as connection:
-        try:
-            return [row[0] for row in connection.execute("SELECT target FROM jobs")]
-        except sqlite3.OperationalError:
-            return []
+    try:
+        with _database(data_directory).session(readonly=True) as session:
+            return list(session.scalars(select(Job.target)))
+    except OperationalError:
+        return []
 
 
 def migrated(data_directory: Path) -> Path:
@@ -42,7 +59,7 @@ def migrated(data_directory: Path) -> Path:
     needing tables to already exist has to bring them into being itself.
     """
     data_directory.mkdir(parents=True, exist_ok=True)
-    Database(database_url(data_directory)).create_schema()
+    _database(data_directory).create_schema()
     return data_directory
 
 
@@ -132,8 +149,8 @@ def test_enqueue_records_a_refresh_so_the_worker_bypasses_the_cache(tmp_path: Pa
     )
 
     assert result.exit_code == 0, result.output
-    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
-        assert next(connection.execute("SELECT refresh FROM jobs"))[0] == 1
+    with _database(tmp_path).session(readonly=True) as session:
+        assert session.scalars(select(Job.refresh)).one() is True
 
 
 def test_targets_can_come_from_a_file(tmp_path: Path) -> None:
@@ -207,14 +224,14 @@ def test_cancelling_a_queued_job_from_the_command_line(tmp_path: Path) -> None:
         application,
         ["enqueue", "video.transcript", "dQw4w9WgXcQ", "--data-dir", str(migrated(tmp_path))],
     )
-    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
-        job_id = next(connection.execute("SELECT identifier FROM jobs"))[0]
+    with _database(tmp_path).session(readonly=True) as session:
+        job_id = session.scalars(select(Job.identifier)).one()
 
     result = runner.invoke(application, ["cancel", job_id, "--data-dir", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
-        assert next(connection.execute("SELECT state FROM jobs"))[0] == "cancelled"
+    with _database(tmp_path).session(readonly=True) as session:
+        assert session.scalars(select(Job.state)).one() == "cancelled"
 
 
 def test_cancelling_a_job_that_does_not_exist_says_so_without_a_traceback(
@@ -243,22 +260,28 @@ def test_work_once_takes_one_job_and_leaves_the_rest(tmp_path: Path) -> None:
         application,
         ["enqueue", "video.transcript", "dQw4w9WgXcQ", "--data-dir", str(migrated(tmp_path))],
     )
-    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
-        connection.execute(
-            "UPDATE jobs SET kind = 'video.notregistered'",
-        )
-        connection.execute(
-            "INSERT INTO jobs (identifier, kind, target, state, attempt_count, max_attempts,"
-            " scheduled_at, created_at, webhook_attempts, refresh)"
-            " SELECT '0' * 32, kind, 'second', state, attempt_count, max_attempts,"
-            " scheduled_at, created_at, webhook_attempts, refresh FROM jobs"
+    with _database(tmp_path).session() as session:
+        original = session.scalars(select(Job)).one()
+        original.kind = "video.notregistered"
+        session.add(
+            Job(
+                kind=original.kind,
+                target="second",
+                state=original.state,
+                attempt_count=original.attempt_count,
+                max_attempts=original.max_attempts,
+                webhook_attempts=original.webhook_attempts,
+                refresh=original.refresh,
+            )
         )
 
     result = runner.invoke(application, ["work", "--once", "--data-dir", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
-        states = dict(connection.execute("SELECT state, count(*) FROM jobs GROUP BY state"))
+    with _database(tmp_path).session(readonly=True) as session:
+        states = dict(
+            session.execute(select(Job.state, func.count()).group_by(Job.state)).tuples().all()
+        )
     assert states == {"failed": 1, "queued": 1}, f"--once did not stop after one job: {states}"
 
 
@@ -280,8 +303,8 @@ def test_an_expensive_kind_is_queued_with_fewer_attempts_than_a_standard_one(
         application, ["enqueue", "video.metadata", "dQw4w9WgXcQ", "--data-dir", str(tmp_path)]
     )
 
-    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
-        attempts = dict(connection.execute("SELECT kind, max_attempts FROM jobs"))
+    with _database(tmp_path).session(readonly=True) as session:
+        attempts = dict(session.execute(select(Job.kind, Job.max_attempts)).tuples().all())
 
     assert attempts["video.comments"] < attempts["video.metadata"], (
         f"an expensive kind was queued with as many tries as a standard one: {attempts}"
@@ -316,16 +339,19 @@ def test_recording_an_innertube_surface_nobody_records_is_refused_before_the_net
     assert list(tmp_path.iterdir()) == []
 
 
-def test_the_backfill_command_reports_what_it_attributed(
-    tmp_path: Path, database_url_for_tests: str
-) -> None:
+def test_the_backfill_command_reports_what_it_attributed(tmp_path: Path) -> None:
     """A command nobody runs is the same as no command, so `migrate` points at
     this one — the window closes as retention ages out the rows it would
-    attribute."""
-    from tubedepth.fingerprints import fingerprint
-    from tubedepth.models import Artifact, utcnow
+    attribute.
 
-    database = Database(database_url_for_tests)
+    Seeded straight into the SQLite file `--data-dir` falls back to, the same
+    reason `_database` exists: `database_url_for_tests` (Task 7) names an
+    unrelated PostgreSQL schema, not the file this CLI invocation opens.
+    """
+    from tubedepth.fingerprints import fingerprint
+    from tubedepth.models import utcnow
+
+    database = _database(tmp_path)
     database.create_schema()
     with database.session() as session:
         session.add(
@@ -345,17 +371,15 @@ def test_the_backfill_command_reports_what_it_attributed(
     result = runner.invoke(application, ["backfill-schema-versions", "--data-dir", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
-        assert next(connection.execute("SELECT schema_version FROM artifacts"))[0] == "1"
+    with _database(tmp_path).session(readonly=True) as session:
+        assert session.scalars(select(Artifact.schema_version)).one() == "1"
 
 
-def test_the_key_list_says_when_each_key_was_last_used(
-    tmp_path: Path, database_url_for_tests: str
-) -> None:
+def test_the_key_list_says_when_each_key_was_last_used(tmp_path: Path) -> None:
     """The one question asked before revoking, which had no answer."""
     from tubedepth.services.keys import ApiKeyService
 
-    database = Database(database_url_for_tests)
+    database = _database(tmp_path)
     database.create_schema()
     ApiKeyService(database).mint(label="ingest")
 
@@ -370,20 +394,15 @@ def test_the_worker_can_be_paused_from_the_command_line(tmp_path: Path) -> None:
     """The control was reachable only through the API, which is the wrong
     dependency: if the API is down, or was never installed, the worker is the
     process you most want to be able to stop and the one you cannot."""
-    from tubedepth.models import WorkerControl
-
     result = runner.invoke(
         application,
         ["pause", "--reason", "watching a quota", "--data-dir", str(migrated(tmp_path))],
     )
 
     assert result.exit_code == 0, result.output
-    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
-        assert next(connection.execute("SELECT paused, reason FROM worker_control")) == (
-            1,
-            "watching a quota",
-        )
-    assert WorkerControl is not None
+    with _database(tmp_path).session(readonly=True) as session:
+        control = session.scalars(select(WorkerControl)).one()
+        assert (control.paused, control.reason) == (True, "watching a quota")
 
 
 def test_resuming_from_the_command_line_says_what_changed(tmp_path: Path) -> None:
@@ -392,13 +411,11 @@ def test_resuming_from_the_command_line_says_what_changed(tmp_path: Path) -> Non
     result = runner.invoke(application, ["resume", "--data-dir", str(tmp_path)])
 
     assert result.exit_code == 0, result.output
-    with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
-        assert next(connection.execute("SELECT paused FROM worker_control"))[0] == 0
+    with _database(tmp_path).session(readonly=True) as session:
+        assert session.scalars(select(WorkerControl.paused)).one() is False
 
 
-def test_the_key_list_shows_the_allowance_it_is_about_to_be_asked_for(
-    tmp_path: Path, database_url_for_tests: str
-) -> None:
+def test_the_key_list_shows_the_allowance_it_is_about_to_be_asked_for(tmp_path: Path) -> None:
     """`key create --rpm N` set an allowance the listing never showed back.
 
     When a client starts getting "over its allowance of N requests per minute",
@@ -408,7 +425,7 @@ def test_the_key_list_shows_the_allowance_it_is_about_to_be_asked_for(
     """
     from tubedepth.services.keys import ApiKeyService
 
-    database = Database(database_url_for_tests)
+    database = _database(tmp_path)
     database.create_schema()
     ApiKeyService(database).mint(label="ingest", requests_per_minute=240)
 

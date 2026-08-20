@@ -14,10 +14,44 @@
 # of making the suite mysteriously slow and occasionally red. The live checks
 # exist and matter — they are `just contract`, run by a person on a residential
 # connection that YouTube does not challenge.
+#
+# Docker, since #15 (Task 7 — "the tests move too"): `database_url_for_tests`
+# names a schema on a real PostgreSQL server now, not a SQLite tmp file, for
+# nearly every test in the suite — production on PostgreSQL and tests on
+# SQLite is how a dialect bug ships. If nothing has already named a server
+# (CI's service container does, via TUBEDEPTH_TEST_POSTGRES_URL, and bootstraps
+# it the same way `deploy/postgres-bootstrap.sql` bootstraps production), this
+# script brings up a throwaway one itself and tears it down on exit — the same
+# shape `just postgres` already used before this became every test's problem
+# rather than a handful of tests marked `postgres`.
 
 set -e
 . tool/checks/prerequisite
-require_command uv
+require_command uv docker
 
 uv sync --extra dev --frozen
+
+if [ -z "$TUBEDEPTH_TEST_POSTGRES_URL" ]; then
+    name=tubedepth-test-postgres
+    trap 'docker rm -f "$name" >/dev/null 2>&1 || true' EXIT
+    docker rm -f "$name" >/dev/null 2>&1 || true
+    docker run -d --name "$name" -e POSTGRES_PASSWORD=fleet -e POSTGRES_USER=fleet \
+        -e POSTGRES_DB=fleet -p 55432:5432 postgres:18-alpine >/dev/null
+    for _ in $(seq 1 60); do
+        docker exec "$name" pg_isready -U fleet -q 2>/dev/null && break
+        sleep 1
+    done
+    docker exec -i "$name" psql -U fleet -d fleet -v ON_ERROR_STOP=1 \
+        -v password="'check'" -v runtime_password="'check-runtime'" -v database=fleet \
+        -q < deploy/postgres-bootstrap.sql
+    # Harness only, and deliberately not in the bootstrap file: the suite
+    # drops and recreates a schema per test for isolation, and the runtime
+    # application role has no business creating one.
+    docker exec "$name" psql -U fleet -d fleet -q \
+        -c 'GRANT CREATE ON DATABASE fleet TO tubedepth_migrator'
+    TUBEDEPTH_TEST_POSTGRES_URL='postgresql+psycopg://tubedepth_migrator:check@localhost:55432/fleet'
+    TUBEDEPTH_TEST_POSTGRES_RUNTIME_URL='postgresql+psycopg://tubedepth_runtime:check-runtime@localhost:55432/fleet'
+    export TUBEDEPTH_TEST_POSTGRES_URL TUBEDEPTH_TEST_POSTGRES_RUNTIME_URL
+fi
+
 uv run pytest

@@ -100,11 +100,23 @@ testpaths = ["tests"]
 # project talks to YouTube, and a suite that actually does so is red on any
 # datacenter address for reasons unrelated to the change under test. A check
 # that is red for unrelated reasons is one people learn to ignore.
-addopts = "-q -m 'not live and not postgres'"
+#
+# `and not postgres` used to sit here too, deselecting the suite's only
+# server-backed tests by default. Task 7 (issue #15 — "the tests move too")
+# moved `database_url_for_tests` itself onto a real PostgreSQL server, which
+# means every test through the `database` fixture needs one now, not just the
+# handful marked `postgres` — deselecting the marker would deselect almost
+# the whole suite. `tool/checks/test` (and so `just check`) now needs Docker;
+# `tool/checks/prerequisite` says so.
+addopts = "-q -m 'not live'"
 asyncio_mode = "auto"
 markers = [
   "live: reaches YouTube or a third-party service; never runs in CI. Use `just contract`.",
-  "postgres: needs a PostgreSQL server. Use `just postgres`; CI runs it in a service container.",
+  # No longer a selection filter (every test needs the server now) — kept as
+  # a label for the tests that check PostgreSQL's own structure (roles,
+  # privileges, `alembic_version` placement) rather than merely running
+  # against it, so `pytest -m postgres` can still single those out.
+  "postgres: exercises PostgreSQL structure directly (roles, privileges, migrations), not just as a backing store.",
 ]
 
 [tool.coverage.run]

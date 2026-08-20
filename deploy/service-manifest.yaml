@@ -34,9 +34,18 @@ external_object_stores:
     referenced_by: artifacts.digest
 
 # One API process + one worker process, each holding a write engine and a
-# read engine. The number below is the hard ceiling to be enforced with
-# CONNECTION LIMIT on tubedepth_runtime; the per-engine pool sizes that add up
-# to it are set in code and recorded in docs/status.md when #15 lands. Until
-# then this is the budget being requested from the fleet total, not a measured
-# figure.
+# read engine (src/tubedepth/database.py's `Database`, and its docstring for
+# why the two engines are separate) — four engines total. Each engine is
+# created with pool_size=2, max_overflow=2 on PostgreSQL (SQLite needs no
+# ceiling; it is a local file), so:
+#
+#   ceiling per engine = pool_size + max_overflow = 2 + 2 = 4
+#   engines            = 2 processes x 2 engines each      = 4
+#   total ceiling      = 4 engines x 4                     = 16
+#
+# 16 <= 20, the number below, which is also the CONNECTION LIMIT
+# deploy/postgres-bootstrap.sql sets on tubedepth_runtime — a miscount here
+# is caught by the database itself, not only by this arithmetic. The 4
+# left over is the operational safety margin docs/shared-postgres.md rule 4
+# asks for. See docs/status.md § "규정 적용" for the full accounting.
 connection_budget: 20
