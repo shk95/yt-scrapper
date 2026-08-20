@@ -213,8 +213,8 @@ What this project **cannot** do, and what has **not been checked**.
 - **Related videos, channel About and community posts depend on parsing
   InnerTube renderers**, whose names change without notice —
   `compactVideoRenderer` has already become `lockupViewModel`. The dates in
-  `tests/fixtures/innertube/` are when each surface last worked. A
-  `parse_mismatch` in a response's `degradations` means one of them has broken.
+  `tests/fixtures/innertube/` are when each surface last worked. An
+  `ExtractionError` in a response's `degradations` means one of them has broken.
   The fixture regressions in CI prove **our code has not regressed**; they
   prove nothing about what YouTube is sending today. That is what `just
   contract` is for.

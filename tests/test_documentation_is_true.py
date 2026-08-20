@@ -20,7 +20,9 @@ from __future__ import annotations
 
 import re
 import tomllib
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -68,10 +70,36 @@ REQUIRED = [
 # documenting a removal.
 KINDS_REGION = re.compile(r"<!-- kinds:start -->(.*?)<!-- kinds:end -->", re.DOTALL)
 
+# The HTTP error table, and the job `error_code` vocabulary beneath it. Marked
+# for the same reason the kinds are: both are lists of backticked words in a
+# document that is otherwise full of backticked words, and only inside the
+# marks can a check say "exactly these and no others".
+ERROR_CODES_REGION = re.compile(
+    r"<!-- error-codes:start -->(.*?)<!-- error-codes:end -->", re.DOTALL
+)
+JOB_ERROR_CODES_REGION = re.compile(
+    r"<!-- job-error-codes:start -->(.*?)<!-- job-error-codes:end -->", re.DOTALL
+)
+BACKTICKED = re.compile(r"`([^`]+)`")
+
+# A route section heads itself with its own operations — ``## `GET /v1/jobs```
+# — and one heading covers two: ``## `GET /v1/control`, `PATCH /v1/control```.
+# These are identical literals in both languages, which is what makes them
+# parseable in a document whose prose is translated.
+ROUTE_IN_HEADING = re.compile(r"`(GET|POST|PATCH|PUT|DELETE) (/[A-Za-z0-9_{}/-]*)`")
+
+METHODS = frozenset({"get", "post", "patch", "put", "delete"})
+
 CHANGELOG_RELEASE = re.compile(r"^## \[([^\]]+)\]", re.MULTILINE)
 
+# The REST reference and its translation, which several checks below read as a
+# pair. A claim corrected on one side only is a wrong document, not half a
+# right one.
+API_DOCUMENTS = [ROOT / "docs" / "api.md", ROOT / "docs" / "api.ko.md"]
 
-def served_paths(tmp_path: Path) -> set[str]:
+
+def served_document(tmp_path: Path) -> dict[str, Any]:
+    """The OpenAPI paths object: every path served, and the operations under it."""
     from tubedepth.api.application import create_application
     from tubedepth.database import Database
     from tubedepth.payload_store import PayloadStore
@@ -87,7 +115,53 @@ def served_paths(tmp_path: Path) -> set[str]:
     # FastAPI keeps an included router as one object instead of flattening its
     # routes, so walking `routes` finds `/healthz` and nothing under `/v1`.
     # The schema is also the public answer to "what does this serve".
-    return set(application.openapi()["paths"])
+    return application.openapi()["paths"]
+
+
+def served_paths(tmp_path: Path) -> set[str]:
+    return set(served_document(tmp_path))
+
+
+def served_operations(tmp_path: Path) -> set[tuple[str, str]]:
+    """Every (method, path) pair served, methods lowercased as OpenAPI writes them."""
+    return {
+        (method, path)
+        for path, operations in served_document(tmp_path).items()
+        for method in operations
+        if method in METHODS
+    }
+
+
+def documented_sections(text: str) -> dict[tuple[str, str], str]:
+    """Each route section's body, keyed by every operation its heading claims.
+
+    A section runs from its `## ` heading to the next one, so the subsections
+    under it count as part of it — which is what lets a worked recipe live
+    beside the endpoint it belongs to.
+    """
+    found: dict[tuple[str, str], str] = {}
+    for part in re.split(r"^## ", text, flags=re.MULTILINE)[1:]:
+        heading, _, body = part.partition("\n")
+        for method, path in ROUTE_IN_HEADING.findall(heading):
+            found[(method.lower(), path)] = body
+    return found
+
+
+def every_domain_error() -> set[str]:
+    """Every `TubedepthError` subclass name, walked rather than listed.
+
+    `__subclasses__()` answers with direct subclasses only, and
+    `RateLimitedError` sits under `UpstreamError` — a flat read documents ten
+    of the eleven and misses exactly the one a throttled job reports.
+    """
+    from tubedepth import errors
+
+    def below(base: type) -> Iterator[type]:
+        for derived in base.__subclasses__():
+            yield derived
+            yield from below(derived)
+
+    return {derived.__name__ for derived in below(errors.TubedepthError)}
 
 
 def normalise(path: str) -> str:
@@ -209,9 +283,7 @@ def test_the_capability_tables_list_exactly_the_kinds_that_are_registered(docume
     )
 
 
-@pytest.mark.parametrize(
-    "document", [ROOT / "docs" / "api.md", ROOT / "docs" / "api.ko.md"], ids=lambda p: p.name
-)
+@pytest.mark.parametrize("document", API_DOCUMENTS, ids=lambda p: p.name)
 def test_the_api_reference_documents_every_route_that_is_served(
     document: Path, tmp_path: Path
 ) -> None:
@@ -235,9 +307,7 @@ def test_the_api_reference_documents_every_route_that_is_served(
     assert not undocumented, f"{document.name} does not document: {sorted(undocumented)}"
 
 
-@pytest.mark.parametrize(
-    "document", [ROOT / "docs" / "api.md", ROOT / "docs" / "api.ko.md"], ids=lambda p: p.name
-)
+@pytest.mark.parametrize("document", API_DOCUMENTS, ids=lambda p: p.name)
 def test_the_api_reference_documents_every_error_code_the_api_can_return(document: Path) -> None:
     """Error codes are the part of an HTTP contract a client writes a branch
     against, so an undocumented one is a branch nobody wrote."""
@@ -249,6 +319,125 @@ def test_the_api_reference_documents_every_error_code_the_api_can_return(documen
     text = document.read_text()
     missing = {label for _, _, label in STATUS_BY_ERROR if f"`{label}`" not in text}
     assert not missing, f"{document.name} does not document error codes: {sorted(missing)}"
+
+
+@pytest.mark.parametrize("document", API_DOCUMENTS, ids=lambda p: p.name)
+def test_the_api_reference_has_a_section_for_every_operation_and_for_no_other(
+    document: Path, tmp_path: Path
+) -> None:
+    """Per operation, where the check above is per path.
+
+    A path check passes while half its methods are undocumented: `/v1/jobs`
+    serves `GET` and `POST`, `/v1/jobs/{job_id}` serves `GET` and `DELETE`,
+    and either half alone satisfies "the path is mentioned". Both directions
+    are asserted, because a section for something not served is an instruction
+    that answers 405 to whoever follows it.
+
+    `GET /` is exempt by construction: the dashboard is
+    `include_in_schema=False`, so it is not in what this compares against.
+    `GET /healthz` is not exempt — it is served, unauthenticated, and has its
+    own section.
+    """
+    if not document.exists():
+        pytest.skip(f"{document.name} does not exist")
+
+    served = served_operations(tmp_path)
+    documented = set(documented_sections(document.read_text()))
+
+    undocumented = sorted(f"{method.upper()} {path}" for method, path in served - documented)
+    invented = sorted(f"{method.upper()} {path}" for method, path in documented - served)
+    assert not undocumented, f"{document.name} has no section for: {undocumented}"
+    assert not invented, f"{document.name} heads a section for what is not served: {invented}"
+
+
+@pytest.mark.parametrize("document", API_DOCUMENTS, ids=lambda p: p.name)
+def test_the_error_table_lists_no_code_the_api_cannot_return(document: Path) -> None:
+    """The other direction from the check above, which only catches omissions.
+
+    A code the document lists and the API never emits is a branch a client
+    wrote for nothing, and it survives exactly because the check that would
+    have caught it only looked the other way. Scanning the whole document
+    cannot do this — it is full of backticked words that are not error codes —
+    so the table is marked and only what the marks contain is read. That puts
+    one rule on the region: everything backticked inside it is an error code,
+    which is why the meanings beside them are written without any.
+    """
+    if not document.exists():
+        pytest.skip(f"{document.name} does not exist")
+
+    from tubedepth.api.application import STATUS_BY_ERROR
+
+    region = ERROR_CODES_REGION.search(document.read_text())
+    assert region is not None, f"{document.name} has no <!-- error-codes:start --> region"
+
+    listed = set(BACKTICKED.findall(region.group(1)))
+    emitted = {label for _, _, label in STATUS_BY_ERROR}
+    assert listed == emitted, (
+        f"{document.name}'s error table and the API disagree: "
+        f"listed and never emitted {sorted(listed - emitted)}, "
+        f"emitted and not listed {sorted(emitted - listed)}"
+    )
+
+
+@pytest.mark.parametrize("document", API_DOCUMENTS, ids=lambda p: p.name)
+def test_every_query_parameter_is_named_in_its_own_endpoints_section(
+    document: Path, tmp_path: Path
+) -> None:
+    """A filter documented nowhere is a filter nobody passes.
+
+    `GET /v1/artifacts` described five parameters in one sentence of prose and
+    the sentence went stale without anyone noticing, which is the shape of
+    every documentation defect this file exists for. Named in *its own*
+    section rather than anywhere in the document: `kind` appears on four
+    routes, and finding it once says nothing about the fifth.
+    """
+    if not document.exists():
+        pytest.skip(f"{document.name} does not exist")
+
+    sections = documented_sections(document.read_text())
+    missing: list[str] = []
+    for path, operations in served_document(tmp_path).items():
+        for method, operation in operations.items():
+            if method not in METHODS:
+                continue
+            # A missing section is the check above's to report, not this one's.
+            body = sections.get((method, path), "")
+            missing += [
+                f"{method.upper()} {path} takes {parameter['name']}"
+                for parameter in operation.get("parameters", [])
+                if parameter.get("in") == "query" and f"`{parameter['name']}`" not in body
+            ]
+
+    assert not missing, f"{document.name} does not name: {sorted(missing)}"
+
+
+@pytest.mark.parametrize("document", API_DOCUMENTS, ids=lambda p: p.name)
+def test_the_job_error_code_vocabulary_is_the_one_the_worker_actually_writes(
+    document: Path,
+) -> None:
+    """A second vocabulary, under a field name the first one also uses.
+
+    A job's `error_code` is `type(error).__name__` — the worker writes it that
+    way at all four of its failure sites — plus the literal `lease_expired`
+    the reaper writes. The reference showed `upstream_error` in its jobs-list
+    example and claimed `/healthz` reports `parse_mismatch`: values from the
+    HTTP table, which no row has ever held.
+    """
+    if not document.exists():
+        pytest.skip(f"{document.name} does not exist")
+
+    region = JOB_ERROR_CODES_REGION.search(document.read_text())
+    assert region is not None, f"{document.name} has no <!-- job-error-codes:start --> region"
+
+    listed = set(BACKTICKED.findall(region.group(1)))
+    # Every domain error, because the worker writes whichever one reached it,
+    # and the one value that is not an exception at all.
+    written = every_domain_error() | {"lease_expired"}
+    assert listed == written, (
+        f"{document.name}'s job error codes and the code disagree: "
+        f"listed and never written {sorted(listed - written)}, "
+        f"written and not listed {sorted(written - listed)}"
+    )
 
 
 def released_versions(changelog: Path) -> list[str]:

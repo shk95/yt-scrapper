@@ -192,7 +192,7 @@ API는 기본적으로 **loopback에만** 바인딩한다. 이 프로젝트의 �
 
 - **관련 영상·채널 About·커뮤니티 게시물은 InnerTube 렌더러 파싱에 의존한다.** 이름이 예고 없이 바뀐다 —
   `compactVideoRenderer`가 이미 `lockupViewModel`로 바뀌었다. `tests/fixtures/innertube/`의 날짜가 각 표면이
-  마지막으로 동작한 시점이다. 응답의 `degradations`에 `parse_mismatch`가 있으면 그중 하나가 깨진 것이다.
+  마지막으로 동작한 시점이다. 응답의 `degradations`에 `ExtractionError`가 있으면 그중 하나가 깨진 것이다.
   CI의 fixture 회귀는 **우리 코드가 퇴행하지 않았음**을 증명할 뿐, YouTube가 지금 무엇을 보내는지에 대해서는
   아무것도 증명하지 못한다. 그건 `just contract`가 한다.
 - **차단될 수 있다.** 요청량에 따라 로그인·PO token을 요구받을 수 있다. 고장 났을 때 첫 수순은

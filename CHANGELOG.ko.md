@@ -44,6 +44,10 @@
   30일 정책 아래 이틀 된 관측에도 "retention을 지나 사라졌다"고 단언하고 있었다. 이제 두 가지
   설명을 모두 제시하고 — retention이거나, index가 payload store와 분리됐거나 — 관측 시각을
   함께 말한다.
+- **API가 `docs/api.ko.md`가 이미 말하고 있던 대로 답한다 (#21).** 라우트가 실행되기 전에
+  FastAPI가 거부하는 요청도 `detail`이 아니라 문서화된 `error` 모양으로 나오고,
+  `UnavailableError`는 404 `unavailable`, `ConfigurationError`는 503 `not_configured`가 됐으며,
+  `limit`은 OpenAPI 스키마에 1–500으로 선언되어 범위 밖이면 잘리지 않고 거부된다.
 
 ### Added
 

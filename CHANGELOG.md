@@ -51,6 +51,11 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
   including for an observation two days old under a thirty-day policy. It now
   offers both explanations — retention, or an index separated from its payload
   store — and says when the observation was made.
+- **The API answers what `docs/api.md` already said it answers (#21).** A
+  rejection FastAPI raises before a route runs now carries the documented
+  `error` shape rather than `detail`; `UnavailableError` is 404 `unavailable`
+  and `ConfigurationError` 503 `not_configured` instead of 500; and `limit` is
+  declared 1–500 in the OpenAPI schema and refused outside it, not clamped.
 
 ### Added
 
