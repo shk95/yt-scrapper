@@ -250,6 +250,7 @@ def test_a_mid_transfer_failure_says_the_target_holds_partial_data(
     message = str(failed.value)
     assert "partial data" in message
     assert "emptied before retrying" in message
+    assert "prune" in message, "the message must warn against sweeping a half-transferred index"
 
     # The first batch really did commit — the message is not describing a
     # hypothetical.
@@ -290,6 +291,7 @@ def test_a_target_count_that_disagrees_with_what_was_written_is_an_error(
     message = str(failed.value)
     assert "did not verifiably arrive" in message
     assert "emptied before retrying" in message
+    assert "prune" in message, "the message must warn against sweeping a half-transferred index"
 
 
 def test_placement_is_checked_on_both_source_and_target(

@@ -160,7 +160,10 @@ def _copy_table(source: Database, target: Database, table: Table, model: type) -
         raise ConfigurationError(
             f"transfer of {table.name!r} failed after committing {written} of "
             f"{len(values)} row(s) to the target ({error}); the target now holds "
-            "partial data for this table and must be emptied before retrying"
+            "partial data for this table and must be emptied before retrying. "
+            "Do NOT run `prune` against this target before then — a partially "
+            "transferred index makes prune's orphan sweep delete payloads that "
+            "were never given the chance to arrive"
         ) from error
 
     with target.session(readonly=True) as verifier:
@@ -169,7 +172,9 @@ def _copy_table(source: Database, target: Database, table: Table, model: type) -
         raise ConfigurationError(
             f"wrote {len(values)} row(s) of {table.name!r} to the target but it now "
             f"holds {arrived}; the transfer did not verifiably arrive and the target "
-            "must be emptied before retrying"
+            "must be emptied before retrying. Do NOT run `prune` against this target "
+            "before then — a partially transferred index makes prune's orphan sweep "
+            "delete payloads that were never given the chance to arrive"
         )
 
     return len(values)

@@ -349,3 +349,57 @@ def test_the_refusal_is_overridable_for_a_store_that_is_genuinely_all_orphans(
 
     assert outcome.orphans_removed == 1
     assert payloads.path_for("video.metadata", stored.digest) is None
+
+
+def test_a_partially_transferred_index_refuses_the_sweep_instead_of_destroying_the_rest(
+    tmp_path: Path,
+    database: Database,
+) -> None:
+    """The other half of `_refuse_to_sweep_without_an_index`.
+
+    A database cutover interrupted mid-`transfer` does not necessarily leave
+    the target with *zero* rows — `artifacts` is the second of six tables, so
+    a run that dies later leaves a handful of real rows behind. From here
+    that is the same failure as the zero-row case in miniature: most of what
+    is on disk has no row pointing at it, because most of the source index
+    never made it across. One live row against one orphaned payload is
+    already enough to trip this: `orphans >= total_rows` is parity, and a
+    transfer interrupted this early reaches it by construction.
+    """
+    clock = FakeClock(datetime.now(UTC))
+    database, payloads, service = build(
+        tmp_path, database, RetentionPolicy(maximum_age=timedelta(days=30)), clock
+    )
+    store(database, payloads, clock, b'{"transferred": true}', "the-one-row-that-made-it")
+    stranded = payloads.put("video.metadata", b'{"never_got_a_row": true}')
+    _age(stranded.path, timedelta(hours=2))
+
+    with pytest.raises(ConfigurationError) as refusal:
+        service.prune()
+
+    assert "prune" in str(refusal.value)
+    assert payloads.path_for("video.metadata", stranded.digest) is not None
+
+
+def test_the_disproportionate_refusal_is_overridable(
+    tmp_path: Path,
+    database: Database,
+) -> None:
+    """Same override as the zero-row case, same reason: only the operator
+    can tell a corrupted pair from a store that legitimately has this shape.
+    """
+    clock = FakeClock(datetime.now(UTC))
+    database, payloads, service = build(
+        tmp_path,
+        database,
+        RetentionPolicy(maximum_age=timedelta(days=30), sweep_without_an_index=True),
+        clock,
+    )
+    store(database, payloads, clock, b'{"transferred": true}', "the-one-row-that-made-it")
+    stranded = payloads.put("video.metadata", b'{"never_got_a_row": true}')
+    _age(stranded.path, timedelta(hours=2))
+
+    outcome = service.prune()
+
+    assert outcome.orphans_removed == 1
+    assert payloads.path_for("video.metadata", stranded.digest) is None

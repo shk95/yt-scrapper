@@ -146,6 +146,60 @@ class RetentionService:
             "If this store genuinely has no index, pass --sweep-without-an-index"
         )
 
+    def _refuse_to_sweep_disproportionately(self, total_rows: int, live: set[str]) -> None:
+        """Refuse a sweep whose orphan count would dwarf the index judging it.
+
+        `_refuse_to_sweep_without_an_index` only catches the **zero-row** case.
+        A *partial* transfer is the same failure with rows in it: `transfer.py`
+        commits one table at a time, so a run interrupted after `artifacts`
+        (the second of six tables) leaves the target holding a handful of real
+        rows while the payload store still has everything the source ever
+        wrote. From in here that is indistinguishable in kind from the
+        zero-row case — most of what is on disk has no row pointing at it —
+        just not indistinguishable in *degree*, and degree is exactly what the
+        zero-row check cannot see because it only asks "is the count zero".
+
+        Routine orphans are rare relative to the index they sit beside: ten
+        stray files were observed against 1,556 live rows the day this was
+        measured (`docs/status.md`), under 1%, because they come from isolated
+        crashes (`tubedepth collect` writes a payload before its row, or a
+        worker dies mid-job). A partial transfer inverts that ratio instead of
+        merely raising it a little: the store predates the transfer in full,
+        so every row that did not make it across leaves its payload with
+        nothing referencing it, and the earlier the interruption the worse
+        the ratio gets — a transfer that dies after the first row leaves
+        (almost) the whole store orphaned against that one row.
+
+        `orphans >= total_rows` is the threshold: orphan count reaching
+        parity with the row count. Ordinary operation needs a two-orders-of-
+        magnitude spike in crash debris to reach parity (1% to 100%), so this
+        does not fire on a healthy store having a bad week. A partial
+        transfer reaches parity by construction unless it happens to die
+        after nearly every row has crossed, in which case the smaller number
+        of stranded payloads is a smaller mistake to make irrecoverable — the
+        threshold is deliberately tuned to catch the shape that destroys the
+        most, not to catch every partial transfer regardless of size.
+        """
+        if self._policy.sweep_without_an_index:
+            return
+        now = self._clock()
+        orphans = 0
+        for _kind, digest, path in self._payloads.stored_files():
+            if digest in live:
+                continue
+            age = now - datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
+            if age >= self._policy.orphan_grace:
+                orphans += 1
+        if orphans and orphans >= max(total_rows, 1):
+            raise ConfigurationError(
+                f"refusing to sweep: {orphans} payload file(s) have no live artifact row "
+                f"against only {total_rows} row(s) in the index, which is what a partially "
+                "transferred database looks like — do not run `prune` after an interrupted "
+                "`transfer` until the target has been emptied and the transfer retried. "
+                "If this store's payloads genuinely and legitimately outnumber its index "
+                "this much, pass --sweep-without-an-index."
+            )
+
     def prune(self) -> RetentionOutcome:
         self._refuse_to_sweep_without_an_index()
         cutoff = self._clock() - self._policy.maximum_age
@@ -154,6 +208,7 @@ class RetentionService:
 
         with self._database.session() as session:
             artifacts = session.scalars(select(Artifact)).all()
+            total_rows = len(artifacts)
             # Age alone, with nothing protected. An earlier version kept the
             # newest observation of each question regardless of age, on the
             # theory that a stale answer beats none — but a stale artifact is
@@ -187,6 +242,7 @@ class RetentionService:
             for kind, digest in {(a.kind, a.digest) for a in expiring if a.digest not in live}:
                 self._payloads.delete(kind, digest)
 
+        self._refuse_to_sweep_disproportionately(total_rows, live)
         orphans, total = self._sweep_orphans(live)
         over = total > self._policy.maximum_bytes
         if over:
