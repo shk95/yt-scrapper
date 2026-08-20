@@ -39,7 +39,9 @@ gh issue create --label blocked --label blocked/<what-is-missing> \
 - [ ] A fresh clone runs `uv sync --extra dev` without error
 - [ ] `tool/doctor.sh` on a clone with no `core.hooksPath` exits non-zero and
       prints the exact command that fixes it
-- [ ] `tool/doctor.sh` reports the SQLite version and refuses one below 3.35
+- [ ] `tool/doctor.sh` reports whether `TUBEDEPTH_DATABASE_URL` is set and
+      whether the PostgreSQL server it names is reachable, failing on either
+      gap
 - [ ] `git commit -m "bad message"` is rejected by the `commit-msg` hook
 - [ ] `tool/checks/test` exits 69 on a host with no `uv`, and exits 1 when
       `REQUIRE_NATIVE=1` is set
