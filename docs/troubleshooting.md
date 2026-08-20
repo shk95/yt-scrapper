@@ -132,6 +132,33 @@ Before that check existed this failed differently and much worse: the
 `ValidationError` reached FastAPI's default handler, so `POST /v1/jobs`
 answered 500 for every target that had a cached artifact.
 
+## `this connection's search_path leads with …, not 'tubedepth'`
+
+`_database()` refuses to proceed before touching a table (#16). The
+connection's `search_path` does not lead with this service's schema, which
+means unqualified names — every table this codebase creates, including
+`alembic_version` — would resolve into whatever schema does lead, most often
+`public`, the one three other services on the shared PostgreSQL instance also
+use. Nothing about that fails on its own: it works until someone else's
+migration, or a `pg_dump -n tubedepth`, meets the tables sitting where they
+should not be.
+
+The cause is always the same: `deploy/postgres-bootstrap.sql`'s
+`ALTER ROLE ... IN DATABASE ... SET search_path = tubedepth, pg_catalog` was
+never run against this host, or was run against the wrong role or the wrong
+database. This is the gap CI cannot see — CI always bootstraps from that file,
+a host set up by hand may not have.
+
+The fix is to run the bootstrap file's `ALTER ROLE` statement for the role
+this deployment logs in as, against the database it connects to, then
+reconnect — a session already open when the `ALTER ROLE` runs keeps its old
+`search_path` until it reconnects:
+
+```sql
+ALTER ROLE tubedepth_runtime IN DATABASE <the database name>
+  SET search_path = tubedepth, pg_catalog;
+```
+
 ## `no schema at …` from any command
 
 A fresh `--data-dir`, or one pointed at a database nothing has migrated yet.

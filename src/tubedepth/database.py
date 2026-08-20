@@ -8,6 +8,7 @@ from contextlib import contextmanager
 from sqlalchemy import Connection, create_engine, event, inspect
 from sqlalchemy.orm import Session, sessionmaker
 
+from .errors import ConfigurationError
 from .models import Base
 
 
@@ -29,6 +30,8 @@ class Database:
     earlier write in the same unit of work works: the transaction is already
     open, so nothing tries to start a second one.
     """
+
+    SCHEMA = "tubedepth"
 
     def __init__(self, url: str) -> None:
         self._url = url
@@ -131,6 +134,45 @@ class Database:
         that is already there.
         """
         Base.metadata.create_all(self._engine)
+
+    def verify_placement(self) -> None:
+        """Refuse to run against a connection whose search_path is not ours.
+
+        Unqualified names resolve through `search_path`, so this one setting is
+        what puts this service's tables — and `alembic_version` — in its own
+        schema rather than in the `public` one three other services share. It
+        is set by `ALTER ROLE` in `deploy/postgres-bootstrap.sql`, and skipping
+        that line fails nothing: the tables are simply created somewhere else,
+        and the damage is only visible when another service's migration meets
+        them.
+
+        Checked at startup rather than per session: one query, at the moment it
+        can still be fixed, before any table exists — so this runs first in
+        `cli._database()`, ahead of `is_migrated()`. A wrong `search_path` and
+        a missing migration are different diagnoses: with the wrong
+        `search_path`, `is_migrated()` would also report False (`jobs` really
+        is invisible from here), and telling the operator to run
+        `tubedepth migrate` would be wrong — the schema may already exist and
+        be fully migrated, just unreachable from this connection.
+
+        A no-op on SQLite, which has no `search_path` and no server-side role
+        to misconfigure. The leading entry may be quoted (`SHOW search_path`
+        quotes identifiers that need it) and the bootstrap's value carries a
+        second entry (`tubedepth, pg_catalog`) after the schema name, both of
+        which must be accepted rather than refused.
+        """
+        if self.dialect != "postgresql":
+            return
+        with self._read_engine.connect() as connection:
+            path = connection.exec_driver_sql("SHOW search_path").scalar_one()
+        leading = path.split(",")[0].strip().strip('"')
+        if leading != self.SCHEMA:
+            raise ConfigurationError(
+                f"this connection's search_path leads with {leading!r}, not {self.SCHEMA!r}: "
+                f"unqualified tables would be created in the shared schema. Run "
+                f"ALTER ROLE <role> IN DATABASE <db> SET search_path = {self.SCHEMA}, pg_catalog "
+                f"(deploy/postgres-bootstrap.sql does this)"
+            )
 
     def is_migrated(self) -> bool:
         """Whether a schema this expects already exists.

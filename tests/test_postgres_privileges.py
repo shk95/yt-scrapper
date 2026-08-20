@@ -29,6 +29,9 @@ import pytest
 from sqlalchemy import create_engine, text
 from sqlalchemy.exc import ProgrammingError
 
+from tubedepth.database import Database
+from tubedepth.errors import ConfigurationError
+
 ROOT = Path(__file__).parent.parent
 SCHEMA = "tubedepth"
 BOOTSTRAP_SQL = ROOT / "deploy" / "postgres-bootstrap.sql"
@@ -292,3 +295,42 @@ def test_a_table_created_after_the_grants_is_reachable_through_default_privilege
         ).scalar_one()
     runtime_engine.dispose()
     assert count == 1
+
+
+@needs_postgres
+def test_verify_placement_accepts_the_search_path_the_bootstrap_sets() -> None:
+    """Untouched, a runtime connection's `search_path` already leads with
+    `tubedepth` — `deploy/postgres-bootstrap.sql`'s
+    `ALTER ROLE ... SET search_path = tubedepth, pg_catalog` put it there,
+    and that value carries a second entry (`pg_catalog`) after the schema
+    name. `verify_placement` must accept this, or a correct deployment could
+    never start. No migration is required first: the check has to hold
+    before any table exists.
+    """
+    database = Database(RUNTIME_URL or "")
+    database.verify_placement()
+
+
+@needs_postgres
+def test_verify_placement_refuses_a_search_path_that_does_not_lead_with_the_schema() -> None:
+    """The failure mode #16 exists for: skip the bootstrap's `ALTER ROLE`
+    line, or run against a host set up by hand without it, and the
+    connection's `search_path` leads with `public` instead of `tubedepth`.
+    Nothing about that fails on its own — tables would simply be created in
+    the schema three other services share. This is the one query that turns
+    it into a refusal instead.
+
+    `connection.commit()` after the `SET` matters: without it, closing the
+    connection rolls the plain (non-`LOCAL`) `SET` back before it can affect
+    the next checkout from the pool, and this test would pass for the wrong
+    reason — the connection `verify_placement` opens would see the
+    role's own correct `search_path`, never the tampered one.
+    """
+    database = Database(RUNTIME_URL or "")
+    with database._read_engine.connect() as connection:
+        connection.execute(text("SET search_path TO public"))
+        connection.commit()
+
+    with pytest.raises(ConfigurationError, match="ALTER ROLE") as refusal:
+        database.verify_placement()
+    assert "public" in str(refusal.value)

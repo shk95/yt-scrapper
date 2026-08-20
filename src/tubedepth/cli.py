@@ -130,6 +130,14 @@ def _database(data_directory: Path) -> Database:
     DDL on the boot path; it just turns the eventual failure into one that
     names the fix.
 
+    `verify_placement()` runs first, ahead of `is_migrated()`: on the wrong
+    `search_path`, `is_migrated()` would also see no `jobs` table — the
+    schema this connection can reach is the wrong one, or none — and telling
+    an operator to run `tubedepth migrate` would be the wrong diagnosis when
+    the real schema already exists, fully migrated, just unreachable from
+    here. Placement is a precondition for the migration check meaning
+    anything at all, so it is asked first (#16).
+
     The URL comes from `settings.database_url`, the one resolver Alembic also
     calls (`migrate` below) — so `tubedepth work` and `tubedepth migrate`
     always agree on which database they mean.
@@ -137,6 +145,7 @@ def _database(data_directory: Path) -> Database:
     data_directory.mkdir(parents=True, exist_ok=True)
     url = database_url(data_directory)
     database = Database(url)
+    database.verify_placement()
     if not database.is_migrated():
         raise ConfigurationError(
             f"no schema at {url} — run: tubedepth migrate --data-dir {data_directory}"

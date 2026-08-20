@@ -61,6 +61,17 @@ def test_a_postgresql_url_does_not_get_sqlite_pragmas(tmp_path: Path) -> None:
     assert database.sqlite_hooks_installed is False
 
 
+def test_verify_placement_is_a_no_op_on_sqlite(tmp_path: Path) -> None:
+    """SQLite has no `search_path` to get wrong, and no server-side role to
+    misconfigure — the whole failure mode Task 5 guards against only exists
+    on PostgreSQL. `verify_placement` must return without even opening a
+    connection, or a legitimate SQLite deployment (still the test backend,
+    and still a supported one) would be refused for a condition that cannot
+    occur there.
+    """
+    Database(f"sqlite+pysqlite:///{tmp_path / 'placement.db'}").verify_placement()
+
+
 def test_an_ambient_database_url_does_not_redirect_the_suite(tmp_path: Path) -> None:
     """The regression this module exists to close, reproduced directly.
 
