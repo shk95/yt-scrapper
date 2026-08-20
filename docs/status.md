@@ -1097,6 +1097,22 @@ now adds nullable columns and refuses anything else by name; it is not a
 migration tool and does not pretend to be one (nothing renames, drops or
 backfills). Alembic is still the real answer and is still unbuilt.
 
+**CI was red at step one, and had been since the checks were written.**
+`tool/checks/format` runs `uv run ruff format --check`, and `uv run` installs
+the project's dependencies into a missing virtualenv but *not* its extras —
+ruff is a dev extra. So the first check on a fresh runner exited 2 with
+`Failed to spawn: ruff`, and because it was the first step, `verify` never
+reached the tests: **the suite was not running in CI at all**, on any push,
+while every commit message here said it was green. It passed on every laptop,
+which is exactly why it lasted — a laptop has already run `tool/checks/test`
+once, and that one does sync. The tell was visible the whole time and looked
+like noise: `gh run list` showed `failure` on every push for a fortnight.
+Fixed 2026-08-20 by syncing in each check, with the invariant asserted in
+`test_repository_hygiene.py`, since the next check will be written by copying
+one of these and the sync line is the part that looks like boilerplate. **The
+general form: a check that cannot fail loudly is indistinguishable from a check
+that passes, and the first green run is the only proof either way.**
+
 **Reflection deadlocked against the repair.** The first version of that repair
 used `inspect(engine)` and then `engine.begin()` — two connections, and *every*
 transaction here is `BEGIN IMMEDIATE`, so the reflecting one held the write lock
