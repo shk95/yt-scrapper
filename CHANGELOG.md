@@ -20,6 +20,29 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-21
+
+### Fixed
+
+- **`deploy/.env` no longer ships in the Docker build context.** The
+  `.dockerignore`'s `.env` exclusions matched only at the context root, and
+  the compose file builds from the repository root (`context: ..`) while the
+  documented flow puts the real secrets in `deploy/.env` — so that file was
+  tarred to the daemon on every build. Now `**/.env` and `**/.env.*`, with
+  `!**/.env.example` kept after them because the last match wins.
+- **The local postgres healthcheck probes TCP: `pg_isready -h 127.0.0.1`.**
+  The image's entrypoint runs a temporary, socket-only server during initdb,
+  and the socket probe could answer ready while the bootstrap was still
+  creating the roles — releasing `migrate` early, whose failure kept `api`,
+  `worker` and `watch` from ever starting on a first boot. The temporary
+  server never binds TCP, so a TCP answer means the real server, after the
+  bootstrap — the same choice `tool/checks/test` documents.
+- **A `since`/`until` without a timezone offset is a 422, not a 500.**
+  `GET /v1/jobs?since=2026-08-21` parsed to a naive datetime and blew up in
+  the column comparison as 500 `internal_error` with a message about
+  refusing to *store* — on a pure read, outside the documented error shape.
+  Both listing routes now answer 422 `invalid_request`, naming what to send.
+
 ## [1.0.0] - 2026-08-21
 
 ### Added
@@ -359,6 +382,7 @@ for. Not yet exercised under sustained load; see the honest limits in the
   longer reaped as dead and retried.
 - The query indexes the plan specified and nobody had added.
 
-[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/slopindustries/yt-scrapper/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/slopindustries/yt-scrapper/releases/tag/v0.1.0

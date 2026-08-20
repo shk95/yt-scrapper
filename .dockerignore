@@ -17,10 +17,14 @@
 .github/
 .githooks/
 
-# Credentials and runtime state
-.env
-.env.*
-!.env.example
+# Credentials and runtime state. `**/` because a bare `.env` matches only at
+# the context root, and the context *is* the repository root (the compose
+# file builds with `context: ..`) while the documented deploy flow puts the
+# real secrets in `deploy/.env`. Last match wins in this file, so the
+# `.env.example` negation must stay after the exclusions it re-admits.
+**/.env
+**/.env.*
+!**/.env.example
 var/
 *.conf
 *.pem

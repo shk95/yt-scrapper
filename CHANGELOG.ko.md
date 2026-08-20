@@ -17,6 +17,28 @@
 
 ## [Unreleased]
 
+## [1.0.1] - 2026-08-21
+
+### Fixed
+
+- **`deploy/.env`는 더 이상 Docker build context에 실리지 않는다.**
+  `.dockerignore`의 `.env` 제외 규칙이 context 루트에서만 매칭됐는데, compose
+  파일은 저장소 루트에서 빌드하고(`context: ..`) 문서화된 절차는 진짜 secret을
+  `deploy/.env`에 두므로, 그 파일이 빌드할 때마다 daemon으로 tar되어 갔다.
+  이제 `**/.env`와 `**/.env.*`이고, 마지막 매치가 이기므로 `!**/.env.example`은
+  그 뒤에 남는다.
+- **로컬 postgres healthcheck는 TCP를 찌른다: `pg_isready -h 127.0.0.1`.**
+  이미지의 entrypoint는 initdb 동안 socket만 여는 임시 서버를 돌리는데, socket
+  probe는 bootstrap이 아직 role을 만드는 중에도 ready라고 답할 수 있었다 —
+  `migrate`가 일찍 풀려나 실패하고, 첫 부팅에서 `api`·`worker`·`watch`가 영영
+  뜨지 못했다. 임시 서버는 TCP를 아예 열지 않으므로, TCP 응답은 bootstrap이
+  끝난 뒤의 진짜 서버를 뜻한다 — `tool/checks/test`가 기록해 둔 것과 같은 선택.
+- **timezone offset 없는 `since`/`until`은 500이 아니라 422다.**
+  `GET /v1/jobs?since=2026-08-21`은 naive datetime으로 파싱되어 컬럼 비교에서
+  터졌고, 순수한 읽기에서 저장을 거부한다는 메시지와 함께 문서화된 에러 모양
+  밖의 500 `internal_error`가 나갔다. 이제 두 목록 라우트 모두 무엇을 보내야
+  하는지 짚어 주는 422 `invalid_request`로 답한다.
+
 ## [1.0.0] - 2026-08-21
 
 ### Added
@@ -278,6 +300,7 @@
 - 워커가 실행 중 리스를 갱신한다. 긴 댓글 수집이 죽은 것으로 회수되어 재시도되던 문제.
 - 계획서에 있었으나 아무도 넣지 않았던 조회 인덱스.
 
-[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.0...HEAD
+[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.1...HEAD
+[1.0.1]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/slopindustries/yt-scrapper/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/slopindustries/yt-scrapper/releases/tag/v0.1.0

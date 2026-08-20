@@ -484,7 +484,7 @@ not issue; 429 `rate_limited`.
 | `state` | `queued`, `running`, `succeeded`, `failed`, `cancelled` |
 | `kind` | one of the kinds above |
 | `target` | the target as stored, matched byte for byte |
-| `since` / `until` | RFC 3339, filtering on **`created_at`** — when the job was asked for |
+| `since` / `until` | RFC 3339 **with an offset** (`2026-08-21T00:00:00Z`); one without is refused with 422 `invalid_request`. Filtering on **`created_at`** — when the job was asked for |
 | `limit` | default 50. Outside 1–500 it is **refused** with 422 `invalid_request`, not clamped |
 | `cursor` | from the previous page |
 
@@ -522,7 +522,7 @@ not issue; 429 `rate_limited`.
 | --- | --- |
 | `kind` | one of the kinds above |
 | `target` | the target as stored, matched byte for byte |
-| `since` / `until` | RFC 3339, filtering on **`fetched_at`** — when the observation was made, which on the jobs route is `created_at`, when it was asked for |
+| `since` / `until` | RFC 3339 **with an offset** (`2026-08-21T00:00:00Z`); one without is refused with 422 `invalid_request`. Filtering on **`fetched_at`** — when the observation was made, which on the jobs route is `created_at`, when it was asked for |
 | `limit` | default 50. Outside 1–500 it is **refused** with 422 `invalid_request`, not clamped |
 | `cursor` | from the previous page |
 
