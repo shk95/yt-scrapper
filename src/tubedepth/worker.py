@@ -86,6 +86,15 @@ class Worker:
         self._controller = controller or RateController()
         self._concurrency = max(1, concurrency)
         self._lease = lease
+        # Replaced by `serve`'s own event for the duration of a run. Held
+        # rather than passed to `_wait` so that the wait has one argument and
+        # is a seam a test can stand in for; an unset event here also makes
+        # `_wait` a plain sleep for anyone calling it outside `serve`.
+        self._stop = threading.Event()
+        # How many drains this process has run. Not a metric — the API reports
+        # nothing about it — but a resident worker has no restart count any
+        # more, and this is what a test can watch to know the loop is turning.
+        self.drains = 0
         self._permit_wait = permit_wait.total_seconds()
         # Recorded as work happens rather than derived from the job table on
         # demand: "has this source failed three times in a row" is a question
@@ -135,10 +144,14 @@ class Worker:
     def paused(self) -> bool:
         """Whether an operator has told this worker to stop claiming.
 
-        Read at the top of a drain rather than watched: `tubedepth work` drains
-        and exits, and the unit restarts it every ten seconds, so that loop is
-        what makes a pause take effect — no polling of our own, and no state to
-        get out of step with the row.
+        Read at the top of a drain and again inside the claim loop, rather than
+        cached: the row is what an operator changes, and a copy of it is a
+        thing that can be out of step with what they set.
+
+        This used to say the unit's ten-second restart was what made a pause
+        take effect. It no longer restarts — see `serve` — so a pause now takes
+        effect at the top of the next drain, or partway through a long one,
+        which is sooner than it was.
         """
         with self._database.session(readonly=True) as session:
             control = session.get(WorkerControl, WORKER_CONTROL_ID)
@@ -225,6 +238,69 @@ class Worker:
                 future.result()
         self.deliver_webhooks()
         return completed
+
+    # -- staying up ------------------------------------------------------
+
+    def serve(self, *, poll: float, stop: threading.Event) -> int:
+        """Drain, wait, drain again, until `stop` is set. Returns the total.
+
+        This replaces a polling loop that was made of process restarts. The
+        unit ran `tubedepth work`, which drained and exited, and
+        `Restart=always` with `RestartSec=10s` brought it back — so an idle
+        queue cost a full interpreter start, a `uv` resolve and a yt-dlp import
+        every ten seconds. Measured on this host: ~520 ms of CPU and a 68 MB
+        peak per launch, 589 launches, almost all of them finding nothing.
+
+        The waste is the smaller half. Every launch is also a fresh set of
+        database connections, and this project is moving to a PostgreSQL
+        instance it shares with the other scrapers, where connections are a
+        fleet-wide budget rather than a local detail — see
+        `docs/shared-postgres.md`. A process that reconnects six times a minute
+        forever is a bad neighbour there in a way it never was against a file.
+
+        `Restart=always` stays in the unit and now means what it says: a
+        restart is for a worker that died, not for one that finished.
+
+        Nothing here supersedes `drain`. It is still the unit of work — it
+        reaps, delivers callbacks, honours the pause row, and returns when the
+        queue is empty — and `--once` still runs exactly one of them. This adds
+        a reason to go round again.
+        """
+        self._stop = stop
+        total = 0
+        while not stop.is_set():
+            try:
+                completed = self.drain()
+            except Exception:
+                # Deliberately everything. Under the restart loop an unhandled
+                # exception was a ten-second gap and a fresh process; staying
+                # up would turn the same exception into collection silently
+                # stopping until somebody noticed. Logged and retried on the
+                # next tick is the outcome the restart gave, without it.
+                logger.exception("a drain failed; retrying on the next tick")
+                completed = 0
+            else:
+                total += completed
+            self.drains += 1
+            if completed:
+                # A listing fans out to a job per video, so a drain that did
+                # work usually left the queue fuller than it found it. Waiting
+                # here would add `poll` seconds per level of fan-out.
+                continue
+            if self._wait(poll):
+                break
+        return total
+
+    def _wait(self, seconds: float) -> bool:
+        """Wait out the poll interval, or stop early. True if it stopped.
+
+        The stop event's own wait rather than `time.sleep`, so a SIGINT is
+        acted on when it arrives instead of at the end of the interval. The
+        unit allows 120 seconds for a stop, so sleeping would still shut down —
+        but every stop would cost the full interval, and an operator watching
+        `systemctl stop` cannot tell that from a hang.
+        """
+        return self._stop.wait(seconds)
 
     # -- the gates -------------------------------------------------------
 

@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import gzip
 import json
+import logging
 import os
+import signal
+import threading
 from collections.abc import Sequence
 from datetime import timedelta
 from pathlib import Path
@@ -34,6 +37,8 @@ from .sources.innertube_sources import RECORDABLE_SURFACES, record_surface
 from .sources.registry import attempts_for
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime
 from .worker import Worker
+
+logger = logging.getLogger(__name__)
 
 application = typer.Typer(
     name="tubedepth",
@@ -233,6 +238,14 @@ def work(
         ),
     ] = 4,
     once: Annotated[bool, typer.Option("--once", help="Take one job and stop")] = False,
+    poll: Annotated[
+        float,
+        typer.Option(
+            "--poll",
+            envvar="TUBEDEPTH_POLL_SECONDS",
+            help="Stay up and check for work this often, in seconds. 0 drains once and exits.",
+        ),
+    ] = 0.0,
 ) -> None:
     """Drain the queue.
 
@@ -242,6 +255,14 @@ def work(
     `--concurrency` is an upper bound, not a target. The rate controller
     narrows it whenever YouTube pushes back and widens it again while requests
     keep succeeding, so the effective figure is measured rather than chosen.
+
+    `--poll` is what the service unit passes. Without it this drains once and
+    exits, which is what a person running it by hand wants and what `--once`
+    refines; with it the process stays up. The unit used to get the same effect
+    from `Restart=always` and a ten-second `RestartSec`, at the cost of a full
+    interpreter start every ten seconds against a queue that was usually empty
+    — and, once this moves to the shared PostgreSQL, a new set of connections
+    just as often. `Worker.serve` has the measurements.
     """
     configure_logging()
     worker = Worker(
@@ -257,8 +278,35 @@ def work(
             window_ceiling=float(os.environ.get("TUBEDEPTH_WINDOW_CEILING", "6"))
         ),
     )
-    completed = worker.drain(limit=1 if once else None)
+    if once or poll <= 0:
+        completed = worker.drain(limit=1 if once else None)
+    else:
+        completed = worker.serve(poll=poll, stop=_stopping_on_signals())
     typer.echo(f"✓ {completed} job(s) completed")
+
+
+def _stopping_on_signals() -> threading.Event:
+    """An event the usual stop signals set, so a drain in flight can finish.
+
+    The unit sends SIGINT precisely so a running job is not abandoned to wait
+    out its full lease before another worker can take it. Left to Python's
+    default that arrives as a KeyboardInterrupt in whichever frame is running,
+    which is not a place that can end a drain tidily.
+
+    The handler is installed once and then removed, so a second signal reaches
+    the default and kills the process: an operator who has already asked twice
+    is not asking for the current job to finish.
+    """
+    stopping = threading.Event()
+
+    def stop(number: int, frame: object) -> None:
+        signal.signal(number, signal.SIG_DFL)
+        logger.info("stopping after the current drain; signal again to stop now")
+        stopping.set()
+
+    for number in (signal.SIGINT, signal.SIGTERM):
+        signal.signal(number, stop)
+    return stopping
 
 
 def _set_paused(data_directory: Path, *, paused: bool, reason: str | None) -> None:

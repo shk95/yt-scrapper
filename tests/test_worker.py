@@ -10,6 +10,8 @@ from __future__ import annotations
 import logging
 import threading
 import time
+from collections.abc import Callable, Iterator
+from contextlib import contextmanager
 from datetime import timedelta
 from pathlib import Path
 
@@ -840,3 +842,160 @@ def test_a_paused_worker_still_announces_what_it_already_finished(tmp_path: Path
         ).drain()
 
         assert route.called, "a pause silenced a callback the job had already earned"
+
+
+# -- staying up ---------------------------------------------------------
+#
+# `tubedepth work` drained the queue and exited, and the unit's
+# `Restart=always` + `RestartSec=10s` was the polling loop. It worked, and it
+# cost a process launch every ten seconds — measured on this host at ~520 ms of
+# CPU and a 68 MB peak, 589 restarts in the first stretch of a day, for a queue
+# that was usually empty. On SQLite that is waste. On the shared PostgreSQL
+# this is moving to it is connection churn against a budget other services draw
+# on, which `docs/shared-postgres.md` counts as a fleet-wide number.
+
+
+def until(condition: Callable[[], bool], *, seconds: float = 5.0) -> bool:
+    """Wait for something a worker thread is doing, or give up.
+
+    A bound rather than an unbounded wait: a broken loop should fail this suite
+    in seconds with an assertion, not hang the run.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+@contextmanager
+def serving(worker: Worker, *, poll: float = 0.01) -> Iterator[list[int]]:
+    """Run `serve` on a thread for the body, and stop it on the way out.
+
+    Threaded rather than stepped through a hook, because the behaviour under
+    test is that the process stays up between drains — and a hook that let the
+    test drive each iteration would be test-only machinery on the worker,
+    proving that the hook works.
+    """
+    stop = threading.Event()
+    completed: list[int] = []
+    thread = threading.Thread(target=lambda: completed.append(worker.serve(poll=poll, stop=stop)))
+    thread.start()
+    try:
+        yield completed
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+        assert not thread.is_alive(), "serve did not return after its stop event was set"
+
+
+def test_a_job_queued_after_the_queue_emptied_is_still_collected(tmp_path: Path) -> None:
+    """The whole point: an empty queue is not a reason to exit.
+
+    The job is queued after the worker has already started and found nothing,
+    so only a process that stayed up can collect it. This is what makes the
+    restart loop unnecessary rather than merely cheaper.
+    """
+    source = EchoSource()
+    database, worker, _ = build(tmp_path, source)
+
+    with serving(worker):
+        assert until(lambda: worker.drains > 0), "the first drain never ran"
+        enqueue(database, "video.echo", "dQw4w9WgXcQ")
+
+        assert until(lambda: source.calls == ["dQw4w9WgXcQ"]), (
+            f"the worker exited at the first empty queue: {source.calls}"
+        )
+
+
+def test_serving_reports_what_it_collected_across_every_drain(tmp_path: Path) -> None:
+    """One number for the whole run, not the last drain's.
+
+    The CLI prints it, and a resident worker reporting `0 job(s)` after an hour
+    of collecting would make the one line an operator reads a lie.
+    """
+    source = EchoSource()
+    database, worker, _ = build(tmp_path, source)
+
+    with serving(worker) as completed:
+        enqueue(database, "video.echo", "dQw4w9WgXcQ")
+        assert until(lambda: source.calls == ["dQw4w9WgXcQ"])
+        enqueue(database, "video.echo", "9bZkp7q19f0")
+        assert until(lambda: source.calls == ["dQw4w9WgXcQ", "9bZkp7q19f0"])
+
+    assert completed == [2]
+
+
+def test_a_stop_during_the_wait_is_not_made_to_wait_it_out(tmp_path: Path) -> None:
+    """SIGINT has to be prompt, and a plain sleep would make it take `poll`.
+
+    The unit sends SIGINT and allows 120 seconds, so a sleeping worker would
+    still shut down eventually — but every stop would cost the full interval,
+    and the operator watching `systemctl stop` cannot tell that from a hang.
+    The wait is the stop event's own, so setting it returns at once.
+    """
+    _, worker, _ = build(tmp_path, EchoSource())
+    stop = threading.Event()
+    threading.Timer(0.05, stop.set).start()
+
+    started = time.monotonic()
+    worker.serve(poll=30.0, stop=stop)
+    elapsed = time.monotonic() - started
+
+    assert elapsed < 5.0, f"a 30s poll made a stop take {elapsed:.1f}s"
+
+
+def test_a_drain_that_did_work_goes_straight_round_again(tmp_path: Path) -> None:
+    """No pause while there is work.
+
+    A listing fans out to a job per video, so the drain that collects the
+    listing leaves the queue fuller than it found it. Waiting `poll` seconds
+    there would add an interval per level of fan-out for nothing.
+    """
+    source = EchoSource()
+    database, worker, _ = build(tmp_path, source)
+    for index in range(3):
+        enqueue(database, "video.echo", f"video-idx{index}")
+    waits: list[float] = []
+
+    def stop_at_the_first_wait(seconds: float) -> bool:
+        waits.append(seconds)
+        return True
+
+    worker._wait = stop_at_the_first_wait  # type: ignore[method-assign]
+
+    completed = worker.serve(poll=7.0, stop=threading.Event())
+
+    assert completed == 3
+    assert waits == [7.0], f"it waited between drains that had work: {waits}"
+
+
+def test_serving_survives_a_drain_that_raises(tmp_path: Path) -> None:
+    """A resident worker cannot inherit the restart loop's forgiveness.
+
+    Under `Restart=always` an unhandled exception was a ten-second gap and a
+    fresh process. Staying up means one would end collection until somebody
+    noticed, so a failing drain is logged and retried on the next tick — the
+    outcome the restart gave, without the restart.
+
+    Deliberately not narrowed to a known error type: the property is that no
+    exception from a drain ends the loop, and naming a subset would be a list
+    to keep in step with everything a source might raise.
+    """
+    _, worker, _ = build(tmp_path, EchoSource())
+    stop = threading.Event()
+    attempts = 0
+
+    def explode(*, limit: int | None = None) -> int:
+        nonlocal attempts
+        attempts += 1
+        if attempts >= 2:
+            stop.set()
+        raise RuntimeError("the database went away")
+
+    worker.drain = explode  # type: ignore[method-assign]
+
+    worker.serve(poll=0.0, stop=stop)
+
+    assert attempts >= 2, "one failing drain ended the loop"
