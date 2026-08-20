@@ -17,6 +17,19 @@
 
 ## [Unreleased]
 
+### Changed
+
+- **부팅 경로가 더 이상 DDL을 내지 않는다 (#14).** 모든 CLI 진입점이 거치는
+  `_database()`는 `create_schema()`를 호출했는데, 이것은 이 프로젝트가 SQLite 파일을
+  독점하던 시절의 편의 기능이었다. 다른 서비스와 공유하는 데이터베이스에서는
+  `docs/shared-postgres.md`의 규정 6번이 이를 금지하고, 조용히 migration을 깨기도
+  했다 — 컬럼을 추가하는 부팅이 `alembic_version`은 건드리지 않고 지나가서, 다음
+  `alembic upgrade`가 이미 있는 컬럼을 다시 만들려 했다. `Database.create_schema()`는
+  여전히 존재한다 — 테스트와 새 `--data-dir`가 데이터베이스를 얻는 방법이다 — 하지만
+  이제는 없는 것만 만든다. 예전에 하던 컬럼·인덱스 보수는 사라졌는데, 같은 공백을
+  `tubedepth migrate`가 이제 메우면서 `alembic_version`도 정확하게 유지하기 때문이다.
+  유일한 스키마 경로는 `tubedepth migrate`다.
+
 ### Fixed
 
 - **`prune`은 행이 하나도 없는 index로는 payload store를 sweep하지 않고 거부한다.** orphan

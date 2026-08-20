@@ -20,6 +20,20 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+### Changed
+
+- **The boot path issues no DDL any more (#14).** `_database()`, which every
+  CLI entry point goes through, used to call `create_schema()` — a
+  convenience while this owned a SQLite file. On a database shared with other
+  services that is rule 6 of `docs/shared-postgres.md`, and it silently broke
+  migrations: a boot that added a column left `alembic_version` untouched, so
+  the next `alembic upgrade` tried to add a column that was already there.
+  `Database.create_schema()` still exists — it is how tests and a fresh
+  `--data-dir` get a database — but it now only creates what is missing; the
+  column and index repair it used to do is gone, because `tubedepth migrate`
+  now covers the same gap and keeps `alembic_version` honest while doing it.
+  The only schema path is `tubedepth migrate`.
+
 ### Fixed
 
 - **`prune` refuses to sweep a payload store whose index has no rows at all.**

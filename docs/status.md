@@ -545,12 +545,23 @@ autogenerate를 돌려 sentinel이 diff에 나타나지 않음을 CI가 매번 �
 | 3 version table 격리 | `tubedepth.alembic_version`, 테스트가 위치를 단언 | 같은 파일 |
 | 4 connection budget | manifest에 상한 20 선언; pool 수치는 #15에서 코드로 고정 후 여기 기록 | `deploy/service-manifest.yaml` |
 | 5 timeout | **미적용 — #15에서 bootstrap에 추가.** 워커는 이미 network 호출을 transaction 밖에서 한다 | #15 |
-| 6 startup DDL 금지 | **#14가 정확히 이것** | #14 |
+| 6 startup DDL 금지 | **적용됨.** `_database()`가 더는 `create_schema()`를 호출하지 않는다; 스키마 경로는 `tubedepth migrate` 하나뿐 | #14 |
 | 7 외부 object 일관성 | payload는 content-addressed(불변 key), write-then-record 순서로 이미 규정 형태. grace period와 reconciliation은 #17에 병합 | `payload_store.py`, #17 |
 | 8 extension 중앙 관리 | 필요 extension 없음, manifest가 선언 | manifest |
 | 9 timestamptz | `UtcDateTime`이 naive를 거부. **단, postgres에서 `timestamptz`로 렌더되는지 #15에서 확인 필요** — 현재 `sa.DateTime()`은 timezone 없는 type이 된다 | #15 |
 | 10–13 cross-service 금지 | 단일 서비스라 위반 대상 없음. manifest가 빈 의존성을 선언하고, 규정의 감사 query가 gate | manifest |
 | 14 extraction test | **호스트 전환(post-release ops issue)의 통과 조건으로 편입** | ops issue |
+
+**#14 — 부팅 경로에서 DDL 제거.** `Database.create_schema()`는 `Base.metadata.create_all`만
+호출한다. 예전에는 여기서 컬럼·인덱스 보수(`_repair_existing_tables`)까지 했는데, 이는
+migration 도구가 없던 시절 실제로 반복되던 drift — 파일이 이미 있는데 모델에 컬럼이
+추가된 경우 — 를 막던 장치였다. 지금은 `tests/test_migrations.py`가 migrate-from-nothing과
+create-from-models이 일치함을 확인하는 5개 revision이 있어서, 그 보수가 하던 일은 migration
+체인이 그대로 이어받는다. 보수를 남겨 두는 쪽의 비용이 더 컸다 — 컬럼을 추가하는 부팅이
+`alembic_version`은 그대로 두고 지나가서, 다음 `alembic upgrade`가 이미 있는 컬럼을 다시
+만들려다 `docs/troubleshooting.md`의 `duplicate column name`으로 죽는다. 그래서 `create_schema()`는
+남기되(테스트와 새 `--data-dir`가 쓴다) `cli._database()`에서는 뺐다 — 스키마를 바꿀 수 있는
+경로는 이제 `tubedepth migrate` 하나뿐이다.
 
 **Manifest**: [`deploy/service-manifest.yaml`](../deploy/service-manifest.yaml).
 

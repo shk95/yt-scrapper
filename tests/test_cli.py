@@ -14,6 +14,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from tubedepth.cli import application
+from tubedepth.database import Database
 from tubedepth.errors import ConfigurationError
 
 runner = CliRunner()
@@ -32,6 +33,18 @@ def queued_targets(data_directory: Path) -> list[str]:
             return []
 
 
+def migrated(data_directory: Path) -> Path:
+    """A data directory whose database already has the schema.
+
+    `_database()` no longer creates one on the boot path (#14) — that is now
+    `tubedepth migrate`'s job alone — so a test that exercises a command
+    needing tables to already exist has to bring them into being itself.
+    """
+    data_directory.mkdir(parents=True, exist_ok=True)
+    Database(data_directory / "tubedepth.db").create_schema()
+    return data_directory
+
+
 def test_a_video_id_beginning_with_a_dash_is_a_target_and_not_an_option(
     tmp_path: Path,
 ) -> None:
@@ -44,7 +57,7 @@ def test_a_video_id_beginning_with_a_dash_is_a_target_and_not_an_option(
     """
     result = runner.invoke(
         application,
-        ["enqueue", "video.transcript", "-2BFZsiVejU", "--data-dir", str(tmp_path)],
+        ["enqueue", "video.transcript", "-2BFZsiVejU", "--data-dir", str(migrated(tmp_path))],
     )
 
     assert result.exit_code == 0, result.output
@@ -107,7 +120,14 @@ def test_enqueue_records_a_refresh_so_the_worker_bypasses_the_cache(tmp_path: Pa
     """The flag is only worth anything on the row, which is where the worker reads it."""
     result = runner.invoke(
         application,
-        ["enqueue", "video.transcript", "dQw4w9WgXcQ", "--refresh", "--data-dir", str(tmp_path)],
+        [
+            "enqueue",
+            "video.transcript",
+            "dQw4w9WgXcQ",
+            "--refresh",
+            "--data-dir",
+            str(migrated(tmp_path)),
+        ],
     )
 
     assert result.exit_code == 0, result.output
@@ -134,7 +154,7 @@ def test_targets_can_come_from_a_file(tmp_path: Path) -> None:
             "--from-file",
             str(watchlist),
             "--data-dir",
-            str(tmp_path),
+            str(migrated(tmp_path)),
         ],
     )
 
@@ -184,7 +204,7 @@ def test_enqueue_with_no_targets_at_all_is_refused(tmp_path: Path) -> None:
 def test_cancelling_a_queued_job_from_the_command_line(tmp_path: Path) -> None:
     runner.invoke(
         application,
-        ["enqueue", "video.transcript", "dQw4w9WgXcQ", "--data-dir", str(tmp_path)],
+        ["enqueue", "video.transcript", "dQw4w9WgXcQ", "--data-dir", str(migrated(tmp_path))],
     )
     with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
         job_id = next(connection.execute("SELECT identifier FROM jobs"))[0]
@@ -199,6 +219,7 @@ def test_cancelling_a_queued_job_from_the_command_line(tmp_path: Path) -> None:
 def test_cancelling_a_job_that_does_not_exist_says_so_without_a_traceback(
     tmp_path: Path,
 ) -> None:
+    migrated(tmp_path)
     completed = subprocess.run(
         [sys.executable, "-m", "tubedepth.cli", "cancel", "0" * 32, "--data-dir", str(tmp_path)],
         capture_output=True,
@@ -218,7 +239,8 @@ def test_work_once_takes_one_job_and_leaves_the_rest(tmp_path: Path) -> None:
     network, which is enough to count how many it took.
     """
     runner.invoke(
-        application, ["enqueue", "video.transcript", "dQw4w9WgXcQ", "--data-dir", str(tmp_path)]
+        application,
+        ["enqueue", "video.transcript", "dQw4w9WgXcQ", "--data-dir", str(migrated(tmp_path))],
     )
     with sqlite3.connect(tmp_path / "tubedepth.db") as connection:
         connection.execute(
@@ -249,6 +271,7 @@ def test_an_expensive_kind_is_queued_with_fewer_attempts_than_a_standard_one(
     and an upstream failure spent three full harvests against one target out
     of the single per-address budget that caps this system.
     """
+    migrated(tmp_path)
     runner.invoke(
         application, ["enqueue", "video.comments", "dQw4w9WgXcQ", "--data-dir", str(tmp_path)]
     )
@@ -347,7 +370,8 @@ def test_the_worker_can_be_paused_from_the_command_line(tmp_path: Path) -> None:
     from tubedepth.models import WorkerControl
 
     result = runner.invoke(
-        application, ["pause", "--reason", "watching a quota", "--data-dir", str(tmp_path)]
+        application,
+        ["pause", "--reason", "watching a quota", "--data-dir", str(migrated(tmp_path))],
     )
 
     assert result.exit_code == 0, result.output
@@ -360,7 +384,7 @@ def test_the_worker_can_be_paused_from_the_command_line(tmp_path: Path) -> None:
 
 
 def test_resuming_from_the_command_line_says_what_changed(tmp_path: Path) -> None:
-    runner.invoke(application, ["pause", "--data-dir", str(tmp_path)])
+    runner.invoke(application, ["pause", "--data-dir", str(migrated(tmp_path))])
 
     result = runner.invoke(application, ["resume", "--data-dir", str(tmp_path)])
 
@@ -399,6 +423,7 @@ def test_prune_refuses_a_store_whose_index_is_somewhere_else(tmp_path: Path) -> 
     nothing. Sweeping here deletes the whole store, so the command fails and
     names the flag that means "no, this store really has no index".
     """
+    migrated(tmp_path)
     (tmp_path / "payloads" / "video.metadata" / "ab").mkdir(parents=True)
     (tmp_path / "payloads" / "video.metadata" / "ab" / f"{'ab' * 32}.json.gz").write_bytes(b"x")
 
@@ -412,6 +437,7 @@ def test_prune_refuses_a_store_whose_index_is_somewhere_else(tmp_path: Path) -> 
 
 
 def test_prune_sweeps_an_indexless_store_when_told_to(tmp_path: Path) -> None:
+    migrated(tmp_path)
     (tmp_path / "payloads" / "video.metadata" / "ab").mkdir(parents=True)
     (tmp_path / "payloads" / "video.metadata" / "ab" / f"{'ab' * 32}.json.gz").write_bytes(b"x")
 

@@ -6,33 +6,10 @@ from collections.abc import Iterator
 from contextlib import contextmanager
 from pathlib import Path
 
-from sqlalchemy import Column, Connection, Table, create_engine, event
+from sqlalchemy import Connection, create_engine, event
 from sqlalchemy.orm import Session, sessionmaker
-from sqlalchemy.schema import CreateColumn
 
-from .errors import ConfigurationError
 from .models import Base
-
-
-def _scalar_default(column: Column[object]) -> str | None:
-    """The column's default as SQL, when it is a plain value.
-
-    Only scalars: a callable default is Python running at INSERT time and has
-    no meaning in a DDL statement, so it cannot stand in for the rows that
-    already exist.
-    """
-    default = column.default
-    value = getattr(default, "arg", None) if default is not None else None
-    if value is None or callable(value):
-        return None
-    if isinstance(value, bool):
-        return "1" if value else "0"
-    if isinstance(value, int | float):
-        return str(value)
-    if isinstance(value, str):
-        escaped = value.replace("'", "''")
-        return f"'{escaped}'"
-    return None
 
 
 class Database:
@@ -101,77 +78,19 @@ class Database:
         self._read_sessions = sessionmaker(bind=self._read_engine, expire_on_commit=False)
 
     def create_schema(self) -> None:
+        """Create the tables the models describe, and nothing else.
+
+        This is how tests and a fresh `--data-dir` get a database. It is not
+        the deployment path — that is `tubedepth migrate`, which is the only
+        thing allowed to change a schema (rule 6 of `docs/shared-postgres.md`).
+
+        It used to also repair: add columns and indexes that appeared after a
+        file was created. That closed a real gap while there was no migration
+        tool, and it is now the gap — a boot that adds a column leaves
+        `alembic_version` untouched, so the next upgrade tries to add a column
+        that is already there.
+        """
         Base.metadata.create_all(self._engine)
-        self._repair_existing_tables()
-
-    def _repair_existing_tables(self) -> None:
-        """Add columns that appeared after this file was first created.
-
-        `create_all` only creates tables it does not find. A table that exists
-        but has fallen behind the model is left exactly as it is, and the gap
-        surfaces as `table jobs has no column named api_key_id` at the first
-        INSERT — inside a worker, long after the change that caused it. There
-        is no migration tool here yet, so this closes the one case that keeps
-        happening: a nullable column added to a table someone already has.
-
-        Anything else is refused by name rather than half-applied. A NOT NULL
-        column with no default cannot be filled in for rows that predate it,
-        and guessing a value is worse than saying which column is missing.
-        """
-        # One connection for the whole repair. Every transaction here is
-        # IMMEDIATE, so a second connection reflecting the schema would hold
-        # the write lock while this one waits for it — a self-inflicted
-        # `database is locked` that only appears once the file already exists.
-        with self._engine.begin() as connection:
-            for table in Base.metadata.sorted_tables:
-                rows = connection.exec_driver_sql(f"PRAGMA table_info({table.name})").fetchall()
-                existing = {row[1] for row in rows}
-                for column in table.columns:
-                    if column.name in existing:
-                        continue
-                    self._add_column(connection, table, column)
-
-            # Indexes have the same gap as columns and hide it better: an index
-            # added after a database exists never lands on it, nothing errors,
-            # and the only symptom is a query plan nobody looks at. The claim
-            # went back to a full table scan on the working database while
-            # every test asserted it used an index.
-            existing_indexes = {
-                row[1]
-                for row in connection.exec_driver_sql(
-                    "SELECT type, name FROM sqlite_master WHERE type = 'index'"
-                ).fetchall()
-            }
-            for table in Base.metadata.sorted_tables:
-                for index in table.indexes:
-                    if index.name not in existing_indexes:
-                        index.create(bind=connection)
-
-    def _add_column(self, connection: Connection, table: Table, column: Column[object]) -> None:
-        """Add one column to a table that already exists.
-
-        The subtlety that broke this once: SQLAlchemy's `default` is applied by
-        Python at INSERT and is invisible to `ALTER TABLE`, while SQLite
-        refuses `ADD COLUMN ... NOT NULL` outright unless the statement carries
-        a default of its own. Checking `column.default` therefore let a
-        required column through the guard and fail on the statement — and since
-        this runs when the database is opened, the process then refused to
-        start at all.
-
-        So a scalar default is rendered into the statement, which also fills it
-        in for the rows that predate the column. Anything else — a callable
-        default, or no default — cannot be filled in for existing rows, and
-        guessing a value is worse than naming the column that needs a hand.
-        """
-        literal = _scalar_default(column)
-        if not column.nullable and literal is None and column.server_default is None:
-            raise ConfigurationError(
-                "database schema is behind the code and cannot be repaired automatically: "
-                f"{table.name}.{column.name} is required and has no default"
-            )
-        definition = CreateColumn(column).compile(bind=self._engine)
-        clause = f" DEFAULT {literal}" if literal is not None and not column.nullable else ""
-        connection.exec_driver_sql(f"ALTER TABLE {table.name} ADD COLUMN {definition}{clause}")
 
     @contextmanager
     def session(self, *, readonly: bool = False) -> Iterator[Session]:
