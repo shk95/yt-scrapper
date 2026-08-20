@@ -20,42 +20,7 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
-### Changed
-
-- **The boot path issues no DDL any more (#14).** `_database()`, which every
-  CLI entry point goes through, used to call `create_schema()` — a
-  convenience while this owned a SQLite file. On a database shared with other
-  services that is rule 6 of `docs/shared-postgres.md`, and it silently broke
-  migrations: a boot that added a column left `alembic_version` untouched, so
-  the next `alembic upgrade` tried to add a column that was already there.
-  `Database.create_schema()` still exists — it is how tests and a fresh
-  `--data-dir` get a database — but it now only creates what is missing; the
-  column and index repair it used to do is gone, because `tubedepth migrate`
-  now covers the same gap and keeps `alembic_version` honest while doing it.
-  The only schema path is `tubedepth migrate`.
-
-### Fixed
-
-- **`prune` refuses to sweep a payload store whose index has no rows at all.**
-  The orphan sweep decides by absence — a payload no artifact row points at is
-  rubbish — and that inference inverts silently when the index is empty:
-  every file is an orphan and the whole store is deleted while the log reads
-  like a successful sweep. It is also exactly what a half-finished database
-  cutover looks like, with `TUBEDEPTH_DATABASE_URL` moved to a fresh instance
-  and `TUBEDEPTH_DATA_DIR` still holding the payloads the old index knew about.
-  Refusing costs one command; guessing wrong costs every observation ever
-  collected, and no re-collection recovers a view count from three weeks ago.
-  A store that genuinely has no index passes `--sweep-without-an-index`.
-- **`GET /v1/artifacts/{digest}` no longer blames retention for bytes it cannot
-  find.** The message asserted "it has aged out of retention" unconditionally,
-  including for an observation two days old under a thirty-day policy. It now
-  offers both explanations — retention, or an index separated from its payload
-  store — and says when the observation was made.
-- **The API answers what `docs/api.md` already said it answers (#21).** A
-  rejection FastAPI raises before a route runs now carries the documented
-  `error` shape rather than `detail`; `UnavailableError` is 404 `unavailable`
-  and `ConfigurationError` 503 `not_configured` instead of 500; and `limit` is
-  declared 1–500 in the OpenAPI schema and refused outside it, not clamped.
+## [1.0.0] - 2026-08-21
 
 ### Added
 
@@ -127,7 +92,6 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
   carrying thirty ids on its `ExecStart`. A list that cannot be read is refused
   rather than treated as empty.
 
-### Added
 
 - **`tubedepth pause` and `tubedepth resume`.** The same row `PATCH
   /v1/control` writes, without needing the API — which was the wrong thing to
@@ -228,7 +192,65 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
   than dropped, because silently ignoring a typo behaves exactly like the
   version that read nothing at all.
 
+### Changed
+
+- **The boot path issues no DDL any more (#14).** `_database()`, which every
+  CLI entry point goes through, used to call `create_schema()` — a
+  convenience while this owned a SQLite file. On a database shared with other
+  services that is rule 6 of `docs/shared-postgres.md`, and it silently broke
+  migrations: a boot that added a column left `alembic_version` untouched, so
+  the next `alembic upgrade` tried to add a column that was already there.
+  `Database.create_schema()` still exists — it is how tests and a fresh
+  `--data-dir` get a database — but it now only creates what is missing; the
+  column and index repair it used to do is gone, because `tubedepth migrate`
+  now covers the same gap and keeps `alembic_version` honest while doing it.
+  The only schema path is `tubedepth migrate`.
+
+### Removed
+
+- **`deploy/tubedepth-sample.{service,timer}` (#20).** Replaced by
+  `deploy/tubedepth-watch.{service,timer}`, which runs `tubedepth watch`
+  against the typed list instead of `tubedepth enqueue video.metadata
+  --from-file … --refresh` against a bare-id one. Once `watch` exists the
+  sampler pair has no recommended caller, and `decisions/003` is about exactly
+  that. The new pair is still a timer plus a one-shot, for the reason the old
+  one was. `enqueue --from-file` and the bare-id format it reads are unchanged
+  and stay — the file `watch` reads is a different file.
+- **SQLite support (#15).** The cutover completes: `Database` refuses any URL
+  that is not PostgreSQL, with one deliberate exception —
+  `tubedepth transfer --from` still accepts a SQLite source, because that is
+  what a real cutover moves data out of. `TUBEDEPTH_DATABASE_URL` has no
+  fallback any more and is required; a checkout with nothing configured now
+  gets a named refusal instead of a `var/tubedepth.db` it never asked for.
+  `psycopg[binary]` moved from an optional extra into `dependencies`.
+  Deployment units gain a mandatory `EnvironmentFile` for the URL.
+  `tool/doctor.sh`'s SQLite version check became a PostgreSQL reachability
+  check. `docs/troubleshooting.md`'s SQLite entries are kept, marked
+  historical.
+
 ### Fixed
+
+- **`prune` refuses to sweep a payload store whose index has no rows at all.**
+  The orphan sweep decides by absence — a payload no artifact row points at is
+  rubbish — and that inference inverts silently when the index is empty:
+  every file is an orphan and the whole store is deleted while the log reads
+  like a successful sweep. It is also exactly what a half-finished database
+  cutover looks like, with `TUBEDEPTH_DATABASE_URL` moved to a fresh instance
+  and `TUBEDEPTH_DATA_DIR` still holding the payloads the old index knew about.
+  Refusing costs one command; guessing wrong costs every observation ever
+  collected, and no re-collection recovers a view count from three weeks ago.
+  A store that genuinely has no index passes `--sweep-without-an-index`.
+- **`GET /v1/artifacts/{digest}` no longer blames retention for bytes it cannot
+  find.** The message asserted "it has aged out of retention" unconditionally,
+  including for an observation two days old under a thirty-day policy. It now
+  offers both explanations — retention, or an index separated from its payload
+  store — and says when the observation was made.
+- **The API answers what `docs/api.md` already said it answers (#21).** A
+  rejection FastAPI raises before a route runs now carries the documented
+  `error` shape rather than `detail`; `UnavailableError` is 404 `unavailable`
+  and `ConfigurationError` 503 `not_configured` instead of 500; and `limit` is
+  declared 1–500 in the OpenAPI schema and refused outside it, not clamped.
+
 
 - **The cache key no longer ignores half its inputs.** A source's parameters —
   a listing's `limit`, a comment harvest's `sort`, a transcript's language
@@ -272,28 +294,6 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
   table does stay behind, and the next `tubedepth migrate` then fails with
   `duplicate column name` — see `docs/troubleshooting.md`, which says how to
   tell whether the answer is `--stamp` or an upgrade.
-
-### Removed
-
-- **`deploy/tubedepth-sample.{service,timer}` (#20).** Replaced by
-  `deploy/tubedepth-watch.{service,timer}`, which runs `tubedepth watch`
-  against the typed list instead of `tubedepth enqueue video.metadata
-  --from-file … --refresh` against a bare-id one. Once `watch` exists the
-  sampler pair has no recommended caller, and `decisions/003` is about exactly
-  that. The new pair is still a timer plus a one-shot, for the reason the old
-  one was. `enqueue --from-file` and the bare-id format it reads are unchanged
-  and stay — the file `watch` reads is a different file.
-- **SQLite support (#15).** The cutover completes: `Database` refuses any URL
-  that is not PostgreSQL, with one deliberate exception —
-  `tubedepth transfer --from` still accepts a SQLite source, because that is
-  what a real cutover moves data out of. `TUBEDEPTH_DATABASE_URL` has no
-  fallback any more and is required; a checkout with nothing configured now
-  gets a named refusal instead of a `var/tubedepth.db` it never asked for.
-  `psycopg[binary]` moved from an optional extra into `dependencies`.
-  Deployment units gain a mandatory `EnvironmentFile` for the URL.
-  `tool/doctor.sh`'s SQLite version check became a PostgreSQL reachability
-  check. `docs/troubleshooting.md`'s SQLite entries are kept, marked
-  historical.
 
 ## [0.1.0] - 2026-08-19
 
@@ -359,5 +359,6 @@ for. Not yet exercised under sustained load; see the honest limits in the
   longer reaped as dead and retried.
 - The query indexes the plan specified and nobody had added.
 
-[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/slopindustries/yt-scrapper/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/slopindustries/yt-scrapper/releases/tag/v0.1.0

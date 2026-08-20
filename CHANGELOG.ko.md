@@ -17,37 +17,7 @@
 
 ## [Unreleased]
 
-### Changed
-
-- **부팅 경로가 더 이상 DDL을 내지 않는다 (#14).** 모든 CLI 진입점이 거치는
-  `_database()`는 `create_schema()`를 호출했는데, 이것은 이 프로젝트가 SQLite 파일을
-  독점하던 시절의 편의 기능이었다. 다른 서비스와 공유하는 데이터베이스에서는
-  `docs/shared-postgres.md`의 규정 6번이 이를 금지하고, 조용히 migration을 깨기도
-  했다 — 컬럼을 추가하는 부팅이 `alembic_version`은 건드리지 않고 지나가서, 다음
-  `alembic upgrade`가 이미 있는 컬럼을 다시 만들려 했다. `Database.create_schema()`는
-  여전히 존재한다 — 테스트와 새 `--data-dir`가 데이터베이스를 얻는 방법이다 — 하지만
-  이제는 없는 것만 만든다. 예전에 하던 컬럼·인덱스 보수는 사라졌는데, 같은 공백을
-  `tubedepth migrate`가 이제 메우면서 `alembic_version`도 정확하게 유지하기 때문이다.
-  유일한 스키마 경로는 `tubedepth migrate`다.
-
-### Fixed
-
-- **`prune`은 행이 하나도 없는 index로는 payload store를 sweep하지 않고 거부한다.** orphan
-  sweep은 부재로 판단한다 — artifact 행이 가리키지 않는 payload는 쓰레기다 — 그리고 그 추론은
-  index가 비었을 때 조용히 뒤집힌다. 모든 파일이 orphan이 되고, 로그는 정상적인 sweep처럼
-  읽히는 동안 store 전체가 지워진다. 이것은 데이터베이스 컷오버가 절반만 끝난 모습이기도 하다.
-  `TUBEDEPTH_DATABASE_URL`은 새 인스턴스로 옮겼고 `TUBEDEPTH_DATA_DIR`에는 옛 index가 알던
-  payload가 그대로 남아 있는 상태다. 거부는 운영자에게 명령 하나를 물리지만, 잘못 추측하면
-  지금까지 수집한 모든 관측을 잃고 3주 전 조회수는 어떤 재수집으로도 돌아오지 않는다.
-  index가 정말로 없는 store는 `--sweep-without-an-index`를 쓴다.
-- **`GET /v1/artifacts/{digest}`가 찾지 못한 바이트를 retention 탓으로 단정하지 않는다.**
-  30일 정책 아래 이틀 된 관측에도 "retention을 지나 사라졌다"고 단언하고 있었다. 이제 두 가지
-  설명을 모두 제시하고 — retention이거나, index가 payload store와 분리됐거나 — 관측 시각을
-  함께 말한다.
-- **API가 `docs/api.ko.md`가 이미 말하고 있던 대로 답한다 (#21).** 라우트가 실행되기 전에
-  FastAPI가 거부하는 요청도 `detail`이 아니라 문서화된 `error` 모양으로 나오고,
-  `UnavailableError`는 404 `unavailable`, `ConfigurationError`는 503 `not_configured`가 됐으며,
-  `limit`은 OpenAPI 스키마에 1–500으로 선언되어 범위 밖이면 잘리지 않고 거부된다.
+## [1.0.0] - 2026-08-21
 
 ### Added
 
@@ -103,7 +73,6 @@
   커맨드라인에도 두는 것이고, 뒤는 한 줄에 하나씩 타깃을 읽어서 스케줄이 `ExecStart`에 id 서른
   개를 싣는 대신 목록 파일을 가리키게 한다. 읽을 수 없는 목록은 빈 목록으로 취급하지 않고 거부한다.
 
-### Added
 
 - **`tubedepth pause`와 `tubedepth resume`.** `PATCH /v1/control`이 쓰는 것과 같은 행을 API 없이
   건드린다 — API에 의존하는 것이 잘못이었다. API가 죽어 있거나 애초에 설치되지 않았다면, 워커는
@@ -175,7 +144,55 @@
   쿠키 jar를 가리키면 워커가 모든 추출에 실어 보낸다. 경로가 잘못되면 조용히 버리지 않고 시작할 때
   거부한다 — 오타를 무시하는 것은 아무것도 안 읽던 예전 동작과 정확히 같기 때문이다.
 
+### Changed
+
+- **부팅 경로가 더 이상 DDL을 내지 않는다 (#14).** 모든 CLI 진입점이 거치는
+  `_database()`는 `create_schema()`를 호출했는데, 이것은 이 프로젝트가 SQLite 파일을
+  독점하던 시절의 편의 기능이었다. 다른 서비스와 공유하는 데이터베이스에서는
+  `docs/shared-postgres.md`의 규정 6번이 이를 금지하고, 조용히 migration을 깨기도
+  했다 — 컬럼을 추가하는 부팅이 `alembic_version`은 건드리지 않고 지나가서, 다음
+  `alembic upgrade`가 이미 있는 컬럼을 다시 만들려 했다. `Database.create_schema()`는
+  여전히 존재한다 — 테스트와 새 `--data-dir`가 데이터베이스를 얻는 방법이다 — 하지만
+  이제는 없는 것만 만든다. 예전에 하던 컬럼·인덱스 보수는 사라졌는데, 같은 공백을
+  `tubedepth migrate`가 이제 메우면서 `alembic_version`도 정확하게 유지하기 때문이다.
+  유일한 스키마 경로는 `tubedepth migrate`다.
+
+### Removed
+
+- **`deploy/tubedepth-sample.{service,timer}` (#20).** `deploy/tubedepth-watch.{service,timer}`가
+  대신한다. bare-id 목록에 대고 `tubedepth enqueue video.metadata --from-file … --refresh`를
+  돌리던 것이, 타입 붙은 목록에 대고 `tubedepth watch`를 돌리는 것으로 바뀌었다. `watch`가 생긴
+  뒤로 샘플러 짝에는 권장할 만한 호출자가 없고, `decisions/003`이 말하는 것이 정확히 그 상황이다.
+  새 짝도 예전과 같은 이유로 여전히 타이머 + one-shot이다. `enqueue --from-file`과 그것이 읽는
+  bare-id 형식은 그대로 남는다 — `watch`가 읽는 파일은 다른 파일이다.
+- **SQLite 지원 (#15).** 컷오버가 완료됐다: `Database`는 PostgreSQL이 아닌 URL을 전부
+  거부한다. 단 하나 의도된 예외는 `tubedepth transfer --from`인데, 실제 컷오버가 데이터를
+  옮겨오는 곳이 SQLite이기 때문이다. `TUBEDEPTH_DATABASE_URL`에는 더 이상 대체 경로가
+  없고 필수다 — 아무것도 설정하지 않은 체크아웃은 이제 묻지도 않은 `var/tubedepth.db`
+  대신 이름이 붙은 거부를 받는다. `psycopg[binary]`는 선택 extra에서 `dependencies`로
+  옮겼다. 배포 유닛들은 그 URL을 위한 필수 `EnvironmentFile`을 갖는다. `tool/doctor.sh`의
+  SQLite 버전 확인은 PostgreSQL 접속 확인이 됐다. `docs/troubleshooting.md`의 SQLite
+  항목들은 지우지 않고 역사로 표시해 남겼다.
+
 ### Fixed
+
+- **`prune`은 행이 하나도 없는 index로는 payload store를 sweep하지 않고 거부한다.** orphan
+  sweep은 부재로 판단한다 — artifact 행이 가리키지 않는 payload는 쓰레기다 — 그리고 그 추론은
+  index가 비었을 때 조용히 뒤집힌다. 모든 파일이 orphan이 되고, 로그는 정상적인 sweep처럼
+  읽히는 동안 store 전체가 지워진다. 이것은 데이터베이스 컷오버가 절반만 끝난 모습이기도 하다.
+  `TUBEDEPTH_DATABASE_URL`은 새 인스턴스로 옮겼고 `TUBEDEPTH_DATA_DIR`에는 옛 index가 알던
+  payload가 그대로 남아 있는 상태다. 거부는 운영자에게 명령 하나를 물리지만, 잘못 추측하면
+  지금까지 수집한 모든 관측을 잃고 3주 전 조회수는 어떤 재수집으로도 돌아오지 않는다.
+  index가 정말로 없는 store는 `--sweep-without-an-index`를 쓴다.
+- **`GET /v1/artifacts/{digest}`가 찾지 못한 바이트를 retention 탓으로 단정하지 않는다.**
+  30일 정책 아래 이틀 된 관측에도 "retention을 지나 사라졌다"고 단언하고 있었다. 이제 두 가지
+  설명을 모두 제시하고 — retention이거나, index가 payload store와 분리됐거나 — 관측 시각을
+  함께 말한다.
+- **API가 `docs/api.ko.md`가 이미 말하고 있던 대로 답한다 (#21).** 라우트가 실행되기 전에
+  FastAPI가 거부하는 요청도 `detail`이 아니라 문서화된 `error` 모양으로 나오고,
+  `UnavailableError`는 404 `unavailable`, `ConfigurationError`는 503 `not_configured`가 됐으며,
+  `limit`은 OpenAPI 스키마에 1–500으로 선언되어 범위 밖이면 잘리지 않고 거부된다.
+
 
 - **캐시 키가 더 이상 자기 입력의 절반을 무시하지 않는다.** 소스의 파라미터 — 리스팅의 `limit`,
   댓글 수집의 `sort`, 자막의 언어 우선순위, 번들의 parts — 가 생성 시점에 고정된 채 fingerprint에
@@ -208,23 +225,6 @@
   붙여주므로 돌고 있는 배포가 깨지지는 않는다. 다만 Alembic 버전 테이블은 뒤처지고, 다음
   `tubedepth migrate`가 `duplicate column name`으로 실패한다 — `--stamp`가 답인지 upgrade가
   답인지 구분하는 방법은 `docs/troubleshooting.md`에 있다.
-
-### Removed
-
-- **`deploy/tubedepth-sample.{service,timer}` (#20).** `deploy/tubedepth-watch.{service,timer}`가
-  대신한다. bare-id 목록에 대고 `tubedepth enqueue video.metadata --from-file … --refresh`를
-  돌리던 것이, 타입 붙은 목록에 대고 `tubedepth watch`를 돌리는 것으로 바뀌었다. `watch`가 생긴
-  뒤로 샘플러 짝에는 권장할 만한 호출자가 없고, `decisions/003`이 말하는 것이 정확히 그 상황이다.
-  새 짝도 예전과 같은 이유로 여전히 타이머 + one-shot이다. `enqueue --from-file`과 그것이 읽는
-  bare-id 형식은 그대로 남는다 — `watch`가 읽는 파일은 다른 파일이다.
-- **SQLite 지원 (#15).** 컷오버가 완료됐다: `Database`는 PostgreSQL이 아닌 URL을 전부
-  거부한다. 단 하나 의도된 예외는 `tubedepth transfer --from`인데, 실제 컷오버가 데이터를
-  옮겨오는 곳이 SQLite이기 때문이다. `TUBEDEPTH_DATABASE_URL`에는 더 이상 대체 경로가
-  없고 필수다 — 아무것도 설정하지 않은 체크아웃은 이제 묻지도 않은 `var/tubedepth.db`
-  대신 이름이 붙은 거부를 받는다. `psycopg[binary]`는 선택 extra에서 `dependencies`로
-  옮겼다. 배포 유닛들은 그 URL을 위한 필수 `EnvironmentFile`을 갖는다. `tool/doctor.sh`의
-  SQLite 버전 확인은 PostgreSQL 접속 확인이 됐다. `docs/troubleshooting.md`의 SQLite
-  항목들은 지우지 않고 역사로 표시해 남겼다.
 
 ## [0.1.0] - 2026-08-19
 
@@ -278,5 +278,6 @@
 - 워커가 실행 중 리스를 갱신한다. 긴 댓글 수집이 죽은 것으로 회수되어 재시도되던 문제.
 - 계획서에 있었으나 아무도 넣지 않았던 조회 인덱스.
 
-[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v0.1.0...HEAD
+[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.0...HEAD
+[1.0.0]: https://github.com/slopindustries/yt-scrapper/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/slopindustries/yt-scrapper/releases/tag/v0.1.0
