@@ -117,7 +117,7 @@ ALTER ROLE tubedepth_runtime IN DATABASE :database SET transaction_timeout = '60
 ALTER ROLE tubedepth_runtime  IN DATABASE :database SET TimeZone = 'UTC';
 ALTER ROLE tubedepth_migrator IN DATABASE :database SET TimeZone = 'UTC';
 
--- Rule 4: connection budget. deploy/service-manifest.yaml declares 32 for
+-- Rule 4: connection budget. service-db.json (repository root) declares 32 for
 -- this service — that ceiling is what the fleet was asked for (#26) and
 -- granted; raising it further is a fleet-level decision, not something this
 -- service's own pool arithmetic gets to change unilaterally (docs/status.md's

@@ -52,7 +52,7 @@ EnvironmentFile=%h/.config/tubedepth/worker.env
 # The write-engine connection pool scales 1:1 with this number (database.py's
 # Database, sized by cli.work off --concurrency), and this service's
 # PostgreSQL connection budget is 32, granted by the fleet on request (#26,
-# deploy/service-manifest.yaml, docs/shared-postgres.md rule 4) specifically
+# service-db.json, docs/shared-postgres.md rule 4) specifically
 # so 6 fits: total = 2C + 13 = 25 at C=6, leaving a margin of 7 against 32.
 # Raising this past 6 buys nothing (past 6 the bottleneck moves to YouTube's
 # side, not this worker's) and raising the budget past 32 is not this

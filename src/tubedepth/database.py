@@ -15,12 +15,12 @@ from .models import Base
 # docs/shared-postgres.md rule 4: the connection budget is a number written
 # down, not an assertion, and it is cluster-wide (roles and max_connections
 # are cluster-global even though each service now has its own database) —
-# `deploy/service-manifest.yaml` declares 32 as the ceiling this service was
-# granted by the fleet on request (#26) (also `CONNECTION LIMIT 32` on
-# `tubedepth_runtime` in deploy/postgres-bootstrap.sql, so a miscount here is
-# caught by the database itself rather than trusted). Sizing a pool bigger
-# than what fits inside that 32 is not this module's call to make — see
-# `deploy/service-manifest.yaml` for why `TUBEDEPTH_CONCURRENCY`'s deployed
+# `service-db.json` declares 32 as the ceiling this service was granted by the
+# fleet on request (#26) (also `CONNECTION LIMIT 32` on `tubedepth_runtime` in
+# deploy/postgres-bootstrap.sql, so a miscount here is caught by the database
+# itself rather than trusted). Sizing a pool bigger than what fits inside that
+# 32 is not this module's call to make — see `service-db.json` and
+# docs/status.md's "규정 4의 항별 공식" for why `TUBEDEPTH_CONCURRENCY`'s deployed
 # default is 6, the AIMD controller's measured useful ceiling, not raised to
 # whatever the pool math would otherwise support.
 #
@@ -40,13 +40,13 @@ from .models import Base
 # each wait roughly one session's hold time behind the one before it — real
 # under load, not merely a thread-count guess. That is why the pool now scales
 # with concurrency at all; it is not a reason to deploy above the AIMD
-# controller's measured useful ceiling of 6 (see `deploy/service-manifest.yaml`
-# and `docs/status.md`) — past that the bottleneck is YouTube's side, not this
+# controller's measured useful ceiling of 6 (see `service-db.json` and
+# `docs/status.md`) — past that the bottleneck is YouTube's side, not this
 # pool's. The worker's read engine is not part of
 # that burst (`Worker` takes at most one readonly session at a time, in
 # `reap()`) and stays at the default ceiling regardless of concurrency.
 #
-# `deploy/service-manifest.yaml` carries the full worked arithmetic and the
+# docs/status.md's "규정 4의 항별 공식" carries the full worked arithmetic and the
 # migration-connection and rolling-deploy-overlap terms alongside it.
 _POOL_SIZE = 2
 _MAX_OVERFLOW = 2
@@ -93,7 +93,7 @@ class Database:
         is the exception: it passes a ceiling derived from `--concurrency`,
         because that process — not the API — is the one whose thread count
         actually determines how many sessions it can want at once. See
-        `deploy/service-manifest.yaml` for the accounting this feeds.
+        `service-db.json` and docs/status.md's "규정 4의 항별 공식" for the accounting this feeds.
         """
         self._url = url
         dialect = make_url(url).get_backend_name()

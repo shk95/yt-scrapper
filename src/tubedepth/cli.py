@@ -304,8 +304,7 @@ def work(
     # concurrency (`worker.py`'s `pump` and `_holding_lease`), both against
     # the write engine, so a fixed pool of 4 starves at concurrency > 2 —
     # measured directly (`docs/status.md`), not assumed from the thread
-    # count. `deploy/service-manifest.yaml` carries this term in the
-    # connection budget.
+    # count. `service-db.json` carries this term in the connection budget.
     worker = Worker(
         database=_database(data_directory, pool_size=concurrency, max_overflow=concurrency),
         payloads=_payload_store(data_directory),

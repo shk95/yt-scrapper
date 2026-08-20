@@ -164,18 +164,21 @@ def test_every_option_the_unit_passes_actually_exists(name: str) -> None:
 
 
 def test_the_connection_budget_agrees_everywhere_it_is_declared() -> None:
-    """`deploy/service-manifest.yaml`, `deploy/postgres-bootstrap.sql`'s
-    `CONNECTION LIMIT`, `deploy/tubedepth-worker.service`'s
-    `TUBEDEPTH_CONCURRENCY`, and the pool-sizing comment in `database.py` all
-    have to agree, and nothing enforced that before this test — the previous
-    survivor was `database.py` still asserting numbers a budget-raise had
-    already changed everywhere else.
+    """`service-db.json`, `deploy/postgres-bootstrap.sql`'s `CONNECTION
+    LIMIT` and session-default `ALTER ROLE ... SET` statements,
+    `deploy/tubedepth-worker.service`'s `TUBEDEPTH_CONCURRENCY`, and the
+    pool-sizing comment in `database.py` all have to agree, and nothing
+    enforced that before this test — the previous survivor was `database.py`
+    still asserting numbers a budget-raise had already changed everywhere
+    else.
 
-    Parsed from the files themselves (regex, not yaml/configparser, to avoid
-    a dependency this repository does not declare directly) so a future
+    `service-db.json` is actual JSON, so it is loaded with `json.loads`. The
+    other three files are still parsed with regex, not a SQL/systemd parser,
+    to avoid a dependency this repository does not declare directly. A future
     change to any one of them fails here rather than being caught by a human
-    rereading four files.
+    rereading five files.
     """
+    import json
     import re
 
     def find(pattern: str, text: str) -> int:
@@ -183,11 +186,13 @@ def test_the_connection_budget_agrees_everywhere_it_is_declared() -> None:
         assert match, f"pattern not found: {pattern!r}"
         return int(match[1])
 
-    deploy = Path(__file__).parent.parent / "deploy"
-    database_py = Path(__file__).parent.parent / "src" / "tubedepth" / "database.py"
+    root = Path(__file__).parent.parent
+    deploy = root / "deploy"
+    database_py = root / "src" / "tubedepth" / "database.py"
 
-    manifest_text = (deploy / "service-manifest.yaml").read_text()
-    manifest_budget = find(r"^connection_budget:\s*(\d+)", manifest_text)
+    manifest = json.loads((root / "service-db.json").read_text())
+    budget = manifest["connection_budget"]
+    manifest_budget = budget["total"]
 
     bootstrap_text = (deploy / "postgres-bootstrap.sql").read_text()
     bootstrap_limit = find(r"ALTER ROLE tubedepth_runtime CONNECTION LIMIT (\d+);", bootstrap_text)
@@ -208,6 +213,41 @@ def test_the_connection_budget_agrees_everywhere_it_is_declared() -> None:
         "TUBEDEPTH_CONCURRENCY disagrees between the worker unit "
         f"({concurrency}) and database.py's comment ({comment_concurrency})"
     )
+    assert (
+        concurrency == budget["worker"]["write_pool_size"] == budget["worker"]["write_max_overflow"]
+    ), (
+        "manifest's connection_budget.worker.write_pool_size/write_max_overflow "
+        f"must equal TUBEDEPTH_CONCURRENCY ({concurrency}); got {budget['worker']}"
+    )
+
+    # The manifest's own breakdown must add up to the total it declares — the
+    # whole point of adopting trend-radar's per-role shape (#1) was to make
+    # this checkable instead of merely asserted in a comment.
+    api, worker = budget["api"], budget["worker"]
+    api_total = (
+        api["write_pool_size"]
+        + api["write_max_overflow"]
+        + api["read_pool_size"]
+        + api["read_max_overflow"]
+    )
+    worker_total = (
+        worker["write_pool_size"]
+        + worker["write_max_overflow"]
+        + worker["read_pool_size"]
+        + worker["read_max_overflow"]
+    )
+    breakdown_total = (
+        api_total
+        + worker_total
+        + budget["workers_and_schedulers"]
+        + budget["migration"]
+        + budget["rolling_deploy_overlap"]
+        + budget["service_spare"]
+    )
+    assert breakdown_total == manifest_budget, (
+        f"connection_budget's breakdown sums to {breakdown_total}, "
+        f"not the declared total {manifest_budget}"
+    )
 
     # docs/status.md's formula: total = 2C + 13, must fit inside the budget
     # with the manifest's claimed margin.
@@ -215,3 +255,32 @@ def test_the_connection_budget_agrees_everywhere_it_is_declared() -> None:
     assert total <= manifest_budget, (
         f"2*{concurrency}+13={total} exceeds the declared budget {manifest_budget}"
     )
+
+    # session_defaults must agree with the ALTER ROLE ... SET statements
+    # deploy/postgres-bootstrap.sql actually runs for tubedepth_runtime —
+    # otherwise these are two sources of truth for the same timeouts with
+    # nothing checking they agree.
+    session_defaults = manifest["session_defaults"]
+
+    def find_setting(role: str, setting: str) -> str:
+        match = re.search(
+            rf"ALTER ROLE {role}\s+IN DATABASE :database SET {setting} = '([^']+)';",
+            bootstrap_text,
+        )
+        assert match, f"{setting} not found for {role} in postgres-bootstrap.sql"
+        return match[1]
+
+    assert (
+        find_setting("tubedepth_runtime", "statement_timeout")
+        == session_defaults["statement_timeout"]
+    )
+    assert find_setting("tubedepth_runtime", "lock_timeout") == session_defaults["lock_timeout"]
+    assert (
+        find_setting("tubedepth_runtime", "idle_in_transaction_session_timeout")
+        == session_defaults["idle_in_transaction_session_timeout"]
+    )
+    assert (
+        find_setting("tubedepth_runtime", "transaction_timeout")
+        == session_defaults["transaction_timeout"]
+    )
+    assert find_setting("tubedepth_runtime", "TimeZone") == session_defaults["timezone"]

@@ -581,14 +581,85 @@ migrator와 runtime 둘 다 `search_path = tubedepth, pg_catalog`로 둔다. `do
 | 1 owner/migrator/runtime | **적용됨(#15).** `tubedepth_owner`(NOLOGIN) / `tubedepth_migrator`(배포 전용, `GRANT tubedepth_owner`) / `tubedepth_runtime`(DML만) 3-role 분리. `migrations/env.py`가 postgres에서 `SET ROLE tubedepth_owner`; runtime의 부정 테스트 4종과 소유권 감사가 `tests/test_postgres_privileges.py` | `deploy/postgres-bootstrap.sql`, `migrations/env.py` |
 | 2 autogenerate 격리 | search_path 전략 + sentinel 증명 (위 선언, 테스트는 #15에서 실제로 작성됨). 서비스당 database 하나뿐인 정정된 구조에서는 다른 서비스의 모델을 볼 일 자체가 없어 무해하게 불필요하지만, sentinel 테스트와 `search_path` 전략은 **그대로 둔다** — 비용이 없고, `verify_placement()`와 함께 잘못된 schema뿐 아니라 잘못된 database에 연결된 경우도 잡아낸다 | `tests/test_postgres_migrations.py` |
 | 3 version table 격리 | `tubedepth.alembic_version`, 테스트가 위치를 단언. 같은 이유로 database-per-service 아래서는 불필요하지만 무해하므로 유지 | 같은 파일 |
-| 4 connection budget | **적용됨(#15, Task 7-8; 전체 브랜치 리뷰로 2026-08-20 재조정; #26으로 증액 요청, 같은 날 승인).** `Database`의 write engine은 `--concurrency`로 크기가 정해진다(`pool_size=max_overflow=TUBEDEPTH_CONCURRENCY`): `Worker.drain`이 concurrency당 claim thread 하나와 lease 갱신 thread 하나를 돌리고 둘 다 write engine에서 세션을 얻으므로, concurrency 8이면 순간적으로 최대 16개 세션이 4-연결 pool을 다툴 수 있다는 것을 실측으로 확인(16개 동시 세션 요청을 pool_size=2/max_overflow=2에 걸어 측정 — 4개씩 배치로 직렬화되고 뒤 배치일수록 앞 배치의 세션 점유 시간만큼 대기가 쌓임을 확인). AIMD 레이트 컨트롤러가 실측한 유효 상한은 6(위 §를 보라 — 6을 넘으면 병목이 이 서비스 쪽이 아니라 YouTube 쪽이다), 그리고 6은 기존 20 예산 안에 들어가지 않았다(2×6+4=16짜리 worker write만으로도 API 8과 합쳐 24). 그래서 이 서비스는 20→32 증액을 함대에 **요청했고**(#26), **승인받았다** — 실측 근거: 운영 중인 공유 서버에서 `max_connections=100`, `superuser_reserved_connections=3`, `reserved_connections=0`(가용 97); 서버의 다른 선언자는 trend-radar 하나뿐이고 그 자신의 manifest(`service-db.json`)가 12를 선언; tubedepth가 32를 쓰면 44 claimed, 53 spare. manifest 상한과 `tubedepth_runtime`의 `CONNECTION LIMIT`을 20에서 32로 올리고, `TUBEDEPTH_CONCURRENCY` 배포 기본값을 2에서 6으로 올렸다: API 8(write 4 + read 4) + worker 16(write 6×2=12 + read 4, read는 `Worker.reap`만 쓰므로 concurrency와 무관하게 기본값 유지) = 24, +migration 1, +rolling-overlap 0 = 25 ≤ 32, 여유 7. 이 값은 AIMD가 실측한 유효 상한 그 자체이지 임의로 고른 숫자가 아니다. **32를 더 올릴 근거는 없다** — 이번 요청이 상한이었고, 그 이상은 다시 함대에 요청할 사안이다 | `src/tubedepth/database.py`, `src/tubedepth/cli.py`, `deploy/service-manifest.yaml`, `deploy/postgres-bootstrap.sql`, `deploy/tubedepth-worker.service` |
+| 4 connection budget | **적용됨(#15, Task 7-8; 전체 브랜치 리뷰로 2026-08-20 재조정; #26으로 증액 요청, 같은 날 승인).** `Database`의 write engine은 `--concurrency`로 크기가 정해진다(`pool_size=max_overflow=TUBEDEPTH_CONCURRENCY`): `Worker.drain`이 concurrency당 claim thread 하나와 lease 갱신 thread 하나를 돌리고 둘 다 write engine에서 세션을 얻으므로, concurrency 8이면 순간적으로 최대 16개 세션이 4-연결 pool을 다툴 수 있다는 것을 실측으로 확인(16개 동시 세션 요청을 pool_size=2/max_overflow=2에 걸어 측정 — 4개씩 배치로 직렬화되고 뒤 배치일수록 앞 배치의 세션 점유 시간만큼 대기가 쌓임을 확인). AIMD 레이트 컨트롤러가 실측한 유효 상한은 6(위 §를 보라 — 6을 넘으면 병목이 이 서비스 쪽이 아니라 YouTube 쪽이다), 그리고 6은 기존 20 예산 안에 들어가지 않았다(2×6+4=16짜리 worker write만으로도 API 8과 합쳐 24). 그래서 이 서비스는 20→32 증액을 함대에 **요청했고**(#26), **승인받았다** — 실측 근거: 운영 중인 공유 서버에서 `max_connections=100`, `superuser_reserved_connections=3`, `reserved_connections=0`(가용 97); 서버의 다른 선언자는 trend-radar 하나뿐이고 그 자신의 저장소 루트 `service-db.json`이 12를 선언; tubedepth가 32를 쓰면 44 claimed, 53 spare. manifest 상한과 `tubedepth_runtime`의 `CONNECTION LIMIT`을 20에서 32로 올리고, `TUBEDEPTH_CONCURRENCY` 배포 기본값을 2에서 6으로 올렸다: API 8(write 4 + read 4) + worker 16(write 6×2=12 + read 4, read는 `Worker.reap`만 쓰므로 concurrency와 무관하게 기본값 유지) = 24, +migration 1, +rolling-overlap 0 = 25 ≤ 32, 여유 7. 이 값은 AIMD가 실측한 유효 상한 그 자체이지 임의로 고른 숫자가 아니다. **32를 더 올릴 근거는 없다** — 이번 요청이 상한이었고, 그 이상은 다시 함대에 요청할 사안이다. 항별 공식의 전체 산수는 아래 "규정 4의 항별 공식" 절 참고 | `src/tubedepth/database.py`, `src/tubedepth/cli.py`, `service-db.json`, `deploy/postgres-bootstrap.sql`, `deploy/tubedepth-worker.service` |
 | 5 timeout | **적용됨(#15).** `tubedepth_runtime`에 `statement_timeout`(15s), `lock_timeout`(3s, statement보다 짧게), `idle_in_transaction_session_timeout`(30s), `transaction_timeout`(60s, PG17+이므로 무조건 설정)을 role-scoped로 부여. 워커는 이미 network 호출을 transaction 밖에서 한다. 예외 하나: `tubedepth transfer`의 rollback 방향(PostgreSQL 소스 → SQLite 대상)은 `artifacts`를 한 번의 `SELECT`로 읽는데, 실제 크기의 테이블에서는 15s를 넘는다 — role의 기본값을 올리는 대신 그 read의 트랜잭션에서만 `SET LOCAL statement_timeout = '5min'`을 실행(`transfer.py`의 `_copy_table`), 다른 세션에는 영향을 주지 않는다 | `deploy/postgres-bootstrap.sql`, `src/tubedepth/transfer.py` |
 | 6 startup DDL 금지 | **적용됨.** `_database()`가 더는 `create_schema()`를 호출하지 않는다; 스키마 경로는 `tubedepth migrate` 하나뿐 | #14 |
-| 7 외부 object 일관성 | payload는 content-addressed(불변 key), write-then-record 순서로 이미 규정 형태. grace period와 reconciliation은 #17에 병합 | `payload_store.py`, #17 |
-| 8 extension 중앙 관리 | 필요 extension 없음, manifest가 선언 | manifest |
+| 7 외부 object 일관성 | payload는 content-addressed(불변 key), write-then-record 순서로 이미 규정 형태 — 같은 digest는 절대 다른 bytes로 다시 쓰지 않는다. grace period와 reconciliation은 #17에 병합. (manifest에서 옮긴 사실: 복구 단위는 database 더하기 `TUBEDEPTH_DATA_DIR/payloads` 디렉터리 **세트**이지, database 혼자가 아니다 — 백업 절차가 지켜야 하는 경계) | `payload_store.py`, #17 |
+| 8 extension 중앙 관리 | 필요 extension 없음, `service-db.json`이 선언 | `service-db.json` |
 | 9 timestamptz | **적용됨(#15).** 확인 결과 `sa.DateTime()`은 실제로 postgres에서 `timestamp without time zone`으로 렌더되고 있었다(16개 컬럼 전부, `information_schema.columns` 실측). `render_item`이 `sa.DateTime(timezone=True)`를 내보내도록 고치고, 기존 16개 `UtcDateTime` 컬럼을 `ALTER ... TYPE timestamptz USING ... AT TIME ZONE 'UTC'`로 옮기는 손으로 쓴 revision을 추가; `UtcDateTime.impl`도 `DateTime(timezone=True)`로 맞춰 autogenerate no-diff 유지 | `migrations/env.py`, `migrations/versions/20260820_55a24ac7a270_instants_are_timestamptz.py`, `tests/test_postgres_migrations.py` |
-| 10–13 cross-service 금지 (FK, 공유 테이블, cross-service SQL, cross-schema transaction) | 정정된 구조(서비스당 자기 database)에서는 금지가 아니라 **구조적으로 불가능**하다 — cross-database query는 `dblink`나 `postgres_fdw`가 필요하고, 둘 다 extension인데 규정 8이 서비스 migration의 `CREATE EXTENSION`을 금지한다. manifest가 빈 의존성을 선언하고, 규정의 감사 query가 gate로 남는다 | manifest |
+| 10–13 cross-service 금지 (FK, 공유 테이블, cross-service SQL, cross-schema transaction) | 정정된 구조(서비스당 자기 database)에서는 금지가 아니라 **구조적으로 불가능**하다 — cross-database query는 `dblink`나 `postgres_fdw`가 필요하고, 둘 다 extension인데 규정 8이 서비스 migration의 `CREATE EXTENSION`을 금지한다. manifest가 빈 의존성을 선언하고, 규정의 감사 query가 gate로 남는다. (manifest에서 옮긴 사실: `cross_service_dependencies`가 언젠가 채워지더라도, 다른 서비스의 식별자는 cross-schema FK나 JOIN이 아니라 그 서비스의 API로 검증된 평범한 값으로만 저장한다는 것이 이 항목이 비어 있는 채로 유지되는 이유다) | `service-db.json` |
 | 14 extraction test | **호스트 전환(post-release ops issue)의 통과 조건으로 편입.** 서비스당 자기 database인 정정된 구조에서는 이 테스트가 더 쉬워진다 — 이미 서비스 하나 = database 하나이므로 추출이 `pg_dump` 한 번이다 | ops issue |
+
+### 규정 4의 항별 공식
+
+`deploy/service-manifest.yaml`(YAML)이 저장소 루트의 `service-db.json`(JSON,
+trend-radar가 쓰는 형식을 그대로 채택 — `manifest_version`, role별 breakdown이
+있는 `connection_budget`)으로 옮겨가면서, 원래 YAML 주석에 있던 항별 산수 전체를
+여기로 옮겼다 — JSON에는 숫자만 남는다(주석을 못 다는 형식이라서).
+
+일반형:
+
+```
+service budget = max concurrent instances × per-instance pool ceiling
+                + worker/scheduler/batch-only connections
+                + service migration connections
+```
+
+정상 상태(steady state) — API 프로세스 1개 + worker 프로세스 1개, 각각 write engine과
+read engine을 하나씩 쥔다(`database.py`의 `Database`, 두 engine을 분리한 이유는 그
+docstring 참고). 두 프로세스는 더 이상 대칭이 아니다 — worker의 write engine pool은
+고정 기본값이 아니라 `TUBEDEPTH_CONCURRENCY`로 크기가 정해진다(`cli.work`,
+`database.py`의 `_write_pool_kwargs`):
+
+```
+API:    write engine (2+2=4) + read engine (2+2=4)                =  8
+worker: write engine (concurrency+concurrency) + read engine (4)
+        = TUBEDEPTH_CONCURRENCY × 2 + 4
+        = 6 × 2 + 4 (deploy/tubedepth-worker.service의 기본값 6)   = 16
+steady-state total = 8 + 16                                       = 24
+```
+
+worker의 write engine 항이 concurrency를 필요로 하는 이유: `Worker.drain`이
+concurrency당 claim thread 하나와 lease 갱신 thread 하나를 돌리고(`worker.py`의
+`pump`와 `_holding_lease`) 둘 다 write engine에서 세션을 얻으므로, 순간적으로 최대
+2 × concurrency개의 동시 요구가 write engine에 걸린다 — pool을 넘는 요구가 batch로
+직렬화되는 것을 실측으로 확인한 결과이지, thread 수에서 추론만 한 것이 아니다. read
+engine은 한 번에 세션 하나만 쓰므로(`Worker.reap`) 기본 상한을 유지한다.
+
+worker/scheduler/batch-only 연결 — worker는 이미 위 두 프로세스 중 하나로 카운트됐고,
+이 서비스는 별도의 scheduler나 batch 프로세스를 돌리지 않으므로 이 항은 0.
+
+service migration 연결 — `tubedepth migrate`(`migrations/env.py`)가
+`poolclass=pool.NullPool`로 배포 중에만 정확히 연결 하나를 연다. +1.
+
+rolling-deploy overlap — 이 서비스는 그냥 systemd user unit이고(`Restart=on-failure`
+/`always`, blue-green이나 rolling 전략이 아님) 옛 인스턴스와 새 인스턴스가 이
+database에 동시에 붙는 일이 없다. +0 — 생략하지 않고 적어 두는 이유는, 이 배포
+형태를 바꾸는 사람이 steady-state 항을 조용히 두 배로 만들지 않고 이 줄을 갱신할
+의무를 지도록 하기 위해서다.
+
+`C = TUBEDEPTH_CONCURRENCY`로 접으면 이 서비스가 실제로 따르는 공식은
+`total = 2C + 13`(API의 고정 8, worker의 고정 read측 4, +migration 1, +overlap 0,
+그리고 worker의 write측 2C):
+
+```
+total = 2 × 6 + 13 = 25
+```
+
+25 ≤ 32 — 이 32는 `deploy/postgres-bootstrap.sql`이 `tubedepth_runtime`에 거는
+`CONNECTION LIMIT`이기도 해서, 이 산수가 틀리면 database 자신이 잡아낸다(산수만
+믿는 게 아니다). 남는 7이 규정 4가 요구하는 운영상 안전 여유다. 32는 함대가 이
+서비스에 승인한 상한이지(#26), 이 서비스 자신의 pool 산수가 올릴 수 있는 숫자가
+아니다 — 그 이상은 다시 함대에 요청할 사안이다.
+
+`service-db.json`의 `connection_budget`은 이 산수의 **숫자만** 담는다 —
+`api`(write_pool_size 2, write_max_overflow 2, read_pool_size 2,
+read_max_overflow 2), `worker`(write_pool_size 6, write_max_overflow 6,
+read_pool_size 2, read_max_overflow 2), `workers_and_schedulers`(0),
+`migration`(1), `rolling_deploy_overlap`(0), `service_spare`(7), `total`(32).
+이 절의 항 이름과 JSON의 필드 이름은 1:1로 대응한다 — 다음에 API 인스턴스 수나
+rolling-deploy 전략을 바꾸는 사람은 이 절을 고치고 JSON의 대응 필드를 갱신하면
+된다.
 
 **#14 — 부팅 경로에서 DDL 제거.** `Database.create_schema()`는 `Base.metadata.create_all`만
 호출한다. 예전에는 여기서 컬럼·인덱스 보수(`_repair_existing_tables`)까지 했는데, 이는
@@ -707,7 +778,7 @@ IMMEDIATE를 "belt and braces"로 부르지 않는다 — guarded UPDATE와 rowc
 호스트 allow-list에 더해 `TUBEDEPTH_TEST_POSTGRES_URL`이 실제로 이름하는
 포트로 좁혔다.
 
-**Manifest**: [`deploy/service-manifest.yaml`](../deploy/service-manifest.yaml).
+**Manifest**: [`service-db.json`](../service-db.json).
 
 
 ### Measured 2026-08-20: what the first PostgreSQL run found
