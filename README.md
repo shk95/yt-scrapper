@@ -138,8 +138,8 @@ exposing it.
 | [`docs/releasing.md`](docs/releasing.md) | how a release is cut |
 | [`AGENTS.md`](AGENTS.md) | how to work in this repository |
 
-`README.md`, `docs/api.md` and `CHANGELOG.md` are the originals; the `.ko.md`
-files beside them are translations. Everything else is Korean.
+`README.md`, `docs/api.md`, `CHANGELOG.md` and `AGENTS.md` are the originals;
+the `.ko.md` files beside them are translations. Everything else is Korean.
 
 ## Versioning
 
