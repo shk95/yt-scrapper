@@ -433,6 +433,13 @@ CI service container are the whole cost.
 
 ### The order this is being done in
 
+The boundary in this list is **v1.0.0**: the point where real operation is
+possible and the PostgreSQL migration is complete. dev merges to master there
+and the merge is tagged. Release means code complete — this host's actual
+cutover is post-release ops, tracked as its own issue.
+
+Before the tag, in order:
+
 1. ~~**Check it runs here**~~ — done 2026-08-20, and it found two things. See
    below.
 2. ~~**Stop reconnecting six times a minute**~~ — done. The worker was a poll
@@ -444,17 +451,74 @@ CI service container are the whole cost.
 4. **[#15](https://github.com/slopindustries/yt-scrapper/issues/15)**, the
    cutover, deciding
    [#16](https://github.com/slopindustries/yt-scrapper/issues/16) along the way
-   rather than after it.
-5. **[#13](https://github.com/slopindustries/yt-scrapper/issues/13)** (a
+   rather than after it — both now shaped by the fleet regulation (see "규정
+   적용" below).
+5. **The release gate** (its own milestone): a `watch` subcommand — scheduled
+   collection by channel, search keyword and trending region; the API docs
+   made a perfect, mechanically-enforced match; a Docker image with a compose
+   example; then the v1.0.0 cut itself.
+
+After the tag:
+
+6. **Cut this host over** — postgres URL, watch units replacing the sampler,
+   watchlist format migration.
+7. **[#13](https://github.com/slopindustries/yt-scrapper/issues/13)** (a
    bundle's parts bypass every lane but its own). Independent of the database
    and currently dormant — nothing runs bundles, since the sampler collects
    `video.metadata` only. It wakes the moment anything does.
-6. **[#3](https://github.com/slopindustries/yt-scrapper/issues/3) route A**,
-   the delta layer, where the accumulated history pays.
+8. **[#3](https://github.com/slopindustries/yt-scrapper/issues/3) route A**,
+   the delta layer, where the accumulated history pays. Then #17, #18, #1 as
+   the verification backlog.
 
 #13 sits after the migration rather than before it because it is dormant while
 SQLite-shaped decisions keep accruing — 2026-08-20 alone added four, one of
 them the deadlock.
+
+
+### 규정 적용 — 함대 PostgreSQL 규정을 이 저장소가 지키는 방법
+
+2026-08-20에 [`docs/shared-postgres.md`](shared-postgres.md)가 **함대 공통
+규정으로 교체**되었다. 이전 내용(이 저장소가 직접 쓴 10개 규칙)은 규정의
+상위집합으로 흡수됐고, 저장소별 적용 방식은 규정이 아니라 여기에 적는다 —
+규정 사본은 함대 전체에서 byte 단위로 같아야 개정을 그대로 덮어쓸 수 있다.
+
+**Alembic 전략 선언 (규정 2의 예외 조항 사용).** 규정의 기본은 명시적 schema
+qualification(`MetaData(schema=…)` + `include_schemas=True` + allowlist +
+`version_table_schema`)이다. 이 저장소는 **search_path 전략**을 쓴다: 모델과
+migration은 schema-unqualified이고, migration 세션이 `search_path`를
+명시적으로 잡는다. 이유는 둘이다 — (1) 기존 5개 revision이 unqualified로
+작성되어 있고 qualification 소급은 이미 적용된 체인을 다시 쓰는 일이다,
+(2) SQLite가 테스트 백엔드로 남는데 SQLite에는 schema 개념이 달라
+qualification이 `schema_translate_map` 기계를 요구한다. 규정이 요구하는
+**동등 안전성 증명**은 `tests/test_postgres_migrations.py`의 foreign-schema
+sentinel 테스트다: `foreign_sentinel.must_survive`가 있는 database에서
+autogenerate를 돌려 sentinel이 diff에 나타나지 않음을 CI가 매번 확인한다.
+이 증명이 깨지는 날 전략을 규정 기본형으로 바꾼다.
+
+또한 이 저장소는 그 조합의 실패를 실측으로 안다: `search_path` 밑에서
+`version_table_schema`를 **함께** 쓰면 리플렉션이 schema `None`을 보고해
+`drop_table('alembic_version')`이 생성된다 (아래 "Measured 2026-08-20" 절).
+규정 기본형에서는 `include_schemas=True`라 리플렉션이 실제 schema 이름을
+보고하므로 이 버그가 없다 — 두 전략은 섞으면 안 되고, 이 저장소는 섞지 않는다.
+
+**규칙별 상태.**
+
+| 규정 | 이 저장소 | 어디서 |
+| --- | --- | --- |
+| 0 schema+owner | `tubedepth` schema; 3-role 분리는 #15에서 bootstrap 재작성 | `deploy/postgres-bootstrap.sql` |
+| 1 owner/migrator/runtime | **미적용 — #15의 작업.** env.py가 postgres에서 `SET ROLE tubedepth_owner` + 명시적 `search_path` | #15 |
+| 2 autogenerate 격리 | search_path 전략 + sentinel 증명 (위 선언) | `tests/test_postgres_migrations.py` |
+| 3 version table 격리 | `tubedepth.alembic_version`, 테스트가 위치를 단언 | 같은 파일 |
+| 4 connection budget | manifest에 상한 20 선언; pool 수치는 #15에서 코드로 고정 후 여기 기록 | `deploy/service-manifest.yaml` |
+| 5 timeout | **미적용 — #15에서 bootstrap에 추가.** 워커는 이미 network 호출을 transaction 밖에서 한다 | #15 |
+| 6 startup DDL 금지 | **#14가 정확히 이것** | #14 |
+| 7 외부 object 일관성 | payload는 content-addressed(불변 key), write-then-record 순서로 이미 규정 형태. grace period와 reconciliation은 #17에 병합 | `payload_store.py`, #17 |
+| 8 extension 중앙 관리 | 필요 extension 없음, manifest가 선언 | manifest |
+| 9 timestamptz | `UtcDateTime`이 naive를 거부. **단, postgres에서 `timestamptz`로 렌더되는지 #15에서 확인 필요** — 현재 `sa.DateTime()`은 timezone 없는 type이 된다 | #15 |
+| 10–13 cross-service 금지 | 단일 서비스라 위반 대상 없음. manifest가 빈 의존성을 선언하고, 규정의 감사 query가 gate | manifest |
+| 14 extraction test | **호스트 전환(post-release ops issue)의 통과 조건으로 편입** | ops issue |
+
+**Manifest**: [`deploy/service-manifest.yaml`](../deploy/service-manifest.yaml).
 
 
 ### Measured 2026-08-20: what the first PostgreSQL run found

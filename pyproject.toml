@@ -70,7 +70,14 @@ target-version = "py312"
 # gets edited to match current conventions stops being evidence of what was
 # actually decided. ruff formats Python blocks inside Markdown, so it has to be
 # told.
-extend-exclude = ["docs/plan.md"]
+#
+# `docs/shared-postgres.md` is excluded for a related but distinct reason: it is
+# a verbatim copy of a fleet-wide regulation several repositories hold. The point
+# of a copy is that it can be replaced wholesale when the regulation is amended,
+# and a local reformat makes every future replacement a diff to reconcile. How
+# *this* repository applies the regulation is written in docs/status.md instead,
+# which is where a local edit belongs.
+extend-exclude = ["docs/plan.md", "docs/shared-postgres.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
