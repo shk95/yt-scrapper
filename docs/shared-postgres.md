@@ -49,21 +49,47 @@ PostgreSQL server / cluster
 - **권장한다**: 기본 선택이며, 다르게 할 때 근거를 기록해야 하는 규칙
 - **예외**: 책임자, 만료일, 제거 계획을 기록하고 승인한 한시적 결정
 
-각 서비스는 다음 정보를 저장소의 운영 문서나 machine-readable manifest로 관리해야 한다.
+각 서비스는 다음 정보를 저장소 root의 `service-db.json`(JSON, machine-readable manifest)으로 관리해야 한다. 파일명과 위치 자체가 규칙이다 — 서비스마다 다른 이름이나 형식을 고르면 fleet 전체를 훑는 감사가 매번 손으로 파일을 읽어야 한다.
 
-```yaml
-service: orders
-database: orders
-schema: orders
-roles:
-  owner: orders_owner
-  migrator: orders_migrator
-  runtime: orders_runtime
-cross_service_dependencies: []
-required_extensions: []
-external_object_stores: []
-connection_budget: 20
+`connection_budget`은 총합 정수 하나가 아니라 role·인스턴스 종류별 내역을 담은 object로 선언한다. 정수 하나는 주장일 뿐이지만, 내역은 규칙 4의 예산 공식과 대조해 합이 맞는지 검사할 수 있다.
+
+```json
+{
+  "manifest_version": 1,
+  "service": "orders",
+  "database": "orders",
+  "schema": "orders",
+  "roles": {
+    "owner": "orders_owner",
+    "migrator": "orders_migrator",
+    "runtime": "orders_runtime"
+  },
+  "cross_service_dependencies": [],
+  "required_extensions": [],
+  "external_object_stores": [],
+  "connection_budget": {
+    "total": 20,
+    "runtime": {
+      "max_instances_including_rollout": 2,
+      "pool_size": 4,
+      "max_overflow": 2
+    },
+    "workers_and_schedulers": 2,
+    "migration": 1,
+    "rolling_deploy_overlap": 2,
+    "service_spare": 3
+  },
+  "session_defaults": {
+    "timezone": "UTC",
+    "statement_timeout": "...",
+    "lock_timeout": "...",
+    "idle_in_transaction_session_timeout": "...",
+    "transaction_timeout": "..."
+  }
+}
 ```
+
+`session_defaults`는 규칙 5에서 요구하는 timeout류를 manifest에도 선언해 실제 설정과 대조할 수 있게 하는 자리다. 위 예시의 timeout 값은 자리표시자일 뿐 정책이 아니다 — 실제 값은 규칙 5가 말하는 대로 endpoint와 workload의 SLO에 따라 서비스마다 다르게 정한다.
 
 ---
 
