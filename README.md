@@ -109,25 +109,37 @@ There is no SQLite fallback: every unit refuses to start without a working
 the roles and schema that URL points at, and `docs/shared-postgres.md` is the
 regulation behind it.
 
-The third is optional and off by default: `tubedepth-sample.timer` re-collects
-a list of videos every hour, forcing past the freshness window so that each
-sweep records a new observation. That is what turns `GET /v1/artifacts` from a
-cache into a history you can differentiate — and it only accumulates in real
-time, so it is worth starting before anything needs it.
+The third is optional and off by default: `tubedepth-watch.timer` runs
+`tubedepth watch` every hour, which queues a whole watch list forced past the
+freshness window so that each pass records a new observation. That is what
+turns `GET /v1/artifacts` from a cache into a history you can differentiate —
+and it only accumulates in real time, so it is worth starting before anything
+needs it.
 
 ```sh
 mkdir -p ~/.config/tubedepth
 cp deploy/watchlist.example.txt ~/.config/tubedepth/watchlist.txt
-$EDITOR ~/.config/tubedepth/watchlist.txt        # one video id per line
-cp deploy/tubedepth-sample.* ~/.config/systemd/user/
+$EDITOR ~/.config/tubedepth/watchlist.txt        # one typed directive per line
+cp deploy/tubedepth-watch.* ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now tubedepth-sample.timer
+systemctl --user enable --now tubedepth-watch.timer
 ```
 
-**Size the list deliberately.** Every line is one forced collection per firing,
-out of the same per-address budget everything else draws on. Thirty videos
-hourly is about one percent of the measured throughput; the behaviour of this
-system under sustained load well above that has not been measured.
+The list is typed — `video`, `channel`, `search` or `trending`, then the
+target — so one schedule collects a fixed set of videos, a channel's uploads, a
+trend keyword and a region's chart at once. A directive that is not one of the
+four is refused naming the line, because a typo that quietly collects nothing
+is what a watch list is worst at showing you. Where there is no timer — compose
+— `tubedepth watch --every 3600` stays resident instead.
+
+**Size the list deliberately, and note the four types do not cost the same.**
+A `video` line is one forced collection per firing, out of the same per-address
+budget everything else draws on; thirty of them hourly is about one percent of
+the measured throughput. A `channel`, `search` or `trending` line fans out to a
+`video.metadata` job per video it finds, up to `TUBEDEPTH_LISTING_LIMIT`
+(default 100) — **one such line can be a hundred collections, not one.**
+`deploy/watchlist.example.txt` has the arithmetic. The behaviour of this system
+under sustained load well above that has not been measured.
 
 Splitting the API from the worker is not a matter of taste. yt-dlp extraction
 blocks and holds memory; run them together and one comment harvest sets the p99

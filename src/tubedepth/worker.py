@@ -555,12 +555,15 @@ class Worker:
         The follow-up kind is validated against the registry first, so a typo
         costs nothing rather than queueing a hundred jobs that can only fail.
 
-        A forced listing does not force its follow-ups. Propagating would
-        multiply one flag into a collection per video on every sweep, out of
-        the one per-address budget everything else draws on, and nothing needs
-        that yet — the sampler polls a fixed list of videos directly. Left
-        undecided on purpose rather than settled by whichever behaviour fell
-        out; the watch list in the trend work is what should settle it.
+        A forced listing does not force its follow-ups, and that is now
+        decided rather than merely undecided (#20). `tubedepth watch` forces
+        `refresh=True` on the listing job itself, so the enumeration is re-run
+        every pass and a channel's new videos appear; it deliberately does not
+        propagate the flag, so the per-video follow-ups stay cache-governed.
+        Propagating would multiply one flag into a collection per video on
+        every sweep — up to TUBEDEPTH_LISTING_LIMIT of them per line — out of
+        the one per-address budget everything else draws on, to re-collect
+        videos whose freshness window has not run out.
         """
         source = self._registry.get(kind)
         with self._database.session() as session:

@@ -102,23 +102,32 @@ SQLite 대체 경로는 없다: 모든 유닛이 정상 동작하는 `TUBEDEPTH_
 거부한다. 그 URL이 가리키는 role과 schema를 만드는 것이 `deploy/postgres-bootstrap.sql`이고,
 그 뒤의 규정이 `docs/shared-postgres.md`다.
 
-셋째는 선택이고 기본적으로 꺼져 있다. `tubedepth-sample.timer`는 영상 목록을 매시간 다시
-수집하되 신선도 기간을 강제로 넘겨서, 매 회차가 새 관측을 기록하게 한다. `GET /v1/artifacts`를
-캐시가 아니라 미분 가능한 이력으로 만드는 것이 이것이고, 이력은 실시간으로만 쌓이므로 필요해지기
-전에 시작해두는 편이 낫다.
+셋째는 선택이고 기본적으로 꺼져 있다. `tubedepth-watch.timer`가 매시간 `tubedepth watch`를
+돌려서 watch list 전체를 큐에 넣되 신선도 기간을 강제로 넘겨서, 매 회차가 새 관측을 기록하게
+한다. `GET /v1/artifacts`를 캐시가 아니라 미분 가능한 이력으로 만드는 것이 이것이고, 이력은
+실시간으로만 쌓이므로 필요해지기 전에 시작해두는 편이 낫다.
 
 ```sh
 mkdir -p ~/.config/tubedepth
 cp deploy/watchlist.example.txt ~/.config/tubedepth/watchlist.txt
-$EDITOR ~/.config/tubedepth/watchlist.txt        # 한 줄에 영상 id 하나
-cp deploy/tubedepth-sample.* ~/.config/systemd/user/
+$EDITOR ~/.config/tubedepth/watchlist.txt        # 한 줄에 타입 붙은 directive 하나
+cp deploy/tubedepth-watch.* ~/.config/systemd/user/
 systemctl --user daemon-reload
-systemctl --user enable --now tubedepth-sample.timer
+systemctl --user enable --now tubedepth-watch.timer
 ```
 
-**목록 크기는 의도해서 정한다.** 한 줄이 발화마다 강제 수집 한 건이고, 나머지 전부가 쓰는 것과
-같은 per-address 예산에서 나간다. 영상 30개를 시간당 도는 것은 측정된 처리량의 약 1%다. 그보다
-한참 위의 지속 부하에서 이 시스템이 어떻게 움직이는지는 측정된 바 없다.
+목록에는 타입이 붙는다 — `video`, `channel`, `search`, `trending` 다음에 타깃 — 그래서 스케줄
+하나가 고정된 영상 묶음, 채널 업로드, 트렌드 키워드, 지역 차트를 한꺼번에 수집한다. 넷 중 하나가
+아닌 directive는 줄 번호를 짚어 거부한다. 조용히 아무것도 수집하지 않는 오타야말로 watch list가
+가장 못 보여주는 실패이기 때문이다. 타이머가 없는 환경 — compose — 에서는
+`tubedepth watch --every 3600`이 상주한다.
+
+**목록 크기는 의도해서 정하고, 네 타입의 값이 같지 않다는 것을 안다.** `video` 한 줄은 발화마다
+강제 수집 한 건이고, 나머지 전부가 쓰는 것과 같은 per-address 예산에서 나간다. 30줄을 시간당
+도는 것은 측정된 처리량의 약 1%다. `channel`·`search`·`trending` 한 줄은 찾아낸 영상마다
+`video.metadata` 잡으로 퍼지며, `TUBEDEPTH_LISTING_LIMIT`(기본 100)까지 간다 — **그런 줄 하나가
+수집 한 건이 아니라 백 건일 수 있다.** 산수는 `deploy/watchlist.example.txt`에 있다. 그보다 한참
+위의 지속 부하에서 이 시스템이 어떻게 움직이는지는 측정된 바 없다.
 
 API와 워커를 나눈 이유는 취향이 아니다. yt-dlp 추출은 블로킹이고 메모리를 쓰므로,
 같이 돌리면 댓글 수집 하나가 `GET /v1/jobs/{job_id}`의 p99를 결정하고 yt-dlp 크래시가

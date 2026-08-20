@@ -1,19 +1,21 @@
-# The schedule behind tubedepth-sample.service.
+# The schedule behind tubedepth-watch.service.
 #
 # Hourly, because that is the resolution a view-count series needs to show a
 # video moving while it still matters, and because thirty videos an hour is
 # around one percent of the measured throughput ceiling — small enough not to
 # compete with ordinary collection. Both halves of that arithmetic are in
-# docs/status.md; change the watch list size and the cadence together.
+# docs/status.md; change the watch list size and the cadence together, and
+# remember that a `channel`, `search` or `trending` line is worth up to
+# TUBEDEPTH_LISTING_LIMIT video lines rather than one.
 #
-# Install it with the service beside it; see tubedepth-sample.service.
+# Install it with the service beside it; see tubedepth-watch.service.
 
 [Unit]
-Description=Sample the watched videos hourly
+Description=Queue the watch list hourly
 
 [Timer]
 # Not at boot exactly: the worker and the API start at the same moment, and a
-# sweep queued before the worker is up just sits there looking like a stall.
+# pass queued before the worker is up just sits there looking like a stall.
 OnBootSec=5min
 OnUnitActiveSec=1h
 

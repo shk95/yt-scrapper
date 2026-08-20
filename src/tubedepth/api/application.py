@@ -197,7 +197,7 @@ class ArtifactPayloadView(BaseModel):
     # How many observations recorded these exact bytes, and when the first of
     # them was. A digest is not one observation: the store is content-addressed,
     # so a video whose counts have not moved records a new row against the same
-    # digest — half the rows in a store the sampler has been running against.
+    # digest — half the rows in a store a watch list has been running against.
     # Answering with only the newest `fetched_at` misdates every older
     # duplicate, and the span is the more useful fact anyway: nothing changed
     # between these two times.

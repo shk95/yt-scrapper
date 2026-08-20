@@ -47,6 +47,19 @@
 
 ### Added
 
+- **`tubedepth watch <목록>` — 채널·트렌드 키워드·지역을 한 스케줄에서 수집한다 (#20).** 목록에는
+  타입이 붙는다: 한 줄에 `video`·`channel`·`search`·`trending` 중 하나와 타깃 하나. 한 줄에 id
+  하나짜리 목록으로는 이것을 표현할 수 없었다 — `UCxxx`, `kpop debut`, `KR`은 문자열만 보고
+  구분되지 않는 서로 다른 타깃 타입이다. 그래서 타입을 적게 했고, 넷 중 하나가 아닌 directive는
+  조용히 아무것도 수집하지 않는 대신 줄 번호를 짚어 거부한다. 큐에 넣는 모든 잡은 줄별 플래그
+  없이 신선도 기간을 강제로 넘긴다. listing 줄은 다시 열거되어 새 영상이 나타나고, 거기서 퍼져
+  나가는 영상별 후속 잡은 캐시가 관장하는 상태로 남는다. **`channel`·`search`·`trending` 한 줄은
+  수집 한 건이 아니라 `TUBEDEPTH_LISTING_LIMIT`건까지다** — 산수는
+  `deploy/watchlist.example.txt`에 있다. `deploy/tubedepth-watch.timer`가 매시간 돌리고,
+  타이머가 없는 환경에서는 `--every 초`가 상주하며 매 회차마다 목록을 다시 읽으므로 편집에
+  재시작이 필요 없다. 첫 회차가 목록을 읽지 못하면 0이 아닌 코드로 끝나고, 이후 회차의 실패는
+  로그만 남기고 건너뛴다 — 편집하다 만 파일이 수집을 멈추는 원인이 되어서는 안 되기 때문이다.
+
 - **`tubedepth transfer --from <url> --to <url>`, 그리고 그 뒤의 `tubedepth.transfer.transfer()`.**
   #15와 #24는 PostgreSQL 컷오버의 데이터 이동을 "데이터를 옮긴다. 여섯 테이블." 한 줄로만
   명시하는데, 지금까지 이 저장소에는 한 데이터베이스에서 다른 데이터베이스로 행을 옮긴 코드가
@@ -66,6 +79,8 @@
   list를 강제로 다시 수집한다. 목록은 `~/.config/tubedepth/watchlist.txt`이고 한 줄에 영상 id
   하나이며, 형식은 `deploy/watchlist.example.txt`에 있다. 켜지 않으면 동작하지 않는다.
   velocity는 두 관측의 차이이고 관측은 실시간으로만 쌓이므로, 필요해지기 전에 시작할 값어치가 있다.
+  **이 릴리스가 나가기 전에 위의 `tubedepth watch`와 `tubedepth-watch` 유닛 짝으로 대체됐다** —
+  존재 이유는 그대로이고, 형식과 유닛이 바뀌었다.
 - **`tubedepth enqueue --refresh`와 `--from-file`.** 앞은 `POST /v1/jobs`가 가진 강제 수집을
   커맨드라인에도 두는 것이고, 뒤는 한 줄에 하나씩 타깃을 읽어서 스케줄이 `ExecStart`에 id 서른
   개를 싣는 대신 목록 파일을 가리키게 한다. 읽을 수 없는 목록은 빈 목록으로 취급하지 않고 거부한다.
@@ -178,6 +193,12 @@
 
 ### Removed
 
+- **`deploy/tubedepth-sample.{service,timer}` (#20).** `deploy/tubedepth-watch.{service,timer}`가
+  대신한다. bare-id 목록에 대고 `tubedepth enqueue video.metadata --from-file … --refresh`를
+  돌리던 것이, 타입 붙은 목록에 대고 `tubedepth watch`를 돌리는 것으로 바뀌었다. `watch`가 생긴
+  뒤로 샘플러 짝에는 권장할 만한 호출자가 없고, `decisions/003`이 말하는 것이 정확히 그 상황이다.
+  새 짝도 예전과 같은 이유로 여전히 타이머 + one-shot이다. `enqueue --from-file`과 그것이 읽는
+  bare-id 형식은 그대로 남는다 — `watch`가 읽는 파일은 다른 파일이다.
 - **SQLite 지원 (#15).** 컷오버가 완료됐다: `Database`는 PostgreSQL이 아닌 URL을 전부
   거부한다. 단 하나 의도된 예외는 `tubedepth transfer --from`인데, 실제 컷오버가 데이터를
   옮겨오는 곳이 SQLite이기 때문이다. `TUBEDEPTH_DATABASE_URL`에는 더 이상 대체 경로가

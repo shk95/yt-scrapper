@@ -9,7 +9,9 @@ from __future__ import annotations
 import os
 import subprocess
 import sys
-from collections.abc import Iterator
+import threading
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -291,6 +293,270 @@ def test_enqueue_with_no_targets_at_all_is_refused(tmp_path: Path) -> None:
     assert result.exit_code != 0
     assert "no targets" in str(result.exception), result.output
     assert queued_targets(tmp_path) == []
+
+
+def queued_jobs(data_directory: Path) -> list[tuple[str, str, str | None, bool]]:
+    """Every queued job as (kind, target, follow_up_kind, refresh).
+
+    `queued_targets` above answers the question the `enqueue` tests ask — did
+    this reach the queue at all. A watch list's whole point is that one line
+    means a particular kind with a particular fan-out, so these tests need the
+    other three columns as well.
+    """
+    try:
+        with _database(data_directory).session(readonly=True) as session:
+            return [
+                (job.kind, job.target, job.follow_up_kind, job.refresh)
+                for job in session.scalars(select(Job).order_by(Job.created_at, Job.identifier))
+            ]
+    except DBAPIError:
+        return []
+
+
+def written_watchlist(tmp_path: Path, body: str) -> Path:
+    path = tmp_path / "watchlist.txt"
+    path.write_text(body, encoding="utf-8")
+    return path
+
+
+def until(condition: Callable[[], bool], seconds: float = 10.0) -> bool:
+    """Wait for something a background thread is doing, or give up and say so.
+
+    Bounded rather than unbounded, the same shape `tests/test_worker.py` uses:
+    a watch loop that never comes round again should fail this file in seconds
+    with an assertion, not hang the run.
+    """
+    deadline = time.monotonic() + seconds
+    while time.monotonic() < deadline:
+        if condition():
+            return True
+        time.sleep(0.01)
+    return False
+
+
+def test_watch_queues_one_job_per_line_with_the_kind_that_line_names(tmp_path: Path) -> None:
+    """The release gate in one test: a channel, a keyword and a region together.
+
+    Three listing kinds in one schedule is the thing a bare-id list could not
+    express — `UCxxx`, `kpop debut` and `KR` are three target types that no
+    inspection of the string separates reliably. Each carries
+    `video.metadata` as its follow-up, because a listing on its own enumerates
+    and collects nothing.
+    """
+    watchlist = written_watchlist(
+        tmp_path,
+        "channel @director_pihyunjung\nsearch 케이팝 데뷔\ntrending KR\n",
+    )
+
+    result = runner.invoke(
+        application, ["watch", str(watchlist), "--data-dir", str(migrated(tmp_path))]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert queued_jobs(tmp_path) == [
+        ("channel.videos", "@director_pihyunjung", "video.metadata", True),
+        ("search.videos", "케이팝 데뷔", "video.metadata", True),
+        ("trending.videos", "KR", "video.metadata", True),
+    ]
+
+
+def test_every_job_watch_queues_is_forced_past_the_freshness_window(tmp_path: Path) -> None:
+    """The listing lines too, which is the half that is easy to get wrong.
+
+    Without the flag on the listing job the enumeration is answered from the
+    cache and the sweep records nothing at all — not even the fan-out, since
+    a cached listing still fans out but to the videos it held when it was
+    collected. There is no per-line flag: a watch pass that did not force
+    would be a watch pass that stops collecting after its first hour.
+    """
+    watchlist = written_watchlist(tmp_path, "video dQw4w9WgXcQ\nchannel @director_pihyunjung\n")
+
+    result = runner.invoke(
+        application, ["watch", str(watchlist), "--data-dir", str(migrated(tmp_path))]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert [job[3] for job in queued_jobs(tmp_path)] == [True, True]
+    assert result.output.count("(forced)") == 2, result.output
+
+
+def test_a_video_line_is_collected_directly_and_fans_out_to_nothing(tmp_path: Path) -> None:
+    """A video is already the thing being collected, so a follow-up would be a
+    second collection of the same video on every pass."""
+    watchlist = written_watchlist(tmp_path, "video dQw4w9WgXcQ\n")
+
+    result = runner.invoke(
+        application, ["watch", str(watchlist), "--data-dir", str(migrated(tmp_path))]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert queued_jobs(tmp_path) == [("video.metadata", "dQw4w9WgXcQ", None, True)]
+
+
+def test_a_watch_list_that_is_not_there_is_refused_rather_than_watching_nothing(
+    tmp_path: Path,
+) -> None:
+    """The same rule `enqueue --from-file` follows, at the command that a timer
+    actually fires: a list somebody moved must be a failure, not an empty pass
+    reported as a success every hour while the history stops moving.
+
+    Against a migrated data directory, unlike the `enqueue` test this mirrors.
+    `watch` opens the database before it reads the list — it holds one
+    connection across every pass rather than one per pass — so an unmigrated
+    directory would be refused for that instead, and this test would pass
+    without ever reaching the list.
+    """
+    result = runner.invoke(
+        application, ["watch", str(tmp_path / "gone.txt"), "--data-dir", str(migrated(tmp_path))]
+    )
+
+    assert result.exit_code != 0
+    assert "gone.txt" in result.output + str(result.exception), (
+        "the refusal did not name the list it could not read"
+    )
+    assert queued_targets(tmp_path) == []
+
+
+def test_an_unknown_directive_refuses_the_whole_pass_and_queues_nothing(tmp_path: Path) -> None:
+    """A typo costs the pass, not the lines above it.
+
+    Queueing the good lines and refusing the rest is the harder failure to
+    see: the jobs that did run make the pass look like it worked, so the
+    missing kind is only noticed by whoever goes looking for data that was
+    never collected.
+    """
+    watchlist = written_watchlist(tmp_path, "video dQw4w9WgXcQ\nchannels @director_pihyunjung\n")
+
+    result = runner.invoke(
+        application, ["watch", str(watchlist), "--data-dir", str(migrated(tmp_path))]
+    )
+
+    assert result.exit_code != 0
+    assert "line 2" in str(result.exception), result.output
+    assert queued_targets(tmp_path) == []
+
+
+def test_a_watch_list_with_every_line_commented_out_is_refused(tmp_path: Path) -> None:
+    """A list that parses to nothing is a watcher watching nothing, which is
+    the failure the required argument is shaped against — reached the other
+    way round."""
+    watchlist = written_watchlist(tmp_path, "# channel @director_pihyunjung\n\n")
+
+    result = runner.invoke(
+        application, ["watch", str(watchlist), "--data-dir", str(migrated(tmp_path))]
+    )
+
+    assert result.exit_code != 0
+    assert "nothing to watch" in str(result.exception), result.output
+    assert queued_targets(tmp_path) == []
+
+
+def _watching(
+    tmp_path: Path,
+    watchlist: Path,
+    *,
+    every: str,
+    stop: threading.Event,
+    monkeypatch: pytest.MonkeyPatch,
+) -> threading.Thread:
+    """`watch --every` on a thread, so the test can drive its stop event.
+
+    The event is injected in place of `_stopping_on_signals`, which installs
+    signal handlers and so only works on the main thread. That is the same
+    seam `Worker.serve` already has — the worker tests pass their own event
+    too — and everything under test here still goes through the real command.
+    """
+    monkeypatch.setattr("tubedepth.cli._stopping_on_signals", lambda: stop)
+    thread = threading.Thread(
+        target=lambda: runner.invoke(
+            application,
+            ["watch", str(watchlist), "--data-dir", str(tmp_path), "--every", every],
+        ),
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
+def test_watch_with_an_interval_stays_up_and_queues_the_list_again(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--every` is the compose case: no timer, so the process is the schedule.
+
+    Queueing the list twice is the whole claim — a one-shot that happened to
+    exit zero would satisfy every other test in this file.
+    """
+    watchlist = written_watchlist(tmp_path, "video dQw4w9WgXcQ\n")
+    migrated(tmp_path)
+    stop = threading.Event()
+
+    thread = _watching(tmp_path, watchlist, monkeypatch=monkeypatch, every="0.01", stop=stop)
+    try:
+        assert until(lambda: len(queued_targets(tmp_path)) >= 2), (
+            "the second pass never ran, so `--every` did not stay resident"
+        )
+    finally:
+        stop.set()
+        thread.join(timeout=10)
+
+    assert not thread.is_alive(), "watch did not return after its stop event was set"
+
+
+def test_a_stop_while_watch_is_waiting_is_not_made_to_wait_out_the_interval(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`stop.wait(every)`, not `time.sleep(every)`.
+
+    A sleeping watcher would still shut down — the unit allows time for it —
+    but every stop would cost a full interval, and an hourly interval makes
+    that indistinguishable from a hang.
+    """
+    watchlist = written_watchlist(tmp_path, "video dQw4w9WgXcQ\n")
+    migrated(tmp_path)
+    stop = threading.Event()
+
+    thread = _watching(tmp_path, watchlist, monkeypatch=monkeypatch, every="3600", stop=stop)
+    assert until(lambda: queued_targets(tmp_path) != []), "the first pass never ran"
+
+    started = time.monotonic()
+    stop.set()
+    thread.join(timeout=10)
+    elapsed = time.monotonic() - started
+
+    assert not thread.is_alive(), "watch did not return after its stop event was set"
+    assert elapsed < 5.0, f"an hourly interval made a stop take {elapsed:.1f}s"
+
+
+def test_a_list_that_breaks_after_the_first_pass_is_logged_and_the_watcher_survives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A half-finished edit must not be what stops collection.
+
+    The first pass fails fast — that is a misconfiguration, and the operator
+    is watching. A later one is almost always someone editing the file, and
+    exiting there would leave nothing collecting until somebody noticed. So
+    the pass is skipped, loudly, and the next one reads the file again — which
+    is also how an edit takes effect without a restart.
+    """
+    watchlist = written_watchlist(tmp_path, "video dQw4w9WgXcQ\n")
+    migrated(tmp_path)
+    stop = threading.Event()
+
+    thread = _watching(tmp_path, watchlist, monkeypatch=monkeypatch, every="0.01", stop=stop)
+    try:
+        assert until(lambda: queued_targets(tmp_path) != []), "the first pass never ran"
+        watchlist.write_text("channels @director_pihyunjung\n", encoding="utf-8")
+        broken = len(queued_targets(tmp_path))
+        assert until(lambda: len(queued_targets(tmp_path)) == broken), "the queue never settled"
+        assert thread.is_alive(), "a broken edit killed the watcher instead of being logged"
+
+        watchlist.write_text("video dQw4w9WgXcQ\nvideo 9bZkp7q19f0\n", encoding="utf-8")
+        assert until(lambda: "9bZkp7q19f0" in queued_targets(tmp_path)), (
+            "the list was not read again, so an edit needs a restart"
+        )
+    finally:
+        stop.set()
+        thread.join(timeout=10)
 
 
 def test_cancelling_a_queued_job_from_the_command_line(tmp_path: Path) -> None:

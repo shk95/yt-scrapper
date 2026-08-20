@@ -1040,7 +1040,7 @@ def test_a_shared_digest_says_how_many_observations_it_covers(
 
     Content addressing means a video whose counts have not moved records a new
     row against the same digest — which `GET /v1/artifacts` teaches readers to
-    expect and which the hourly sampler produces by design. On the working
+    expect and which the hourly watch pass produces by design. On the working
     store 756 of 1,556 rows share a digest, one of them across nine
     observations spanning eight hours.
 

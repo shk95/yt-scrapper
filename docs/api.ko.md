@@ -497,7 +497,7 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/artifacts/b9f4c0e2...
 
 **digest 하나는 관측 하나가 아니다.** 저장소는 내용 주소 방식이라, 수치가 움직이지 않은 영상은
 같은 digest에 새 행을 남긴다 — digest가 같으면 "아무것도 안 변했다"로 읽히는 이유가 그것이고,
-샘플러가 설계상 만들어내는 상황이다. `observations`는 이 바이트를 공유하는 행의 수이고
+매시간 도는 watch 회차가 설계상 만들어내는 상황이다. `observations`는 이 바이트를 공유하는 행의 수이고
 `first_fetched_at`은 그중 가장 이른 것이다. 둘을 합치면 쓸모 있는 진술이 된다: 이 payload가
 그 기간 동안 이 영상의 모습이었다. `fetched_at`은 가장 최근이다.
 

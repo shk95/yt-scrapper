@@ -54,6 +54,23 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Added
 
+- **`tubedepth watch <list>` — one schedule that collects by channel, by trend
+  keyword and by region (#20).** The list is typed: `video`, `channel`,
+  `search` or `trending`, then the target, one directive per line. A bare-id
+  list could not express this — `UCxxx`, `kpop debut` and `KR` are three target
+  types that no inspection of the string separates — so the type is written
+  down, and a directive that is not one of the four is refused naming the line
+  rather than quietly collecting nothing. Every job it queues is forced past
+  the freshness window, with no per-line flag: a listing line is re-enumerated
+  so new videos appear, while the per-video follow-ups it fans out to stay
+  cache-governed. **A `channel`, `search` or `trending` line is up to
+  `TUBEDEPTH_LISTING_LIMIT` collections, not one** — `deploy/watchlist.example.txt`
+  has the arithmetic. `deploy/tubedepth-watch.timer` runs it hourly; `--every
+  SECONDS` stays resident instead, for the environments with no timer, and
+  re-reads the list on every pass so an edit needs no restart. A first pass
+  that cannot read its list exits non-zero; a later one is logged and skipped,
+  because a half-finished edit must not be what stops collection.
+
 - **`tubedepth transfer --from <url> --to <url>`, and `tubedepth.transfer.transfer()` behind it.**
   #15 and #24 both specify the PostgreSQL cutover's data move as one line —
   "Data across: six tables" — and until now nothing in this repository has
@@ -81,6 +98,9 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
   `deploy/watchlist.example.txt` shows the format. Off unless you enable it.
   Velocity is the difference between two observations and observations only
   accumulate in real time, so this is worth starting before anything needs it.
+  **Superseded before this release by `tubedepth watch` and the
+  `tubedepth-watch` unit pair, above** — the reason it exists is unchanged,
+  the format and the units are not.
 - **`tubedepth enqueue --refresh` and `--from-file`.** The first puts the same
   forced collection on the command line that `POST /v1/jobs` has; the second
   reads targets one per line, so a schedule points at a list instead of
@@ -235,6 +255,14 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Removed
 
+- **`deploy/tubedepth-sample.{service,timer}` (#20).** Replaced by
+  `deploy/tubedepth-watch.{service,timer}`, which runs `tubedepth watch`
+  against the typed list instead of `tubedepth enqueue video.metadata
+  --from-file … --refresh` against a bare-id one. Once `watch` exists the
+  sampler pair has no recommended caller, and `decisions/003` is about exactly
+  that. The new pair is still a timer plus a one-shot, for the reason the old
+  one was. `enqueue --from-file` and the bare-id format it reads are unchanged
+  and stay — the file `watch` reads is a different file.
 - **SQLite support (#15).** The cutover completes: `Database` refuses any URL
   that is not PostgreSQL, with one deliberate exception —
   `tubedepth transfer --from` still accepts a SQLite source, because that is

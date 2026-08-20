@@ -349,7 +349,7 @@ way that nothing else would tell you.
 | unit | state |
 | --- | --- |
 | `tubedepth-worker` | enabled and running |
-| `tubedepth-sample.timer` | enabled, hourly |
+| `tubedepth-sample.timer` | enabled, hourly — **the unit pair `deploy/` no longer has.** #20 replaced it with `tubedepth-watch.{service,timer}` and deleted the sampler pair; cutting this host over is [#24](https://github.com/slopindustries/yt-scrapper/issues/24) |
 | `tubedepth-api` | **not installed** — the dashboard and every `/v1` route are reachable only by running `tubedepth serve` by hand |
 
 **The installed worker unit carries `TUBEDEPTH_LISTING_LIMIT=700`; the copy in
@@ -359,9 +359,11 @@ in full. If the API unit is installed later it **must carry the same value** —
 a different cache key than the worker records, so it stops matching what the
 worker writes while still matching rows from before the change.
 
-The sampler's watch list is `~/.config/tubedepth/watchlist.txt`: 100 video ids
-from `@director_pihyunjung`, enumerated 2026-08-20. It is operator data and
-deliberately outside the repository.
+The installed sampler's watch list is `~/.config/tubedepth/watchlist.txt`: 100
+bare video ids from `@director_pihyunjung`, enumerated 2026-08-20. It is
+operator data and deliberately outside the repository. **It is still in the
+bare-id format**, which `tubedepth watch` does not read — converting it is part
+of #24, not of #20.
 
 Store as of that day: 1,556 artifacts, 1,938 jobs, two active API keys. The
 oldest artifact is about a day old, so **nothing has reached the thirty-day
@@ -490,8 +492,8 @@ After the tag:
    extraction test is a pass condition of that issue rather than a formality.
 7. **[#13](https://github.com/slopindustries/yt-scrapper/issues/13)** (a
    bundle's parts bypass every lane but its own). Independent of the database
-   and currently dormant — nothing runs bundles, since the sampler collects
-   `video.metadata` only. It wakes the moment anything does.
+   and currently dormant — nothing runs bundles, since what this host has on
+   a schedule collects `video.metadata` only. It wakes the moment anything does.
 8. **[#3](https://github.com/slopindustries/yt-scrapper/issues/3) route A**,
    the delta layer, where the accumulated history pays. Then
    [#25](https://github.com/slopindustries/yt-scrapper/issues/25) — reading a target's history is one request per
@@ -954,10 +956,12 @@ column in a query, so an index on it would be write cost for no read.
 *A forced listing does not force its follow-ups.* `--then` turns one listing
 into a job per video, so propagating would multiply one flag into a collection
 per video on every sweep, out of the one per-address budget everything else
-draws on. Nothing needs it yet — the sampler polls a fixed list of videos
-directly — so the question is left open rather than settled by whichever
-behaviour happened to fall out. The watch list in the trend work should settle
-it, with the arithmetic in hand.
+draws on. **Settled 2026-08-21 by #20, with the arithmetic in hand:** `watch`
+forces `refresh=True` on the listing job so the enumeration is re-run and a
+channel's new videos appear, and deliberately does not propagate it, so the
+per-video follow-ups stay cache-governed. At the default 100-item cap,
+propagating would turn one `channel` line into a hundred forced collections an
+hour to re-fetch videos whose six-hour freshness window has not run out.
 
 *The migration carries a `server_default` and the model does not.* SQLite
 refuses `ADD COLUMN ... NOT NULL` outright unless the statement carries a
@@ -1133,6 +1137,9 @@ has already paid and measured. Nothing here has been paid yet.
 
 ### The sampler is a timer and a text file, not a scheduler
 
+**Superseded 2026-08-21 by `watch` — see the next section.** Kept because the
+reasoning below is why the replacement is still a timer and a text file.
+
 Nothing in this project ran periodically, so the artifact table was a time
 series with nothing taking samples. `tubedepth-sample.timer` fires
 `tubedepth enqueue video.metadata --from-file … --refresh` every hour and that
@@ -1169,6 +1176,37 @@ figure quoted here before was taken from forty-job runs and was low.
 The watch list and the cadence are still one decision and should still move
 together — the headroom is larger than it looked, not unlimited, and the
 sampler competes with every other lane user for the same per-address budget.
+
+### watch list에 타입이 붙고, 샘플러 유닛은 지웠다
+
+**결정 2026-08-21 (#20).** 릴리스 게이트가 요구하는 것은 채널·트렌드 키워드·지역을
+한 스케줄에서 수집하는 것이고, 그것을 한 줄에 id 하나짜리 목록으로는 표현할 수 없다.
+`UCxxx`, `@handle`, `kpop debut`, `KR`은 문자열만 보고 서로를 구분할 수 없다.
+
+*그래서 형식에 타입을 붙였다.* `<directive><공백><target>` 한 줄이고 directive는
+`video`·`channel`·`search`·`trending` 넷이다. 되돌리기 비싼 이유는 이 파일이 저장소
+밖 운영자 데이터라서다 — 형식을 다시 바꾸면 이미 손으로 쓴 목록을 다시 손으로 고쳐야
+한다. 알 수 없는 directive는 줄 번호를 짚어 거부한다. 아무도 보지 않는 타이머가 읽는
+파일에서 조용히 아무것도 수집하지 않는 오타가 가장 비싼 실패이기 때문이다.
+`#`는 줄 맨 앞에서만 주석이다. 검색어에 해시태그가 들어가는 것이 정상이라 인라인
+주석 문법을 두면 가장 평범한 질의가 조용히 잘린다.
+
+*`enqueue --from-file`의 bare-id 형식은 그대로 둔다.* 그쪽은 kind를 인자로 받으니
+타입이 필요 없고, 형식을 갈아엎으면 그 명령을 쓰는 것들이 같이 깨진다. 두 형식이
+공존하는 값은 치른다.
+
+*`deploy/tubedepth-sample.{service,timer}`는 지웠다.* `watch`가 생긴 뒤로 샘플러
+유닛에는 권장할 만한 호출자가 없고, 그것이 `decisions/003`이 말하는 상황 그 자체다.
+새 짝은 `tubedepth-watch.{service,timer}`이고, 여전히 타이머 + one-shot이다 —
+systemd에 이미 스케줄러가 있으므로 상주 프로세스는 두 번째 스케줄러일 뿐이다.
+`--every`는 타이머가 없는 환경(compose)을 위해 남긴다. **이 호스트에 깔린 유닛은
+아직 샘플러다.** 컷오버는 #24다.
+
+*listing 한 줄의 값은 video 한 줄의 값과 다르다.* `channel`·`search`·`trending`은
+`--then video.metadata`로 영상마다 잡을 만들므로 `TUBEDEPTH_LISTING_LIMIT`(기본 100)
+배까지 간다. 목록 크기를 정하는 사람이 이것을 모르면 열 줄짜리 목록이 시간당 1,000잡,
+측정된 ~3,100 jobs/h 천장의 3분의 1이 된다. 산수는 `deploy/watchlist.example.txt`에
+적어 뒀다.
 
 ### The dashboard reads the same API as everything else
 

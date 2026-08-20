@@ -536,7 +536,7 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/artifacts/b9f4c0e2...
 **A digest is not one observation.** The store is content-addressed, so a
 video whose counts have not moved records a new row against the same digest —
 which is what makes equal digests readable as "nothing changed", and which the
-sampler produces by design. `observations` is how many rows share these bytes
+hourly watch pass produces by design. `observations` is how many rows share these bytes
 and `first_fetched_at` is the earliest of them, so the pair says the useful
 thing: this exact payload was what the video looked like across that span.
 `fetched_at` is the most recent.

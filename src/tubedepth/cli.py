@@ -15,6 +15,7 @@ from typing import Annotated
 
 import typer
 from sqlalchemy import func, select, text
+from sqlalchemy.orm import Session
 
 from . import __version__
 from .api.application import create_application
@@ -36,9 +37,10 @@ from .services.keys import ApiKeyService
 from .settings import database_url
 from .sources import default_registry
 from .sources.innertube_sources import RECORDABLE_SURFACES, record_surface
-from .sources.registry import attempts_for
+from .sources.registry import SourceRegistry, attempts_for
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime
 from .transfer import mapped_models, transfer
+from .watchlist import read_watchlist
 from .worker import Worker
 
 logger = logging.getLogger(__name__)
@@ -75,6 +77,11 @@ def _reject_option_like(values: Sequence[str]) -> None:
 
 def _targets_from_file(path: Path) -> list[str]:
     """One target per line. Blank lines are skipped, and so are `#` comments.
+
+    This is `enqueue --from-file`'s format and only that: the kind is an
+    argument there, so a line carries a target and nothing else. It is not the
+    format `tubedepth watch` reads — that one is typed, a directive per line,
+    and lives in `watchlist.py`. Two files, two readers, on purpose.
 
     A schedule points at a file rather than carrying the list itself, because
     the list is edited far more often than whatever reads it — thirty ids on a
@@ -160,6 +167,41 @@ def _database(
     return database
 
 
+def _queue_job(
+    session: Session,
+    registry: SourceRegistry,
+    *,
+    kind: str,
+    target: str,
+    then: str | None,
+    refresh: bool,
+) -> Job:
+    """Put one job in the queue and say so on stdout.
+
+    One implementation for every command that queues, because there are two of
+    them now (`enqueue` and `watch`) and the parts worth getting wrong are the
+    same in both: which normalizer the target goes through — a channel handle
+    run through the video one is refused, a video id run through the channel
+    one is accepted and fails inside the extractor minutes later — and how many
+    attempts the job gets, which is a property of the source's cost rather than
+    of the caller. A second copy is a second place for those to drift.
+    """
+    source = registry.get(kind)
+    job = Job(
+        kind=kind,
+        target=normalize_target(source.target_type, target),
+        follow_up_kind=then,
+        refresh=refresh,
+        max_attempts=attempts_for(source),
+    )
+    session.add(job)
+    session.flush()
+    suffix = f" → {then}" if then else ""
+    forced = " (forced)" if refresh else ""
+    typer.echo(f"→ queued {job.identifier[:8]}  {kind}  {job.target}{suffix}{forced}")
+    return job
+
+
 @application.command(context_settings=TOLERATE_LEADING_DASHES)
 def enqueue(
     kind: Annotated[str, typer.Argument(help="What to collect; see `tubedepth sources`")],
@@ -199,7 +241,7 @@ def enqueue(
     if not wanted:
         raise ValidationError("no targets: name them as arguments, or point --from-file at a list")
     registry = default_registry()
-    source = registry.get(kind)
+    registry.get(kind)
     if then is not None:
         # Fail on a typo now rather than after a hundred jobs exist that can
         # only ever fail.
@@ -208,18 +250,141 @@ def enqueue(
     database = _database(data_directory)
     with database.session() as session:
         for target in wanted:
-            job = Job(
-                kind=kind,
-                target=normalize_target(source.target_type, target),
-                follow_up_kind=then,
-                refresh=refresh,
-                max_attempts=attempts_for(source),
+            _queue_job(session, registry, kind=kind, target=target, then=then, refresh=refresh)
+
+
+def _watch_pass(database: Database, registry: SourceRegistry, watchlist: Path) -> int:
+    """Read the list and queue every line of it, forced. Returns how many.
+
+    The list is re-read here rather than once at startup, so an operator
+    editing it does not have to restart anything for the next pass to pick the
+    change up. That is also why parsing lives inside the pass: a broken edit is
+    a broken pass, not a broken process.
+
+    A list that parses to nothing is refused. `watch` takes its list as a
+    required argument for the same reason — a watcher that watches nothing
+    while reporting success every hour is the failure this whole command is
+    shaped against, and a file whose lines have all been commented out is
+    exactly that.
+    """
+    directives = read_watchlist(watchlist)
+    if not directives:
+        raise ValidationError(f"nothing to watch: {watchlist} holds no directives")
+
+    # `TOLERATE_LEADING_DASHES` is deliberately not set on this command. Its
+    # only positional is a path, so nothing click parses here is a base64url
+    # id that could begin with a dash — the reason the other commands accept
+    # unknown options as arguments does not apply. The targets arrive from the
+    # file instead, where click cannot swallow them; but `channel --then
+    # video.metadata`, pasted out of an `enqueue` command line, is still a typo
+    # rather than a channel, so the shape rule `_reject_option_like` uses is
+    # applied here too — with the line number the file makes available, which
+    # is the one thing that helper cannot say.
+    for directive in directives:
+        if directive.target.startswith("--"):
+            raise ValidationError(
+                f"{watchlist} line {directive.line}: "
+                f"{directive.target!r} is an option, not a target"
             )
-            session.add(job)
-            session.flush()
-            suffix = f" → {then}" if then else ""
-            forced = " (forced)" if refresh else ""
-            typer.echo(f"→ queued {job.identifier[:8]}  {kind}  {job.target}{suffix}{forced}")
+
+    with database.session() as session:
+        for directive in directives:
+            _queue_job(
+                session,
+                registry,
+                kind=directive.kind,
+                target=directive.target,
+                then=directive.follow_up,
+                # Every watch enqueue is forced, with no per-line flag and
+                # nothing to get wrong. Without it a sweep inside the
+                # freshness window is answered from the cache and records no
+                # observation, so the series a watch list exists to build
+                # simply stops moving. On a listing this re-runs the
+                # enumeration; the per-video follow-ups it fans out to stay
+                # cache-governed, because `Worker._queue_follow_up`
+                # deliberately does not propagate the flag.
+                refresh=True,
+            )
+    return len(directives)
+
+
+@application.command()
+def watch(
+    watchlist: Annotated[
+        Path,
+        typer.Argument(
+            envvar="TUBEDEPTH_WATCHLIST",
+            help="The list of things to keep collecting; see deploy/watchlist.example.txt",
+        ),
+    ],
+    data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
+        "var"
+    ),
+    every: Annotated[
+        float,
+        typer.Option(
+            "--every",
+            envvar="TUBEDEPTH_WATCH_SECONDS",
+            help=(
+                "Stay up and queue the list again this often, in seconds. 0 queues once and exits."
+            ),
+        ),
+    ] = 0.0,
+) -> None:
+    """Queue a whole watch list, forced, once or on an interval.
+
+    The list is typed — `video`, `channel`, `search`, `trending`, one directive
+    per line — which is what lets one schedule collect by channel, by trend
+    keyword and by region at the same time. A `channel`, `search` or `trending`
+    line carries `--then video.metadata`, so it fans out to a job per video it
+    finds: one such line is up to `TUBEDEPTH_LISTING_LIMIT` collections, not
+    one. `deploy/watchlist.example.txt` has the arithmetic.
+
+    The list is a required argument rather than an option with a default,
+    because the failure worth designing against is a watcher that quietly
+    watches nothing.
+
+    Without `--every` this queues once and exits, which is what a timer wants
+    and how `deploy/tubedepth-watch.timer` runs it — systemd has a scheduler
+    already and a resident process would be a second, worse one. `--every` is
+    for the environments that do not, compose among them.
+
+    **A first pass that cannot read its list fails; a later one is logged and
+    skipped.** The two are different situations. At startup an unreadable list
+    is a misconfiguration, and exiting non-zero is how the operator finds out
+    at the moment they are watching. Once resident, the same failure is almost
+    always a half-finished edit — and killing the watcher over it would stop
+    collection until somebody noticed, which is the outcome this command
+    exists to prevent. Logged loudly every interval, with nothing queued from a
+    list that did not parse, the operator sees it and the watcher survives it.
+    """
+    configure_logging()
+    registry = default_registry()
+    database = _database(data_directory)
+
+    def sweep() -> None:
+        queued = _watch_pass(database, registry, watchlist)
+        typer.echo(f"✓ {queued} job(s) queued from {watchlist}")
+
+    if every <= 0:
+        sweep()
+        return
+
+    stop = _stopping_on_signals()
+    sweep()
+    # `stop.wait` rather than `time.sleep`, the same choice and the same reason
+    # as `Worker._wait`: the unit sends SIGINT to stop this, and a sleeping
+    # process would still shut down eventually while costing the full interval
+    # to do it — which an operator watching `systemctl stop` cannot tell from a
+    # hang.
+    while not stop.wait(every):
+        try:
+            sweep()
+        except Exception:
+            # Deliberately everything, matching `Worker.serve`. See the
+            # docstring: after the first pass, staying up and complaining
+            # beats exiting and collecting nothing.
+            logger.exception("a watch pass failed; the list is read again on the next one")
 
 
 @application.command()
@@ -341,7 +506,7 @@ def _stopping_on_signals() -> threading.Event:
 
     def stop(number: int, frame: object) -> None:
         signal.signal(number, signal.SIG_DFL)
-        logger.info("stopping after the current drain; signal again to stop now")
+        logger.info("stopping after the current pass; signal again to stop now")
         stopping.set()
 
     for number in (signal.SIGINT, signal.SIGTERM):
