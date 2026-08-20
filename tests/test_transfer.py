@@ -294,6 +294,51 @@ def test_a_target_count_that_disagrees_with_what_was_written_is_an_error(
     assert "prune" in message, "the message must warn against sweeping a half-transferred index"
 
 
+@pytest.mark.postgres
+def test_a_postgresql_source_widens_its_own_read_timeout_without_touching_the_role(
+    tmp_path: Path, database: Database
+) -> None:
+    """The rollback direction — PostgreSQL source, SQLite target — reads a
+    whole table in one `SELECT`. `tubedepth_runtime`'s role-level
+    `statement_timeout` (15s, `deploy/postgres-bootstrap.sql`) would abort
+    that on a real-sized `artifacts` table, so `_copy_table` issues a
+    transaction-scoped `SET LOCAL` before the read.
+
+    Proven at the SQL level rather than by timing out a real 15s wait: a
+    cursor-execute hook on the source's own read engine records every
+    statement `_copy_table` sends, and this asserts the widening statement
+    is one of them — and that it is a per-transaction `SET LOCAL`, which is
+    what makes it not the same thing as raising the role's default for every
+    other session sharing the credential.
+    """
+    from sqlalchemy import event
+
+    from tubedepth.transfer import _copy_table, mapped_models
+
+    with database.session() as session:
+        session.add(Job(identifier="job-one", kind="video.metadata", target="a"))
+
+    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}", allow_sqlite_source=True)
+    target.create_schema()
+
+    statements: list[str] = []
+
+    def _record(conn: object, cursor: object, statement: str, *args: object) -> None:
+        statements.append(statement)
+
+    event.listen(database._read_engine, "before_cursor_execute", _record)  # noqa: SLF001
+    try:
+        _copy_table(database, target, Job.__table__, mapped_models()["jobs"])  # type: ignore[arg-type]
+    finally:
+        event.remove(database._read_engine, "before_cursor_execute", _record)  # noqa: SLF001
+
+    timeout_statements = [s for s in statements if "statement_timeout" in s.lower()]
+    assert timeout_statements, "expected the read to widen its own statement_timeout"
+    assert all("set local" in s.lower() for s in timeout_statements), (
+        "widening must be transaction-scoped (SET LOCAL), never the role's global default"
+    )
+
+
 def test_placement_is_checked_on_both_source_and_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

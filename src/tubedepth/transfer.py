@@ -40,7 +40,7 @@ from __future__ import annotations
 from collections.abc import Mapping
 from dataclasses import dataclass
 
-from sqlalchemy import Table, func, select
+from sqlalchemy import Table, func, select, text
 from sqlalchemy.orm import Session
 
 from .database import Database
@@ -143,6 +143,27 @@ def _copy_table(source: Database, target: Database, table: Table, model: type) -
     error, not a number to print.
     """
     with source.session(readonly=True) as reader:
+        if source.dialect == "postgresql":
+            # `deploy/postgres-bootstrap.sql` sets tubedepth_runtime's
+            # statement_timeout to 15s (docs/shared-postgres.md rule 5) to
+            # protect the *shared* instance from a runaway application
+            # query — not from a deliberate, operator-run `transfer`. That
+            # matters in the rollback direction (PostgreSQL source, SQLite
+            # target, the run `docs/status.md` calls "the one someone runs
+            # while already having a bad day"): a single-`SELECT` read of a
+            # real-sized `artifacts` table takes longer than 15s and would
+            # abort every time.
+            #
+            # `SET LOCAL` rather than `ALTER ROLE`: it widens only this read,
+            # only for the length of this one transaction, and reverts the
+            # moment the transaction ends — every other session using this
+            # credential, including the application itself, keeps the 15s
+            # default that protects the rest of the fleet's connections to
+            # this instance. Five minutes comfortably covers a table the size
+            # `docs/status.md` records (1,938 jobs, low thousands of rows) with
+            # headroom for growth; a table that no longer fits in five minutes
+            # is a signal to batch the read, not to raise this further.
+            reader.execute(text("SET LOCAL statement_timeout = '5min'"))
         source_rows = reader.scalars(select(model)).all()
         values = [
             {column.name: getattr(row, column.name) for column in table.columns}
