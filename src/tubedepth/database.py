@@ -13,10 +13,14 @@ from .errors import ConfigurationError
 from .models import Base
 
 # docs/shared-postgres.md rule 4: the connection budget is a number written
-# down, not an assertion. `deploy/service-manifest.yaml` declares 32 as the
-# hard ceiling for this service (also `CONNECTION LIMIT 32` on
-# `tubedepth_runtime` in deploy/postgres-bootstrap.sql, so a miscount here is
-# caught by the database itself rather than trusted).
+# down, not an assertion, and it is database-wide — `deploy/service-manifest.yaml`
+# declares 20 as the ceiling this service was granted by the fleet (also
+# `CONNECTION LIMIT 20` on `tubedepth_runtime` in deploy/postgres-bootstrap.sql,
+# so a miscount here is caught by the database itself rather than trusted).
+# Sizing a pool bigger than what fits inside that 20 is not this module's
+# call to make — see `deploy/service-manifest.yaml` for why
+# `TUBEDEPTH_CONCURRENCY`'s deployed default is capped at 2, not raised
+# to whatever the pool math would otherwise support.
 #
 # The API process holds two engines at this default ceiling — a writer and a
 # reader (see the class docstring for why they are separate):
@@ -29,12 +33,15 @@ from .models import Base
 # sizes — see `_write_pool_kwargs` — because `Worker.drain` runs one claim
 # thread and one lease-renewal thread per unit of concurrency
 # (`worker.py`'s `pump` and `_holding_lease`), and both take a session on the
-# *write* engine. At concurrency 8 that is up to 16 simultaneous demands on a
-# pool sized for 4, measured directly (`docs/status.md`) to serialize into
-# batches that each wait roughly one session's hold time behind the one
-# before it — real under load, not merely a thread-count guess. The worker's
-# read engine is not part of that burst (`Worker` takes at most one readonly
-# session at a time, in `reap()`) and stays at the default ceiling.
+# *write* engine. Measured directly at concurrency 8 (`docs/status.md`): up to
+# 16 simultaneous demands on a pool sized for 4 serialize into batches that
+# each wait roughly one session's hold time behind the one before it — real
+# under load, not merely a thread-count guess. That is why the pool now scales
+# with concurrency at all; it is not a reason to deploy at concurrency 8, which
+# is also more than this service's connection budget affords (see
+# `deploy/service-manifest.yaml`). The worker's read engine is not part of
+# that burst (`Worker` takes at most one readonly session at a time, in
+# `reap()`) and stays at the default ceiling regardless of concurrency.
 #
 # `deploy/service-manifest.yaml` carries the full worked arithmetic and the
 # migration-connection and rolling-deploy-overlap terms alongside it.

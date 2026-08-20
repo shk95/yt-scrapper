@@ -47,9 +47,18 @@ EnvironmentFile=%h/.config/tubedepth/worker.env
 #Environment=TUBEDEPTH_LISTING_LIMIT=100
 #Environment=TUBEDEPTH_COMMENT_LIMIT=200
 # Concurrency is an upper bound, not a target: the rate controller narrows it
-# whenever YouTube pushes back. Eight was measured, not chosen — see
-# docs/status.md, where the figure and the sweep that produced it are recorded.
-Environment=TUBEDEPTH_CONCURRENCY=8
+# whenever YouTube pushes back. docs/status.md measured a *useful* ceiling of
+# 6 — past that the bottleneck is YouTube's side, not this worker's threads —
+# but the write-engine connection pool now scales 1:1 with this number
+# (database.py's Database, sized by cli.work off --concurrency), and this
+# service's PostgreSQL connection budget is 20, granted by the fleet
+# (deploy/service-manifest.yaml, docs/shared-postgres.md rule 4). 6 does not
+# fit inside that budget alongside the API; 2 does, with the same margin the
+# manifest has always kept. Raising this past 2 needs a fleet-approved rise
+# in the declared budget, not a locally larger number — see
+# deploy/service-manifest.yaml's arithmetic and docs/status.md's open
+# question about the gap between 6 and 2.
+Environment=TUBEDEPTH_CONCURRENCY=2
 # TUBEDEPTH_WEBHOOK_SECRET, to sign job callbacks — set it in the
 # EnvironmentFile above (worker.env), which already exists for
 # TUBEDEPTH_DATABASE_URL. Without it no callback is signed, which is the safe

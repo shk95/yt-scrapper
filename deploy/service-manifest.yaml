@@ -51,8 +51,8 @@ external_object_stores:
 #   API:    write engine (2+2=4) + read engine (2+2=4)              =  8
 #   worker: write engine (concurrency+concurrency) + read engine (4)
 #           = TUBEDEPTH_CONCURRENCY x 2 + 4
-#           = 8 x 2 + 4 (deploy/tubedepth-worker.service's default 8)  = 20
-#   steady-state total = 8 + 20                                       = 28
+#           = 2 x 2 + 4 (deploy/tubedepth-worker.service's default 2)  =  8
+#   steady-state total = 8 + 8                                        = 16
 #
 # The worker's write engine, not its read engine, is what needs the
 # concurrency term: `Worker.drain` runs one claim thread and one
@@ -78,15 +78,29 @@ external_object_stores:
 # shape owes this line an update, not a silent doubling of the steady-state
 # term above it.
 #
-#   total = 28 + 0 + 1 + 0 = 29
+#   total = 16 + 0 + 1 + 0 = 17
 #
-# 29 <= 32, the number below, which is also the CONNECTION LIMIT
+# 17 <= 20, the number below, which is also the CONNECTION LIMIT
 # deploy/postgres-bootstrap.sql sets on tubedepth_runtime — a miscount here
 # is caught by the database itself, not only by this arithmetic. The 3 left
-# over is the operational safety margin rule 4 asks for, same margin as
-# before the concurrency term was added — this changes the total, not the
-# cushion. Raising `TUBEDEPTH_CONCURRENCY` beyond 8 moves both this number and
-# the CONNECTION LIMIT below; the two must be kept in step by hand, since
-# nothing here reads the unit file to check. See docs/status.md §
-# "규정 적용" for the full accounting.
-connection_budget: 32
+# over is the operational safety margin rule 4 asks for.
+#
+# 20 is a ceiling this service was granted by the fleet, not a number this
+# manifest gets to raise on its own say-so (docs/shared-postgres.md rule 4:
+# the budget is database-wide, Sigma(service budget) <= max_connections minus
+# reserved connections minus margin — a service that discovers it wants more
+# and edits its own declaration upward has not solved anything, it has moved
+# the failure to whichever service happens to connect when the instance runs
+# dry). TUBEDEPTH_CONCURRENCY=2 is therefore chosen backwards from 20, not
+# forwards from what the rate controller could use — `docs/status.md` records
+# a measured *useful* ceiling of 6 concurrent extractions (past that the
+# bottleneck is not on this service's side), and 2 x 2 + 4 = 8 is what leaves
+# room for the API's 8 and the existing 3-connection margin inside 20. That
+# gap — 6 wanted, 2 affordable — is written up in docs/status.md as an open
+# question for the fleet, not quietly absorbed by shipping a smaller number
+# and saying nothing. Raising `TUBEDEPTH_CONCURRENCY` past 2 needs either a
+# fleet-approved rise in this service's declared budget (both this file and
+# the CONNECTION LIMIT below, kept in step by hand — nothing here reads the
+# unit file to check) or a change that stops scaling the pool 1:1 with
+# concurrency. See docs/status.md § "규정 적용" for the full accounting.
+connection_budget: 20
