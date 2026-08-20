@@ -557,7 +557,7 @@ migrator와 runtime 둘 다 `search_path = tubedepth, pg_catalog`로 둔다. `do
 | 6 startup DDL 금지 | **적용됨.** `_database()`가 더는 `create_schema()`를 호출하지 않는다; 스키마 경로는 `tubedepth migrate` 하나뿐 | #14 |
 | 7 외부 object 일관성 | payload는 content-addressed(불변 key), write-then-record 순서로 이미 규정 형태. grace period와 reconciliation은 #17에 병합 | `payload_store.py`, #17 |
 | 8 extension 중앙 관리 | 필요 extension 없음, manifest가 선언 | manifest |
-| 9 timestamptz | `UtcDateTime`이 naive를 거부. **단, postgres에서 `timestamptz`로 렌더되는지 #15에서 확인 필요** — 현재 `sa.DateTime()`은 timezone 없는 type이 된다 | #15 |
+| 9 timestamptz | **적용됨(#15).** 확인 결과 `sa.DateTime()`은 실제로 postgres에서 `timestamp without time zone`으로 렌더되고 있었다(16개 컬럼 전부, `information_schema.columns` 실측). `render_item`이 `sa.DateTime(timezone=True)`를 내보내도록 고치고, 기존 16개 `UtcDateTime` 컬럼을 `ALTER ... TYPE timestamptz USING ... AT TIME ZONE 'UTC'`로 옮기는 손으로 쓴 revision을 추가; `UtcDateTime.impl`도 `DateTime(timezone=True)`로 맞춰 autogenerate no-diff 유지 | `migrations/env.py`, `migrations/versions/20260820_55a24ac7a270_instants_are_timestamptz.py`, `tests/test_postgres_migrations.py` |
 | 10–13 cross-service 금지 | 단일 서비스라 위반 대상 없음. manifest가 빈 의존성을 선언하고, 규정의 감사 query가 gate | manifest |
 | 14 extraction test | **호스트 전환(post-release ops issue)의 통과 조건으로 편입** | ops issue |
 

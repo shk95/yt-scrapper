@@ -56,9 +56,16 @@ def render_item(type_: str, obj: Any, autogen_context: AutogenContext) -> str | 
     added — makes every past migration depend on a class the application is
     free to rename. A migration that breaks when application code is
     refactored is one nobody can replay.
+
+    `timezone=True` matters on its own: every `UtcDateTime` column holds an
+    instant, and `docs/shared-postgres.md` rule 9 forbids `timestamp without
+    time zone` — PostgreSQL's default — for that. `sa.DateTime(timezone=True)`
+    renders as `timestamptz` there. On SQLite the flag changes nothing; SQLite
+    has no timezone-aware storage either way, so the chain that dialect runs is
+    unaffected.
     """
     if type_ == "type" and type(obj).__name__ == "UtcDateTime":
-        return "sa.DateTime()"
+        return "sa.DateTime(timezone=True)"
     return False
 
 

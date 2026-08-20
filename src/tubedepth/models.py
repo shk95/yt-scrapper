@@ -29,9 +29,18 @@ class UtcDateTime(TypeDecorator[datetime]):
     the public contract says so — and a naive one does not raise on comparison,
     it silently compares wrong. Putting the offset back on load is the only
     place that can be fixed once rather than at every call site.
+
+    `impl` carries `timezone=True` so autogenerate's type comparator agrees
+    with what `migrations/env.py`'s `render_item` renders and what the
+    database actually stores: `docs/shared-postgres.md` rule 9 requires
+    `timestamptz` for every instant, and on PostgreSQL a plain `DateTime()`
+    impl compares as `timestamp without time zone` against the reflected
+    `timestamptz` column, which is exactly the mismatch that makes autogenerate
+    propose a spurious `modify_type`. SQLite ignores the flag — it has no
+    timezone-aware storage either way — so this is a no-op there.
     """
 
-    impl = DateTime
+    impl = DateTime(timezone=True)
     cache_ok = True
 
     def process_bind_param(self, value: datetime | None, dialect: object) -> datetime | None:

@@ -233,3 +233,32 @@ def test_autogenerate_never_proposes_touching_another_services_schema(
         ).scalar_one()
     engine.dispose()
     assert survivors == 0, "the sentinel table is gone or was written to"
+
+
+@needs_postgres
+def test_every_instant_is_stored_as_timestamptz(empty_database: None) -> None:
+    """Rule 9. `UtcDateTime` refuses naive values in Python; the column is the
+    other half, and `sa.DateTime()` renders as `timestamp without time zone`
+    — the one type the regulation says must not represent an instant."""
+    assert alembic("upgrade", "head").returncode == 0
+
+    engine = create_engine(URL or "")
+    with engine.connect() as connection:
+        # See test_the_migrated_schema_is_the_one_the_models_describe: the
+        # migrator has no USAGE on tubedepth outside of a migration's own SET
+        # ROLE. Without this, information_schema.columns reports zero rows —
+        # not because every column is timestamptz, but because the migrator
+        # cannot see the schema at all, which would make this assertion pass
+        # for the wrong reason.
+        connection.execute(text("SET ROLE tubedepth_owner"))
+        naive = connection.execute(
+            text("""
+            SELECT table_name, column_name FROM information_schema.columns
+            WHERE table_schema = :schema AND data_type = 'timestamp without time zone'
+            ORDER BY table_name, column_name
+        """),
+            {"schema": SCHEMA},
+        ).all()
+    engine.dispose()
+
+    assert naive == [], f"these instants are not timestamptz: {naive}"
