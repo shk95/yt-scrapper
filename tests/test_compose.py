@@ -402,3 +402,24 @@ def test_the_help_helper_reads_a_clean_environment() -> None:
     text = help_for("serve")
 
     assert "--host" in text and "127.0.0.1" in text
+
+
+def test_no_local_only_variable_is_required_by_interpolation() -> None:
+    """Compose interpolates the whole file before applying profiles.
+
+    A `:?` required-variable marker on a `TUBEDEPTH_LOCAL_*` value therefore
+    fails `up` for the default deployment — the one against an external
+    server, which never starts the `postgres` service and has no use for the
+    value. That is exactly how it shipped in v1.0.1: the documented external
+    path died on three passwords for a database it was not running. The loud
+    failure belongs where the value is used — the postgres image refuses an
+    empty POSTGRES_PASSWORD, and the initdb wrapper's own `:?` checks refuse
+    empty role passwords — so `--profile local` without them still fails
+    naming the variable.
+    """
+    text = COMPOSE.read_text()
+    required = re.findall(r"\$\{(TUBEDEPTH_LOCAL_[A-Z_]+):\?", text)
+    assert not required, (
+        f"required-variable markers on local-only values break the external "
+        f"deployment before profiles apply: {sorted(set(required))}"
+    )

@@ -66,13 +66,23 @@ services:
     image: postgres:18-alpine
     environment:
       POSTGRES_USER: ${TUBEDEPTH_LOCAL_SUPERUSER:-fleet}
-      POSTGRES_PASSWORD: ${TUBEDEPTH_LOCAL_SUPERUSER_PASSWORD:?set it in deploy/.env}
+      # `:-` and not `:?`, for every TUBEDEPTH_LOCAL_* password in this
+      # service: compose interpolates the whole file BEFORE applying
+      # profiles, so a required-variable marker here fails `up` for the
+      # default deployment — the one against an external server, which never
+      # starts this service and has no use for these values. The loud
+      # failure moves to where the values are used: the postgres image
+      # refuses to start with an empty POSTGRES_PASSWORD, and the initdb
+      # wrapper (postgres-initdb/) refuses empty role passwords by its own
+      # `:?` checks — so `--profile local` without them still fails naming
+      # the variable, just at the service that needed it.
+      POSTGRES_PASSWORD: ${TUBEDEPTH_LOCAL_SUPERUSER_PASSWORD:-}
       POSTGRES_DB: ${TUBEDEPTH_LOCAL_DATABASE:-fleet}
       # Read by the initdb wrapper below, which is the only thing that needs
       # them; the application never logs in as either of these two roles at
       # bootstrap time.
-      TUBEDEPTH_MIGRATOR_PASSWORD: ${TUBEDEPTH_LOCAL_MIGRATOR_PASSWORD:?set it in deploy/.env}
-      TUBEDEPTH_RUNTIME_PASSWORD: ${TUBEDEPTH_LOCAL_RUNTIME_PASSWORD:?set it in deploy/.env}
+      TUBEDEPTH_MIGRATOR_PASSWORD: ${TUBEDEPTH_LOCAL_MIGRATOR_PASSWORD:-}
+      TUBEDEPTH_RUNTIME_PASSWORD: ${TUBEDEPTH_LOCAL_RUNTIME_PASSWORD:-}
     volumes:
       # The same file a real deployment runs, so what this stack is checked
       # against is the shape production has — roles, the search_path that
