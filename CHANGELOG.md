@@ -20,6 +20,18 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-08-21
+
+### Fixed
+
+- **`docker compose up` against an external server no longer demands the
+  local profile's passwords.** Compose interpolates the whole file before
+  applying profiles, so the `:?` required-variable markers on the `postgres`
+  service's three `TUBEDEPTH_LOCAL_*` passwords failed the default — external
+  database — deployment over values it was never going to use. They are `:-`
+  now; `--profile local` without them still fails naming the variable, at the
+  postgres image and the initdb wrapper, which is where the values are used.
+
 ## [1.0.1] - 2026-08-21
 
 ### Fixed
@@ -382,7 +394,8 @@ for. Not yet exercised under sustained load; see the honest limits in the
   longer reaped as dead and retried.
 - The query indexes the plan specified and nobody had added.
 
-[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/slopindustries/yt-scrapper/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/slopindustries/yt-scrapper/releases/tag/v0.1.0

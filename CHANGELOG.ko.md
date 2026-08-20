@@ -17,6 +17,18 @@
 
 ## [Unreleased]
 
+## [1.0.2] - 2026-08-21
+
+### Fixed
+
+- **외부 서버를 상대로 한 `docker compose up`이 local 프로파일의 비밀번호를
+  요구하지 않는다.** compose는 프로파일을 적용하기 전에 파일 전체를
+  보간하므로, `postgres` 서비스의 `TUBEDEPTH_LOCAL_*` 비밀번호 세 개에 붙은
+  `:?` 필수 마커가 기본 배포 — 외부 데이터베이스 — 를 쓰지도 않을 값 때문에
+  실패시켰다. 이제 `:-`이며, 값 없이 `--profile local`을 올리면 그 값을
+  실제로 쓰는 곳 — postgres 이미지와 initdb 래퍼 — 이 변수 이름을 대며
+  거부한다.
+
 ## [1.0.1] - 2026-08-21
 
 ### Fixed
@@ -300,7 +312,8 @@
 - 워커가 실행 중 리스를 갱신한다. 긴 댓글 수집이 죽은 것으로 회수되어 재시도되던 문제.
 - 계획서에 있었으나 아무도 넣지 않았던 조회 인덱스.
 
-[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.1...HEAD
+[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.2...HEAD
+[1.0.2]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/slopindustries/yt-scrapper/compare/v0.1.0...v1.0.0
 [0.1.0]: https://github.com/slopindustries/yt-scrapper/releases/tag/v0.1.0
