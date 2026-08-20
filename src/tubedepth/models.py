@@ -25,10 +25,15 @@ class UtcDateTime(TypeDecorator[datetime]):
     """A datetime that is aware UTC on both sides of the database.
 
     SQLite has no datetime type and no timezone, so a value written as aware
-    UTC reads back naive. Everything here treats stored instants as aware —
-    the public contract says so — and a naive one does not raise on comparison,
-    it silently compares wrong. Putting the offset back on load is the only
-    place that can be fixed once rather than at every call site.
+    UTC reads back naive. The application no longer runs on SQLite (#15), but
+    `tubedepth transfer --from` still reads a real SQLite index through these
+    same mapped models — that is the one place this class's SQLite behaviour
+    still runs, and it is why the naive-value refusal below cannot be deleted
+    along with the rest of SQLite support. Everything here treats stored
+    instants as aware — the public contract says so — and a naive one does
+    not raise on comparison, it silently compares wrong. Putting the offset
+    back on load is the only place that can be fixed once rather than at
+    every call site.
 
     `impl` carries `timezone=True` so autogenerate's type comparator agrees
     with what `migrations/env.py`'s `render_item` renders and what the
@@ -37,7 +42,8 @@ class UtcDateTime(TypeDecorator[datetime]):
     impl compares as `timestamp without time zone` against the reflected
     `timestamptz` column, which is exactly the mismatch that makes autogenerate
     propose a spurious `modify_type`. SQLite ignores the flag — it has no
-    timezone-aware storage either way — so this is a no-op there.
+    timezone-aware storage either way — so this is a no-op on the SQLite
+    source `transfer` reads from.
     """
 
     impl = DateTime(timezone=True)

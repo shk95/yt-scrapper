@@ -311,8 +311,36 @@ class Worker:
         is a race: two threads can each read two expensive jobs in flight
         against a cap of two and both proceed, which makes the reservation
         advisory rather than enforced — and it shows up only under load, which
-        is the only time it matters. Serialising the claim costs nothing:
-        SQLite serialises writers regardless.
+        is the only time it matters.
+        `tests/test_worker.py::test_disabling_the_claim_lock_lets_two_threads_exceed_the_reservation`
+        forces exactly that race with the real lock swapped for a no-op, and
+        the cap breaks every time.
+
+        This is a real cost on PostgreSQL, not a free one. It used to be
+        described as free — "SQLite serialises writers regardless" — which was
+        true only because SQLite's own write lock meant nothing was lost by
+        adding a second one around it. PostgreSQL claims run concurrently
+        under READ COMMITTED (`JobRepository.claim`'s guarded UPDATE plus
+        rowcount check is what makes that safe on its own — see `Database`'s
+        docstring), so this lock is what gives that back up: every worker
+        thread's `_claim()`, database round trip included, now runs one at a
+        time, for as long as the process holds this lock rather than as long
+        as SQLite's writer lock held it regardless.
+
+        Paid anyway, on the current evidence: `docs/status.md`'s measured
+        runs found the AIMD window, not the claim, as the throughput limiter
+        — a claim is one indexed SELECT plus one guarded UPDATE, small next to
+        the seconds a collection spends waiting on yt-dlp or the network. That
+        has not been measured specifically *with this lock removed* on
+        PostgreSQL, though, so "small cost, worth the correctness" is the
+        current judgement call, not a proven one. If a future measurement
+        shows claim serialisation actually limiting throughput, the fix is to
+        narrow this lock to just the reservation check-then-increment and take
+        the database round trip outside it — which reopens the exact race
+        described above unless the reservation itself moves into the
+        database (a `lane_health`-style counter, checked and incremented in
+        one guarded statement) so two threads can no longer race a
+        Python-side dict at all.
         """
         with self._lock:
             kinds = self._admissible_kinds_unlocked()

@@ -46,9 +46,11 @@ def render_item(type_: str, obj: Any, autogen_context: AutogenContext) -> str | 
     `timezone=True` matters on its own: every `UtcDateTime` column holds an
     instant, and `docs/shared-postgres.md` rule 9 forbids `timestamp without
     time zone` — PostgreSQL's default — for that. `sa.DateTime(timezone=True)`
-    renders as `timestamptz` there. On SQLite the flag changes nothing; SQLite
-    has no timezone-aware storage either way, so the chain that dialect runs is
-    unaffected.
+    renders as `timestamptz` there. Migrations only ever run against
+    PostgreSQL since the cutover (#15) — `tubedepth transfer`'s SQLite source
+    is never itself migrated, only read from — but the flag is harmless if
+    this ever ran on SQLite regardless: SQLite has no timezone-aware storage
+    either way, so the chain that dialect runs would be unaffected by it.
     """
     if type_ == "type" and type(obj).__name__ == "UtcDateTime":
         return "sa.DateTime(timezone=True)"

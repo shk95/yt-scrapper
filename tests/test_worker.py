@@ -345,6 +345,71 @@ def test_a_cheap_job_is_not_starved_by_a_queue_full_of_expensive_ones(
     assert slow.peak <= 2, f"expensive jobs took {slow.peak} of four slots"
 
 
+def test_disabling_the_claim_lock_lets_two_threads_exceed_the_reservation(
+    tmp_path: Path,
+    database: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """What `Worker._claim`'s lock actually buys, forced rather than hoped for.
+
+    The neighbouring test shows the reservation holding under real
+    concurrency; it does not show *why* the lock is what makes that true
+    rather than luck. This one swaps the real lock for a no-op and forces
+    both worker threads past the reservation check before either registers,
+    which is exactly the race `_claim`'s docstring describes. With the real
+    lock this cannot happen; here, it does, every time.
+    """
+    import contextlib
+    import itertools
+
+    slow = SlowSource(seconds=0.2, cost=SourceCost.EXPENSIVE)
+    database, _, payloads = build(tmp_path, database, slow)
+    for index in range(2):
+        enqueue(database, "video.slow", f"slow{index:07d}")
+
+    worker = Worker(
+        database=database,
+        registry=_registry(slow),
+        payloads=payloads,
+        name="worker-1",
+        concurrency=2,
+        controller=RateController(window_ceiling=8),
+    )
+    # A no-op stand-in for the real lock: enters and exits without excluding
+    # anyone, which is what "no lock" means for two threads racing the same
+    # check-then-increment.
+    monkeypatch.setattr(worker, "_lock", contextlib.nullcontext())
+    # The AIMD window starts at 1.0 and only grows after a success, so with
+    # only two jobs it would gate the second thread on its own, confounding
+    # a test about the cost reservation specifically. Not what this test is
+    # about, so it is bypassed rather than tuned around.
+    monkeypatch.setattr(RateController, "acquire", lambda self, egress, lane: True)
+
+    # Both EXPENSIVE-cost jobs are meant to be capped at one concurrent
+    # (share 0.5 of concurrency=2), so the race window is: both threads read
+    # the reservation as "not yet full", both proceed, both increment.
+    # Rendezvous only the first call from each thread — later calls, made
+    # once the queue is empty, must not block waiting for a third party.
+    barrier = threading.Barrier(2, timeout=5)
+    call_count = itertools.count()
+    real_admissible = worker._admissible_kinds_unlocked
+
+    def _racing_admissible_kinds_unlocked() -> list[str] | None:
+        result = real_admissible()
+        if next(call_count) < 2:
+            barrier.wait()
+        return result
+
+    monkeypatch.setattr(worker, "_admissible_kinds_unlocked", _racing_admissible_kinds_unlocked)
+
+    worker.drain()
+
+    assert slow.peak > 1, (
+        "the reservation held even with no lock — the forced race did not "
+        "reproduce, so this test is not proving what it claims to"
+    )
+
+
 def _identifier_of(session, kind: str) -> str:  # type: ignore[no-untyped-def]
     return session.query(Job).filter(Job.kind == kind).one().identifier
 
