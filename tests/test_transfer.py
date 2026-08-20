@@ -15,7 +15,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
-from sqlalchemy import select
+from sqlalchemy import func, select
 
 from tubedepth.database import Database
 from tubedepth.errors import ConfigurationError
@@ -191,6 +191,109 @@ def test_the_transfer_does_not_touch_the_payload_store(tmp_path: Path) -> None:
     import tubedepth.transfer as module
 
     assert "PayloadStore" not in dir(module)
+
+
+def test_a_mid_transfer_failure_says_the_target_holds_partial_data(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The design fails *safe* — a retry hits the not-empty guard rather than
+    duplicating — but until the message says so an operator has to work that
+    out for themselves. Reproduced with a small `BATCH` and a job that fails
+    to construct partway through the second batch, so the first batch is left
+    committed in the target while the second raises."""
+    import tubedepth.transfer as module
+
+    source = _seeded(tmp_path / "source.db")
+    with source.session() as session:
+        for index in range(4, 9):
+            session.add(Job(identifier=f"job-{index}", kind="video.metadata", target="x"))
+    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}")
+    target.create_schema()
+
+    monkeypatch.setattr(module, "BATCH", 2)
+
+    real_construct = module._construct_row
+    calls = {"n": 0}
+
+    def flaky_construct(model: type, row_values: dict[str, object]) -> object:
+        if model is Job:
+            calls["n"] += 1
+            if calls["n"] == 3:
+                raise RuntimeError("simulated constraint violation")
+        return real_construct(model, row_values)
+
+    monkeypatch.setattr(module, "_construct_row", flaky_construct)
+
+    with pytest.raises(ConfigurationError) as failed:
+        transfer(source=source, target=target)
+
+    message = str(failed.value)
+    assert "partial data" in message
+    assert "emptied before retrying" in message
+
+    # The first batch really did commit — the message is not describing a
+    # hypothetical.
+    with target.session(readonly=True) as reading:
+        stranded = reading.scalar(select(func.count()).select_from(Job))
+    assert stranded == 2
+
+    # And the guard this leans on for safety actually fires on a retry.
+    with pytest.raises(ConfigurationError, match="already holds"):
+        transfer(source=source, target=target)
+
+
+def test_a_target_count_that_disagrees_with_what_was_written_is_an_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The reported counts used to be read-side only — what `transfer` read
+    out of the source, never confirmed on the target. This proves the
+    post-write re-count actually discriminates, by forcing it to disagree."""
+    import tubedepth.transfer as module
+
+    source = _seeded(tmp_path / "source.db")
+    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}")
+    target.create_schema()
+
+    real_count_rows = module._count_rows
+
+    def lying_count(session: object, model: type) -> int:
+        counted = real_count_rows(session, model)  # type: ignore[arg-type]
+        if getattr(model, "__tablename__", None) == "jobs" and counted == 3:
+            return counted - 1
+        return counted
+
+    monkeypatch.setattr(module, "_count_rows", lying_count)
+
+    with pytest.raises(ConfigurationError) as failed:
+        transfer(source=source, target=target)
+
+    message = str(failed.value)
+    assert "did not verifiably arrive" in message
+    assert "emptied before retrying" in message
+
+
+def test_placement_is_checked_on_both_source_and_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The CLI already checks the target before calling `transfer()`, but
+    `transfer()` is a public entry point of its own and this is the check
+    that protects the rollback direction — a PostgreSQL source on the wrong
+    `search_path`, run by someone in a hurry with no CLI wrapper in the way.
+    `verify_placement()` itself is proven elsewhere
+    (`tests/test_postgres_privileges.py`); this only proves `transfer()`
+    actually calls it, on both ends, by making the call itself fail."""
+    source = _seeded(tmp_path / "source.db")
+    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}")
+    target.create_schema()
+
+    monkeypatch.setattr(
+        Database,
+        "verify_placement",
+        lambda self: (_ for _ in ()).throw(ConfigurationError("wrong search_path")),
+    )
+
+    with pytest.raises(ConfigurationError, match="wrong search_path"):
+        transfer(source=source, target=target)
 
 
 # --- PostgreSQL round trip -------------------------------------------------
