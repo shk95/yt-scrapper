@@ -1,10 +1,15 @@
--- The roles and schema this service expects, on a database it shares.
+-- The roles and schema this service expects, on its own database on a
+-- PostgreSQL server shared with other services.
 --
 -- Run once per database, by someone who owns it — not by the service, and not
--- from a migration. `docs/shared-postgres.md` is why each line is here; the
--- short version is that a logical boundary is only a boundary when the
--- database enforces it, and every rule below is one another service can be
--- damaged by if this one skips it.
+-- from a migration. `docs/shared-postgres.md` is why each line is here. Most
+-- of what follows (schema, roles, search_path) is isolation this service
+-- would need even alone in its own database — kept because it costs nothing
+-- and pays if services are ever consolidated onto one database, or if a
+-- deployment is ever pointed at the wrong one. Rule 4 (connection budget) is
+-- the one exception: roles and max_connections are cluster-global, so that
+-- rule is the one still enforced across every service on this server, not
+-- only inside this database.
 --
 -- Usage:
 --   psql -v password="'…'" -v runtime_password="'…'" -v database=<name> \
@@ -112,12 +117,13 @@ ALTER ROLE tubedepth_runtime IN DATABASE :database SET transaction_timeout = '60
 ALTER ROLE tubedepth_runtime  IN DATABASE :database SET TimeZone = 'UTC';
 ALTER ROLE tubedepth_migrator IN DATABASE :database SET TimeZone = 'UTC';
 
--- Rule 4: connection budget. deploy/service-manifest.yaml declares 20 for
--- this service — that ceiling is what the fleet was asked for and granted;
--- raising it is a fleet-level decision, not something this service's own
--- pool arithmetic gets to change unilaterally (docs/status.md's "규정 적용"
--- table, rule 4, explains why TUBEDEPTH_CONCURRENCY is capped at 2 rather
--- than the connection budget being raised to fit a bigger concurrency).
--- CONNECTION LIMIT makes the database enforce the declared number rather
--- than trust every pool configuration to add up correctly.
-ALTER ROLE tubedepth_runtime CONNECTION LIMIT 20;
+-- Rule 4: connection budget. deploy/service-manifest.yaml declares 32 for
+-- this service — that ceiling is what the fleet was asked for (#26) and
+-- granted; raising it further is a fleet-level decision, not something this
+-- service's own pool arithmetic gets to change unilaterally (docs/status.md's
+-- "규정 적용" table, rule 4, records the grant and the measurements behind
+-- it). Roles are cluster-global, so this CONNECTION LIMIT caps
+-- tubedepth_runtime across every database on the server, not only this
+-- service's own — the one place rule 4 still crosses the per-service
+-- database boundary.
+ALTER ROLE tubedepth_runtime CONNECTION LIMIT 32;
