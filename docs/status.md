@@ -436,7 +436,13 @@ CI service container are the whole cost.
 The boundary in this list is **v1.0.0**: the point where real operation is
 possible and the PostgreSQL migration is complete. dev merges to master there
 and the merge is tagged. Release means code complete — this host's actual
-cutover is post-release ops, tracked as its own issue.
+cutover is post-release ops, tracked as [#24](https://github.com/slopindustries/yt-scrapper/issues/24).
+
+On GitHub this is two dimensions rather than one. **Milestones say what a body
+of work is for; the `pre-1.0` and `post-1.0` labels say which side of the tag
+it falls on.** A theme and a deadline are different questions, and collapsing
+them would mean either splitting the trend work in half or pretending the
+release gate is a theme.
 
 Before the tag, in order:
 
@@ -453,22 +459,26 @@ Before the tag, in order:
    [#16](https://github.com/slopindustries/yt-scrapper/issues/16) along the way
    rather than after it — both now shaped by the fleet regulation (see "규정
    적용" below).
-5. **The release gate** (its own milestone): a `watch` subcommand — scheduled
-   collection by channel, search keyword and trending region; the API docs
-   made a perfect, mechanically-enforced match; a Docker image with a compose
-   example; then the v1.0.0 cut itself.
+5. **The [release gate](https://github.com/slopindustries/yt-scrapper/milestone/4)** — the three conditions the owner
+   set, in order: **[#20](https://github.com/slopindustries/yt-scrapper/issues/20)** a `watch` subcommand collecting by
+   channel, search keyword and trending region; **[#21](https://github.com/slopindustries/yt-scrapper/issues/21)** the
+   API docs made a perfect, mechanically-enforced match; **[#22](https://github.com/slopindustries/yt-scrapper/issues/22)**
+   a Docker image with a compose example; then **[#23](https://github.com/slopindustries/yt-scrapper/issues/23)**, the cut.
 
 After the tag:
 
-6. **Cut this host over** — postgres URL, watch units replacing the sampler,
-   watchlist format migration.
+6. **[#24](https://github.com/slopindustries/yt-scrapper/issues/24)** — cut this host over: postgres URL, watch units
+   replacing the sampler, watchlist format migration. Regulation §14's
+   extraction test is a pass condition of that issue rather than a formality.
 7. **[#13](https://github.com/slopindustries/yt-scrapper/issues/13)** (a
    bundle's parts bypass every lane but its own). Independent of the database
    and currently dormant — nothing runs bundles, since the sampler collects
    `video.metadata` only. It wakes the moment anything does.
 8. **[#3](https://github.com/slopindustries/yt-scrapper/issues/3) route A**,
-   the delta layer, where the accumulated history pays. Then #17, #18, #1 as
-   the verification backlog.
+   the delta layer, where the accumulated history pays. Then
+   [#25](https://github.com/slopindustries/yt-scrapper/issues/25) — reading a target's history is one request per
+   artifact, which is the read route A is worst served by — and #17, #18, #1
+   as the verification backlog.
 
 #13 sits after the migration rather than before it because it is dormant while
 SQLite-shaped decisions keep accruing — 2026-08-20 alone added four, one of
