@@ -35,6 +35,12 @@ DOCUMENTS = [
     ROOT / "docs" / "api.ko.md",
     ROOT / "docs" / "status.md",
     ROOT / "docs" / "troubleshooting.md",
+    # AGENTS is read from outside this repository — by whoever is contributing,
+    # and by every coding agent pointed at it — which is why it became an
+    # English original with a translation rather than staying Korean-only. It
+    # names commands and paths, so it makes mechanical claims like the rest.
+    ROOT / "AGENTS.md",
+    ROOT / "AGENTS.ko.md",
 ]
 
 # Documents this project promises exist: linked from other documents, or named
@@ -48,6 +54,11 @@ REQUIRED = [
     ROOT / "CHANGELOG.md",
     ROOT / "CHANGELOG.ko.md",
     ROOT / "docs" / "releasing.md",
+    ROOT / "AGENTS.md",
+    ROOT / "AGENTS.ko.md",
+    # Linked from both READMEs and from AGENTS, and the document the PostgreSQL
+    # milestone rests on. It was reachable from nothing at all until 2026-08-20.
+    ROOT / "docs" / "shared-postgres.md",
 ]
 
 # The capability table, marked rather than located by heading. The kinds are
@@ -362,3 +373,40 @@ def test_every_route_the_dashboard_calls_is_served() -> None:
     unknown = sorted(path for path in called - served if path != "/v1/{}")
 
     assert not unknown, f"the dashboard calls routes that are not served: {unknown}"
+
+
+def test_the_two_agents_files_have_not_drifted_apart() -> None:
+    """A translation gains a rule and the original does not, or the reverse.
+
+    Structure rather than text, because the text is the part that is supposed
+    to differ. Headings translate and prose translates; **the number of
+    sections and the number of rules do not**, and adding a rule to one side
+    only is the failure that actually happens — nobody forgets to translate a
+    document they are writing, they forget the one they are not looking at.
+
+    Aimed at the expensive-rules list in particular. That list is the reason
+    this file is read at all, and an entry missing from the side someone reads
+    is a rule that does not exist for them.
+    """
+    original = (ROOT / "AGENTS.md").read_text()
+    translation = (ROOT / "AGENTS.ko.md").read_text()
+
+    def sections(text: str) -> int:
+        return len(re.findall(r"^## ", text, re.MULTILINE))
+
+    def rules(text: str) -> int:
+        # The expensive-rules list, which is the run of top-level bullets
+        # between its heading and the next one. Bold-opened, since every entry
+        # states its rule in bold and continuation lines do not.
+        body = re.split(r"^## ", text, flags=re.MULTILINE)
+        listed = [part for part in body if "`yt-dlp>=" in part]
+        assert len(listed) == 1, "the expensive-rules section could not be located"
+        return len(re.findall(r"^- \*\*", listed[0], re.MULTILINE))
+
+    assert sections(original) == sections(translation), (
+        f"AGENTS.md has {sections(original)} sections and AGENTS.ko.md has {sections(translation)}"
+    )
+    assert rules(original) == rules(translation), (
+        f"AGENTS.md lists {rules(original)} expensive rules and "
+        f"AGENTS.ko.md lists {rules(translation)}"
+    )

@@ -127,9 +127,9 @@ API는 기본적으로 **loopback에만** 바인딩한다. 이 프로젝트의 �
 | [`docs/shared-postgres.md`](docs/shared-postgres.md) | 다른 스크래퍼들과 공유하는 PostgreSQL 인스턴스의 규약 |
 | [`CHANGELOG.ko.md`](CHANGELOG.ko.md) | 릴리스별 변경 내역 |
 | [`docs/releasing.md`](docs/releasing.md) | 릴리스를 내는 절차 |
-| [`AGENTS.md`](AGENTS.md) | 이 저장소에서 작업하는 법 |
+| [`AGENTS.ko.md`](AGENTS.ko.md) | 이 저장소에서 작업하는 법 |
 
-`README.md`·`docs/api.md`·`CHANGELOG.md`가 정본이고, 옆의 `.ko.md`가 번역이다.
+`README.md`·`docs/api.md`·`CHANGELOG.md`·`AGENTS.md`가 정본이고, 옆의 `.ko.md`가 번역이다.
 나머지 문서는 한국어로만 있다.
 
 ## 버전 관리
