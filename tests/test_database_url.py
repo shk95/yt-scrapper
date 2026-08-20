@@ -3,7 +3,11 @@
 `Database` took a `Path` and formatted `sqlite+pysqlite:///` around it twice,
 so `TUBEDEPTH_DATABASE_URL` was honoured by Alembic and ignored by the
 application — the two could migrate and run against different databases with
-nothing saying so.
+nothing saying so. Since the cutover (#15) there is a second property to
+protect here too: `settings.database_url` has no SQLite fallback any more,
+and `Database` refuses any URL that is not PostgreSQL — except the one the
+transfer tool explicitly asks to accept, which is why a couple of tests below
+still construct a SQLite URL on purpose rather than by leftover habit.
 """
 
 from __future__ import annotations
@@ -16,79 +20,97 @@ from pathlib import Path
 import pytest
 
 from tubedepth.database import Database
+from tubedepth.errors import ConfigurationError
 from tubedepth.settings import database_url
 
 ROOT = Path(__file__).parent.parent
 
 
-def test_a_url_with_no_environment_names_the_sqlite_file_under_the_data_directory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+def test_an_unset_url_is_refused_rather_than_given_a_sqlite_file(
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The fallback this module used to test for is gone (#15): an operator
+    who forgot to set `TUBEDEPTH_DATABASE_URL` gets a named refusal instead of
+    a SQLite file quietly opened in its place."""
     monkeypatch.delenv("TUBEDEPTH_DATABASE_URL", raising=False)
 
-    assert database_url(tmp_path) == f"sqlite+pysqlite:///{tmp_path / 'tubedepth.db'}"
+    with pytest.raises(ConfigurationError, match="TUBEDEPTH_DATABASE_URL"):
+        database_url()
 
 
-def test_the_environment_wins_over_the_data_directory(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """TUBEDEPTH_DATA_DIR keeps meaning the payload store after the cutover.
-
-    A deployment on the shared instance has a database URL and a payload
-    directory, and they are not the same thing — so naming a directory must
-    never be able to redirect the database.
-    """
+def test_the_environment_is_the_only_source(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("TUBEDEPTH_DATABASE_URL", "postgresql+psycopg://u:p@h:5432/fleet")
 
-    assert database_url(tmp_path) == "postgresql+psycopg://u:p@h:5432/fleet"
+    assert database_url() == "postgresql+psycopg://u:p@h:5432/fleet"
 
 
 def test_the_dialect_is_readable_without_opening_a_connection(tmp_path: Path) -> None:
-    """Task 5's startup guard and the dialect-conditional hooks both ask this."""
-    assert Database(f"sqlite+pysqlite:///{tmp_path / 'x.db'}").dialect == "sqlite"
-    assert Database("postgresql+psycopg://u:p@h:5432/fleet").dialect == "postgresql"
+    """`Database.dialect` is asked by `verify_placement()` and `is_migrated()`
+    on every URL that reaches them, including the SQLite source
+    `tubedepth transfer --from` still accepts — so both dialects have to
+    report correctly, not only the one the application itself runs on.
 
-
-def test_a_postgresql_url_does_not_get_sqlite_pragmas(tmp_path: Path) -> None:
-    """Constructing against PostgreSQL must not register SQLite's hooks.
-
-    `create_engine` is lazy — no connection is opened here — so this asserts
-    the wiring, which is the part that would otherwise fail at the first
-    request with a syntax error inside an event handler.
+    `create_engine` is lazy — no connection is opened here — so this also
+    asserts the wiring at construction time, which is the part that would
+    otherwise fail at the first request with a syntax error inside an event
+    handler installed for the wrong dialect.
     """
-    database = Database("postgresql+psycopg://u:p@h:5432/fleet")
+    sqlite = Database(f"sqlite+pysqlite:///{tmp_path / 'x.db'}", allow_sqlite_source=True)
+    postgres = Database("postgresql+psycopg://u:p@h:5432/fleet")
 
-    assert database.sqlite_hooks_installed is False
+    assert sqlite.dialect == "sqlite"
+    assert postgres.dialect == "postgresql"
 
 
-def test_verify_placement_is_a_no_op_on_sqlite(tmp_path: Path) -> None:
+def test_a_non_postgresql_url_is_refused(tmp_path: Path) -> None:
+    """The cutover's own guarantee (#15): every ordinary caller of `Database`
+    gets a named refusal rather than quietly running against SQLite again."""
+    with pytest.raises(ConfigurationError, match="PostgreSQL only"):
+        Database(f"sqlite+pysqlite:///{tmp_path / 'x.db'}")
+
+
+def test_transfer_source_is_the_one_place_sqlite_is_still_accepted(tmp_path: Path) -> None:
+    """`allow_sqlite_source=True` is what `tubedepth transfer --from` passes.
+    Without an explicit opt-in, the refusal above applies to it exactly as it
+    does to everything else."""
+    database = Database(f"sqlite+pysqlite:///{tmp_path / 'x.db'}", allow_sqlite_source=True)
+
+    assert database.dialect == "sqlite"
+
+
+def test_verify_placement_is_a_no_op_on_a_sqlite_transfer_source(tmp_path: Path) -> None:
     """SQLite has no `search_path` to get wrong, and no server-side role to
-    misconfigure — the whole failure mode Task 5 guards against only exists
-    on PostgreSQL. `verify_placement` must return without even opening a
-    connection, or a legitimate SQLite deployment (still the test backend,
-    and still a supported one) would be refused for a condition that cannot
-    occur there.
+    misconfigure — the whole failure mode `verify_placement` guards against
+    only exists on PostgreSQL. It must return without even opening a
+    connection, or a legitimate transfer source would be refused for a
+    condition that cannot occur there. `transfer()` calls this on its source
+    (see `tubedepth.transfer`), so it still has to hold post-cutover.
     """
-    Database(f"sqlite+pysqlite:///{tmp_path / 'placement.db'}").verify_placement()
+    Database(
+        f"sqlite+pysqlite:///{tmp_path / 'placement.db'}", allow_sqlite_source=True
+    ).verify_placement()
 
 
 def test_an_ambient_database_url_does_not_redirect_the_suite(tmp_path: Path) -> None:
     """The regression this module exists to close, reproduced directly.
 
-    `_database()` honours `TUBEDEPTH_DATABASE_URL` now — that is the point of
-    this cutover — which means a value already sitting in an operator's shell
+    `_database()` honours `TUBEDEPTH_DATABASE_URL` — that is the point of the
+    cutover — which means a value already sitting in an operator's shell
     (naming the shared fleet PostgreSQL, say) used to be inert to this suite
     and is not any more. Without `refuse_an_ambient_database_url` in
     `conftest.py`, running the CLI tests with the variable set redirects every
-    `_database()` call at that path and writes a file there; on a real
-    operator shell the same gap would run `tubedepth migrate` and then DML
-    against the fleet database.
+    `_database()` call at that path; on a real operator shell the same gap
+    would run `tubedepth migrate` and then DML against the fleet database.
 
     A subprocess, not a monkeypatch in this process: the guard runs once per
     test as fixture setup, before the test body executes, so a value this test
     set itself would simply be honoured by anything it calls afterwards and
     would prove nothing about a value that was already there when pytest
-    started — which is the actual shape of the bug.
+    started — which is the actual shape of the bug. The ambient value points
+    at a SQLite file specifically, because that is what would have been
+    silently accepted before the cutover; today the guard has to intercept it
+    before `Database` even gets a chance to refuse it for being SQLite, since
+    a refusal for the wrong reason would also make this test pass.
     """
     ambient = tmp_path / "ambient.db"
     env = dict(os.environ)

@@ -42,29 +42,46 @@ else
   bad "python3 is not installed"
 fi
 
-# --- SQLite: the job claim depends on the version -------------------------
+# --- PostgreSQL: the only backend since the cutover (#15) -----------------
 #
-# BEGIN IMMEDIATE is ancient, but UPDATE ... RETURNING needs 3.35 and the
-# repositories use it. Discovering that at claim time means an OperationalError
-# inside a worker, which is the worst possible place to learn about it.
-sqlite_version=$(python3 -c 'import sqlite3; print(sqlite3.sqlite_version)' 2>/dev/null || echo "0.0.0")
-sqlite_major=$(echo "$sqlite_version" | cut -d. -f1)
-sqlite_minor=$(echo "$sqlite_version" | cut -d. -f2)
-if [ "$sqlite_major" -gt 3 ] 2>/dev/null || { [ "$sqlite_major" -eq 3 ] && [ "$sqlite_minor" -ge 35 ]; } 2>/dev/null; then
-  ok "sqlite $sqlite_version (>= 3.35, RETURNING available)"
+# There is no SQLite fallback any more (docs/status.md, settings.py): every
+# command refuses outright with no TUBEDEPTH_DATABASE_URL, and refuses again
+# if the server it names is not reachable. Both failures are confusing from
+# inside a worker or a migration; this check exists to name them here first.
+if [ -z "$TUBEDEPTH_DATABASE_URL" ]; then
+  bad "TUBEDEPTH_DATABASE_URL is not set; tubedepth has no SQLite fallback (see AGENTS.md)"
 else
-  bad "sqlite $sqlite_version is too old; the job claim needs >= 3.35 for RETURNING"
+  host_port=$(python3 -c "
+import os
+from urllib.parse import urlsplit
+u = urlsplit(os.environ['TUBEDEPTH_DATABASE_URL'])
+print(u.hostname or '', u.port or 5432)
+" 2>/dev/null)
+  host=$(echo "$host_port" | awk '{print $1}')
+  port=$(echo "$host_port" | awk '{print $2}')
+  if [ -z "$host" ]; then
+    bad "TUBEDEPTH_DATABASE_URL did not parse as host:port"
+  elif ! command -v pg_isready >/dev/null 2>&1; then
+    warn "pg_isready not installed; cannot verify $host:$port is reachable"
+  elif pg_isready -h "$host" -p "$port" -q 2>/dev/null; then
+    ok "PostgreSQL reachable at $host:$port"
+  else
+    bad "PostgreSQL at $host:$port is not accepting connections"
+  fi
 fi
 
-# --- WAL needs real POSIX locking ----------------------------------------
+# --- The payload store wants a filesystem with reliable POSIX semantics ---
 #
-# On WSL, /mnt/c is drvfs, which does not provide the locking WAL relies on.
-# A database there produces intermittent "database is locked" under the
-# concurrency this project is built around. See docs/troubleshooting.md.
-database_dir=$(dirname "${TUBEDEPTH_DATABASE:-./var/tubedepth.db}")
-case "$(cd "$database_dir" 2>/dev/null && pwd || echo "$database_dir")" in
-  /mnt/*) bad "the database path is under /mnt (drvfs); WAL locking is unreliable there" ;;
-  *)      ok  "database path is on a filesystem that supports WAL locking" ;;
+# On WSL, /mnt/c is drvfs. This stopped being about SQLite's WAL locking at
+# the cutover (#15) — the database is PostgreSQL now, reached over TCP — but
+# TUBEDEPTH_DATA_DIR/payloads is still local gzip files, and drvfs is still
+# the filesystem that produced the intermittent "database is locked" this
+# check used to be named for. See docs/troubleshooting.md's SQLite section,
+# kept as history rather than deleted.
+data_dir=$(dirname "${TUBEDEPTH_DATA_DIR:-./var}")
+case "$(cd "$data_dir" 2>/dev/null && pwd || echo "$data_dir")" in
+  /mnt/*) bad "TUBEDEPTH_DATA_DIR is under /mnt (drvfs); avoid it for the payload store" ;;
+  *)      ok  "TUBEDEPTH_DATA_DIR is on a filesystem with reliable POSIX semantics" ;;
 esac
 
 # --- egress pool: optional until the pool is configured -------------------

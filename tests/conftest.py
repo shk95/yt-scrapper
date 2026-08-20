@@ -26,11 +26,29 @@ from tubedepth.database import Database
 
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 
-# The addresses a database connection is allowed to reach even though this is
-# the offline suite. `just postgres` (and CI's service container) put the
-# server on localhost, never on the network `refuse_outbound_network` exists
-# to guard — a real hostname would still be refused.
+
+# A connection's host is only known here after DNS resolution — `localhost`
+# in a URL arrives as `127.0.0.1` or `::1` by the time `socket.connect` sees
+# it — so the host half of the allow-list stays these three forms rather than
+# whatever `TUBEDEPTH_TEST_POSTGRES_URL` happened to spell.
 LOCAL_DATABASE_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
+
+
+def _test_database_port() -> int | None:
+    """The one port this suite is allowed to reach on a local host.
+
+    Task 7 widened the guard to "any local host, any port" suite-wide, which
+    let a test open a socket to *any* local service, not only the PostgreSQL
+    server this suite actually names — a stray Postgres on the default port
+    would have gone unnoticed. Narrowing to the port `TUBEDEPTH_TEST_POSTGRES_URL`
+    actually names restores that half of the original strength; the host stays
+    an allow-list (see `LOCAL_DATABASE_HOSTS`) because DNS resolution, not this
+    guard, is what turns `localhost` into a concrete address.
+    """
+    server_url = os.environ.get("TUBEDEPTH_TEST_POSTGRES_URL")
+    if not server_url:
+        return None
+    return make_url(server_url).port or 5432
 
 
 def pytest_addoption(parser: pytest.Parser) -> None:
@@ -58,22 +76,24 @@ def refuse_outbound_network(
     httpx's ASGITransport and MockTransport never reach this, and neither does
     anything reading a fixture, so nothing legitimate is affected.
 
-    A connection to `LOCAL_DATABASE_HOSTS` is let through rather than refused
+    A connection to a `LOCAL_DATABASE_HOSTS` address on the exact port
+    `TUBEDEPTH_TEST_POSTGRES_URL` names is let through rather than refused
     outright. Now that `database_url_for_tests` names a real PostgreSQL server
     (`just postgres`, or CI's service container) instead of a SQLite file, the
     whole default suite opens a socket to it — that traffic is neither the
     network nor the hazard this guard exists for. Anything else, including a
-    datacenter-only address a proxy might resolve to, is still refused.
+    *different* local service on a different port, is still refused.
     """
     if request.node.get_closest_marker("live"):
         yield
         return
 
+    database_port = _test_database_port()
     original_connect = socket.socket.connect
 
     def refuse(self: socket.socket, address: object) -> object:
-        host = address[0] if isinstance(address, tuple) else address
-        if host in LOCAL_DATABASE_HOSTS:
+        host, port = (address[0], address[1]) if isinstance(address, tuple) else (address, None)
+        if host in LOCAL_DATABASE_HOSTS and port is not None and port == database_port:
             return original_connect(self, address)  # type: ignore[arg-type]
         raise RuntimeError(
             f"test attempted a network connection to {address!r}; "

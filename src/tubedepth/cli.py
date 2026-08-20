@@ -142,10 +142,13 @@ def _database(data_directory: Path) -> Database:
 
     The URL comes from `settings.database_url`, the one resolver Alembic also
     calls (`migrate` below) — so `tubedepth work` and `tubedepth migrate`
-    always agree on which database they mean.
+    always agree on which database they mean. `data_directory` no longer
+    contributes to that URL at all (there is no SQLite fallback under it to
+    contribute, since the cutover, #15); it is created here only because most
+    callers of `_database()` also open the payload store under the same path.
     """
     data_directory.mkdir(parents=True, exist_ok=True)
-    url = database_url(data_directory)
+    url = database_url()
     database = Database(url)
     database.verify_placement()
     if not database.is_migrated():
@@ -435,7 +438,7 @@ def migrate(
     root = Path(__file__).resolve().parent.parent.parent
     configuration = Config(str(root / "alembic.ini"))
     configuration.set_main_option("script_location", str(root / "migrations"))
-    url = database_url(data_directory)
+    url = database_url()
 
     # Not passed to `configuration` — `ConfigParser.set` validates `%`
     # interpolation syntax, and a percent-encoded password (the ordinary shape
@@ -536,6 +539,12 @@ def transfer_command(
     preserved verbatim, rather than a `pg_dump` run by hand at 2am — see
     `tubedepth.transfer` for why that would silently corrupt every instant.
 
+    `--from` is the one place a SQLite URL is still accepted anywhere in this
+    project (`Database` otherwise refuses one since the cutover, #15): a real
+    cutover's source is the SQLite file this deployment used to run on, and
+    that is the whole point of the tool. `--to` is never SQLite — it is always
+    refused, the same as every other database this application opens.
+
     `--to` names the database the connection will actually write through, so
     in a real cutover that is the runtime credential: the migrator is
     deployment-only (rule 1) and has no direct DML grant on `tubedepth`'s
@@ -545,7 +554,7 @@ def transfer_command(
     opening the target for writing — an operator standing in front of a
     cutover wants to see six numbers before committing to them.
     """
-    source = Database(source_url)
+    source = Database(source_url, allow_sqlite_source=True)
 
     if dry_run:
         models = mapped_models()

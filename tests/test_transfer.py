@@ -6,6 +6,21 @@ has ever moved a row from one database to another, and the rows in question
 include 248 targets whose repeated observations are not re-collectable at any
 price. These tests are the proof that a transfer actually carries every row
 of every table, verbatim, rather than a `pg_dump`-and-hope run by hand.
+
+Both ends stay SQLite for the mechanics tests below (counts, identifiers,
+partial-failure, re-count verification), on purpose (Task 8): they are what
+prove `tubedepth transfer` still works with no PostgreSQL server at all,
+which matters because `Database` otherwise refuses anything that is not
+PostgreSQL since the cutover — `allow_sqlite_source=True` is the deliberate
+exception both sides take here. A real cutover's *source* is always SQLite
+(the file a deployment used to run on) and its target is always PostgreSQL
+(`cli.transfer_command` never passes the flag for `--to`), but `transfer()`
+itself is dialect-agnostic — it moves rows through the ORM, not through
+either database's own wire format — so proving its mechanics does not need a
+server, and keeping that true is worth more than mirroring production's
+dialect pairing in every test. The round-trip test at the bottom is what
+proves the production pairing itself: SQLite in, PostgreSQL out, with the
+real migrator/runtime roles and the real `tubedepth` schema.
 """
 
 from __future__ import annotations
@@ -36,8 +51,13 @@ def _seeded(path: Path) -> Database:
     """A source database holding a representative row in each of the six
     tables — including a job whose `identifier` the test can look for again
     after the crossing, and an artifact whose `fetched_at` carries
-    microseconds, since a round instant would hide a truncating transfer."""
-    database = Database(f"sqlite+pysqlite:///{path}")
+    microseconds, since a round instant would hide a truncating transfer.
+
+    SQLite, and only accepted here through `allow_sqlite_source`: the source
+    of a real cutover is the SQLite file a deployment used to run on, which is
+    the one case `Database` still opens one for (Task 8).
+    """
+    database = Database(f"sqlite+pysqlite:///{path}", allow_sqlite_source=True)
     database.create_schema()
     with database.session() as session:
         session.add_all(
@@ -112,7 +132,7 @@ def test_every_row_of_every_table_arrives(tmp_path: Path) -> None:
     silently empty reads as "moved 12 rows" either way.
     """
     source = _seeded(tmp_path / "source.db")
-    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}")
+    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}", allow_sqlite_source=True)
     target.create_schema()
 
     outcome = transfer(source=source, target=target)
@@ -131,7 +151,7 @@ def test_an_observations_instant_survives_to_the_microsecond(tmp_path: Path) -> 
     """The x-axis of the time series. A transfer that rounds it has destroyed
     the thing the transfer exists to protect."""
     source = _seeded(tmp_path / "source.db")
-    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}")
+    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}", allow_sqlite_source=True)
     target.create_schema()
 
     transfer(source=source, target=target)
@@ -152,7 +172,7 @@ def test_an_observations_instant_survives_to_the_microsecond(tmp_path: Path) -> 
 def test_identifiers_are_carried_rather_than_regenerated(tmp_path: Path) -> None:
     """`jobs.payload_digest` and `GET /v1/jobs/{id}/result` address by these."""
     source = _seeded(tmp_path / "source.db")
-    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}")
+    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}", allow_sqlite_source=True)
     target.create_schema()
 
     transfer(source=source, target=target)
@@ -168,7 +188,7 @@ def test_a_target_that_already_holds_rows_is_refused(tmp_path: Path) -> None:
     because observations accumulate — so a second run would duplicate every
     observation and nothing would complain."""
     source = _seeded(tmp_path / "source.db")
-    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}")
+    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}", allow_sqlite_source=True)
     target.create_schema()
     with target.session() as session:
         session.add(Job(identifier="already-here", kind="video.metadata", target="z"))
@@ -207,7 +227,7 @@ def test_a_mid_transfer_failure_says_the_target_holds_partial_data(
     with source.session() as session:
         for index in range(4, 9):
             session.add(Job(identifier=f"job-{index}", kind="video.metadata", target="x"))
-    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}")
+    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}", allow_sqlite_source=True)
     target.create_schema()
 
     monkeypatch.setattr(module, "BATCH", 2)
@@ -251,7 +271,7 @@ def test_a_target_count_that_disagrees_with_what_was_written_is_an_error(
     import tubedepth.transfer as module
 
     source = _seeded(tmp_path / "source.db")
-    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}")
+    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}", allow_sqlite_source=True)
     target.create_schema()
 
     real_count_rows = module._count_rows
@@ -283,7 +303,7 @@ def test_placement_is_checked_on_both_source_and_target(
     (`tests/test_postgres_privileges.py`); this only proves `transfer()`
     actually calls it, on both ends, by making the call itself fail."""
     source = _seeded(tmp_path / "source.db")
-    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}")
+    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}", allow_sqlite_source=True)
     target.create_schema()
 
     monkeypatch.setattr(

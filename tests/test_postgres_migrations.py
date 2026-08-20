@@ -262,3 +262,122 @@ def test_every_instant_is_stored_as_timestamptz(empty_database: None) -> None:
     engine.dispose()
 
     assert naive == [], f"these instants are not timestamptz: {naive}"
+
+
+@needs_postgres
+def test_the_migrations_have_exactly_one_head() -> None:
+    """Two heads is a merge nobody noticed, and it fails at deploy time on the
+    machine least able to fix it.
+
+    Needs a server like everything else in this file: `migrations/env.py`
+    runs `run_migrations_online()` at import for *every* Alembic command,
+    `heads` included, and since the cutover (#15) that means resolving
+    `TUBEDEPTH_DATABASE_URL` and opening it — there is no SQLite fallback
+    left for a command that touches no schema to fall back to.
+    """
+    result = alembic("heads")
+
+    assert result.returncode == 0, result.stderr
+    assert len([line for line in result.stdout.splitlines() if line.strip()]) == 1, result.stdout
+
+
+@needs_postgres
+def test_the_cli_upgrades_an_empty_schema(empty_database: None) -> None:
+    from typer.testing import CliRunner
+
+    from tubedepth.cli import application
+
+    result = CliRunner().invoke(application, ["migrate"], env={"TUBEDEPTH_DATABASE_URL": URL})
+
+    assert result.exit_code == 0, result.output
+    engine = create_engine(URL or "")
+    tables = inspect(engine).get_table_names(schema=SCHEMA)
+    engine.dispose()
+    assert "jobs" in tables
+
+
+@needs_postgres
+def test_the_cli_can_stamp_a_schema_that_predates_migrations(empty_database: None) -> None:
+    """The one-time problem every project gets exactly once.
+
+    This schema existed for a day before migrations did. Upgrading it would
+    try to create tables that are already there; the honest move is to record
+    which revision its schema already matches and migrate forward from then
+    on. Built by running the real migration and then removing its own
+    bookkeeping, which is the shape of the actual case: a schema that matches
+    the models with no `alembic_version` row to say so.
+    """
+    from typer.testing import CliRunner
+
+    from tubedepth.cli import application
+
+    assert alembic("upgrade", "head").returncode == 0
+    engine = create_engine(URL or "")
+    with engine.begin() as connection:
+        connection.execute(text("SET ROLE tubedepth_owner"))
+        connection.execute(text(f"DROP TABLE {SCHEMA}.alembic_version"))
+    engine.dispose()
+
+    result = CliRunner().invoke(
+        application, ["migrate", "--stamp"], env={"TUBEDEPTH_DATABASE_URL": URL}
+    )
+
+    assert result.exit_code == 0, result.output
+    engine = create_engine(URL or "")
+    with engine.connect() as connection:
+        connection.execute(text("SET ROLE tubedepth_owner"))
+        stamped = connection.execute(
+            text(f"SELECT version_num FROM {SCHEMA}.alembic_version")
+        ).scalar()
+    engine.dispose()
+    assert stamped, "nothing was recorded, so the next upgrade will try to create what exists"
+
+
+@needs_postgres
+def test_migrate_follows_the_operators_database_url_and_restores_it_afterwards(
+    empty_database: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`tubedepth migrate` sets `TUBEDEPTH_DATABASE_URL` around the Alembic
+    call because `migrations/env.py` reads it directly (Task 8 unified the two
+    resolvers into `tubedepth.settings.database_url`, which has no SQLite
+    fallback to prefer an operator's variable over any more). The variable
+    must come back out afterwards, restored to exactly what it was — otherwise
+    the first `tubedepth migrate` in a long-lived process would silently
+    redirect everything it runs next, `tubedepth work`/`serve` included.
+    """
+    from typer.testing import CliRunner
+
+    from tubedepth.cli import application
+
+    monkeypatch.setenv("TUBEDEPTH_DATABASE_URL", URL or "")
+
+    result = CliRunner().invoke(application, ["migrate", "--data-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert os.environ["TUBEDEPTH_DATABASE_URL"] == URL, (
+        "the variable was not restored to what it was set to before invoke()"
+    )
+
+
+@needs_postgres
+def test_migrate_refuses_cleanly_with_no_database_url_set(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The other half: since the cutover (#15) there is no fallback for
+    `migrate` to fall into, so an operator who forgot the variable gets a
+    named refusal — before `migrations/env.py` ever mutates the environment —
+    rather than a `tubedepth.db` created somewhere nobody asked for.
+    """
+    from typer.testing import CliRunner
+
+    from tubedepth.cli import application
+    from tubedepth.errors import ConfigurationError
+
+    monkeypatch.delenv("TUBEDEPTH_DATABASE_URL", raising=False)
+
+    result = CliRunner().invoke(application, ["migrate", "--data-dir", str(tmp_path)])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ConfigurationError)
+    assert "TUBEDEPTH_DATABASE_URL" in str(result.exception)
+    assert "TUBEDEPTH_DATABASE_URL" not in os.environ

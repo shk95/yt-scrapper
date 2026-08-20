@@ -29,13 +29,15 @@ class JobRepository:
     ) -> Job | None:
         """Take exactly one queued job, or return None.
 
-        The write lock is held from the first statement of the transaction —
-        see Database, which makes every transaction IMMEDIATE — so the SELECT
-        below cannot be overtaken by another worker's UPDATE before this one
-        runs.
-
-        The `state == QUEUED` guard on the UPDATE plus the rowcount check is
-        belt and braces on top of that.
+        Under PostgreSQL's READ COMMITTED, two workers can both SELECT the
+        same candidate — nothing here escalates a lock ahead of the write the
+        way SQLite's BEGIN IMMEDIATE once did. Safety comes entirely from the
+        UPDATE that follows: `state == QUEUED` is in its WHERE clause, so of
+        two workers racing the same candidate only the one that commits first
+        actually flips a still-QUEUED row, and the rowcount check is how the
+        loser finds out it got nothing rather than believing it claimed a job
+        it did not. That guard is the whole mechanism now, not a second layer
+        on top of one.
         """
         now = self._clock()
         conditions = [Job.state == JobState.QUEUED, Job.scheduled_at <= now]

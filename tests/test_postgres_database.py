@@ -1,18 +1,18 @@
-"""`Database`'s dialect-conditional behaviour, against a real PostgreSQL server.
+"""`Database`'s read-only guarantee, against a real PostgreSQL server.
 
-`tests/test_database_url.py` proves the wiring offline: a PostgreSQL URL
-installs no SQLite pragmas. It cannot prove the PostgreSQL-only half actually
-works, because SQLite is the only dialect the offline suite is allowed to
-assume is there. `_install_read_only_hook` implements the one shape
-`docs/shared-postgres.md` says must not exist — a session that declares
-`readonly=True` and then writes — and until this file, that guarantee was
-checked only by an ad hoc, uncommitted script. `just check` cannot catch a
-regression here at all: SQLite takes the other branch in `Database.__init__`
-and never reaches this code.
+`tests/test_database_url.py` proves the wiring: `Database` refuses anything
+that is not PostgreSQL (with one deliberate exception, the transfer source),
+and reports the right dialect for both. It cannot prove the read-only hook
+actually works, because that needs a live server to write against.
+`_install_read_only_hook` implements the one shape `docs/shared-postgres.md`
+says must not exist — a session that declares `readonly=True` and then writes
+— and until this file, that guarantee was checked only by an ad hoc,
+uncommitted script.
 
-Marked `postgres` and deselected by default, for the same reason
-`test_postgres_migrations.py` is: it needs a server the offline suite must not
-assume. `just postgres` starts one and runs this.
+Marked `postgres`, the label for structural PostgreSQL tests (see
+`pyproject.toml`) rather than a selection filter — `tool/checks/test` and CI
+both bring up a server and run every test in the suite against it now,
+this file included.
 """
 
 from __future__ import annotations
@@ -92,14 +92,6 @@ def database() -> Iterator[Database]:
 
     database = Database(RUNTIME_URL or "")
     yield database
-
-
-@needs_postgres
-def test_the_dialect_is_postgresql_and_no_sqlite_hooks_are_installed(
-    database: Database,
-) -> None:
-    assert database.dialect == "postgresql"
-    assert database.sqlite_hooks_installed is False
 
 
 @needs_postgres

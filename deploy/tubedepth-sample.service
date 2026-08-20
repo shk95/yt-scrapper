@@ -36,6 +36,11 @@ WorkingDirectory=%h/github_prj/yt-scrapper
 # first time it is enabled.
 Environment=PATH=%h/.nix-profile/bin:/usr/local/bin:/usr/bin:/bin
 Environment=TUBEDEPTH_DATA_DIR=%h/github_prj/yt-scrapper/var
+# Required since the PostgreSQL cutover (#15) — this unit's `enqueue` opens
+# the database like every other command, and there is no SQLite fallback.
+# Same file the api/worker units use; see tubedepth-worker.service for how to
+# create it.
+EnvironmentFile=%h/.config/tubedepth/worker.env
 ExecStart=/usr/bin/env uv run --frozen tubedepth enqueue video.metadata --from-file %h/.config/tubedepth/watchlist.txt --refresh
 
 # Not restarted. A sample that failed is not worth retrying in a tight loop —

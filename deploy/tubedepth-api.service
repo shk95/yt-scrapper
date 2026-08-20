@@ -27,6 +27,17 @@ WorkingDirectory=%h/github_prj/yt-scrapper
 # first time it is enabled.
 Environment=PATH=%h/.nix-profile/bin:/usr/local/bin:/usr/bin:/bin
 Environment=TUBEDEPTH_DATA_DIR=%h/github_prj/yt-scrapper/var
+# Required since the PostgreSQL cutover (#15) — tubedepth has no SQLite
+# fallback, and every command this unit runs refuses to start without
+# TUBEDEPTH_DATABASE_URL. A URL is a credential (it embeds a password), so it
+# belongs in an EnvironmentFile with mode 0600 rather than directly in this
+# file, which is world-readable in the unit directory:
+#
+#   mkdir -p ~/.config/tubedepth
+#   echo 'TUBEDEPTH_DATABASE_URL=postgresql+psycopg://tubedepth_runtime:...@host/db' \
+#     > ~/.config/tubedepth/database.env
+#   chmod 0600 ~/.config/tubedepth/database.env
+EnvironmentFile=%h/.config/tubedepth/database.env
 # How many items a listing kind collects, and how many comments a harvest
 # takes. Deployment-wide caps rather than per-request, and **set them the same
 # in the api unit and the worker unit**: each process reads them once, and if

@@ -19,11 +19,20 @@ mapped Python value, not as bytes on the wire.
 `verify_placement()` runs on *both* ends, not only the target. The CLI
 already checks the target before calling here (mirroring `_database()`), but
 this function is a public entry point in its own right — every offline test
-in this module calls it directly — and the rollback direction, PostgreSQL
-back to SQLite after a bad cutover, is exactly the moment someone is most
-likely to script a direct call in a hurry, with a PostgreSQL *source* whose
-`search_path` nobody checked. Putting the guard here rather than only in the
-CLI means every caller gets it, not only the one that remembered to ask.
+in this module calls it directly — and a hand-rolled script reaching for
+`Database(url, allow_sqlite_source=True)` on both sides to move data back
+after a bad cutover is exactly the moment someone is most likely to script a
+direct call in a hurry, with a PostgreSQL *source* whose `search_path` nobody
+checked. Putting the guard here rather than only in the CLI means every
+caller gets it, not only the one that remembered to ask.
+
+The source stays SQLite by design (Task 8): `Database` refuses any URL that
+is not PostgreSQL, and `allow_sqlite_source=True` is the one deliberate
+exception, reserved for a real cutover's source — the file a deployment used
+to run on. `tubedepth transfer_command --to` never passes that flag, so its
+target can never be SQLite; nothing here does either, since this module
+constructs no `Database` of its own and only ever moves the rows the caller
+already opened both ends for.
 """
 
 from __future__ import annotations

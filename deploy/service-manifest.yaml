@@ -33,19 +33,43 @@ external_object_stores:
     write_protocol: content-addressed, write-then-record
     referenced_by: artifacts.digest
 
-# One API process + one worker process, each holding a write engine and a
-# read engine (src/tubedepth/database.py's `Database`, and its docstring for
-# why the two engines are separate) — four engines total. Each engine is
-# created with pool_size=2, max_overflow=2 on PostgreSQL (SQLite needs no
-# ceiling; it is a local file), so:
+# docs/shared-postgres.md rule 4's formula, term by term — so the next
+# person adding an API process or a rolling-deploy strategy has a line to
+# update rather than a bare total to reverse-engineer:
+#
+#   service budget = max concurrent instances x per-instance pool ceiling
+#                   + worker/scheduler/batch-only connections
+#                   + service migration connections
+#
+# Steady state — one API process + one worker process, each holding a write
+# engine and a read engine (src/tubedepth/database.py's `Database`, and its
+# docstring for why the two engines are separate) — four engines total. Each
+# engine is created with pool_size=2, max_overflow=2 on PostgreSQL, so:
 #
 #   ceiling per engine = pool_size + max_overflow = 2 + 2 = 4
 #   engines            = 2 processes x 2 engines each      = 4
-#   total ceiling      = 4 engines x 4                     = 16
+#   steady-state total = 4 engines x 4                     = 16
 #
-# 16 <= 20, the number below, which is also the CONNECTION LIMIT
+# Worker/scheduler/batch-only connections — the worker is already counted
+# above as one of the two processes; nothing here runs a separate scheduler
+# or batch process, so this term is 0.
+#
+# Service migration connection — `tubedepth migrate` (migrations/env.py) opens
+# exactly one connection through `poolclass=pool.NullPool`, for the duration
+# of a deploy. +1.
+#
+# Rolling-deploy overlap — these are plain systemd user units
+# (Restart=on-failure/always, not a blue-green or rolling strategy), so an old
+# and a new instance are never both running against this database at once.
+# +0, written down rather than left off: whoever changes that deployment
+# shape owes this line an update, not a silent doubling of the steady-state
+# term above it.
+#
+#   total = 16 + 0 + 1 + 0 = 17
+#
+# 17 <= 20, the number below, which is also the CONNECTION LIMIT
 # deploy/postgres-bootstrap.sql sets on tubedepth_runtime — a miscount here
-# is caught by the database itself, not only by this arithmetic. The 4
-# left over is the operational safety margin docs/shared-postgres.md rule 4
-# asks for. See docs/status.md § "규정 적용" for the full accounting.
+# is caught by the database itself, not only by this arithmetic. The 3 left
+# over is the operational safety margin rule 4 asks for. See docs/status.md
+# § "규정 적용" for the full accounting.
 connection_budget: 20

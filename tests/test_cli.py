@@ -6,12 +6,15 @@ cannot honour. Anything that would reach YouTube belongs in the live contracts.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
+from collections.abc import Iterator
 from pathlib import Path
 
-from sqlalchemy import func, select
-from sqlalchemy.exc import OperationalError
+import pytest
+from sqlalchemy import create_engine, func, select, text
+from sqlalchemy.exc import DBAPIError
 from typer.testing import CliRunner
 
 from tubedepth.cli import application
@@ -22,32 +25,103 @@ from tubedepth.settings import database_url
 
 runner = CliRunner()
 
+SCHEMA = "tubedepth"
+POSTGRES_URL = os.environ.get("TUBEDEPTH_TEST_POSTGRES_URL")
+
+
+@pytest.fixture(autouse=True)
+def _cli_database_url(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Point every command in this file at a real, isolated database.
+
+    `--data-dir`'s SQLite fallback is gone (#15, Task 8): `settings.database_url`
+    now raises unless `TUBEDEPTH_DATABASE_URL` is set, so a CLI invocation with
+    no other setup has nothing to open. Nearly every test below relied on that
+    fallback for its own private SQLite file; autouse turns replacing it into
+    one fixture instead of thirty edits.
+
+    The literal `tubedepth` schema, not a throwaway per-test one
+    (`database_url_for_tests`, used elsewhere in this suite): `verify_placement()`
+    — which every `_database()` call goes through — checks the connection's
+    `search_path` against `Database.SCHEMA`, a fixed `"tubedepth"`, by design
+    (it is what proves a deployment's `ALTER ROLE ... SET search_path` actually
+    took effect). A per-test schema would fail that check for a reason that has
+    nothing to do with what any test here is exercising, so this file drops and
+    rebuilds the one schema instead, sequentially, the same shape
+    `tests/test_postgres_migrations.py`'s `empty_database` fixture uses.
+
+    Connected as `tubedepth_migrator` throughout, with two harness-only grants
+    beyond what `deploy/postgres-bootstrap.sql` gives that role in production:
+    `CREATE` (most tests here call `Database.create_schema()` directly rather
+    than running a real migration, for speed) and the same DML
+    `tubedepth_runtime` gets (this file's commands read and write rows, and
+    production never sends that traffic in as the migrator — but a single
+    `TUBEDEPTH_DATABASE_URL` has to stand in for both roles across one test
+    file, or every test would need two credentials for two different halves of
+    one command). Real deployments never grant either. `tool/checks/test`
+    already does the same kind of test-only grant for a different reason
+    (`GRANT CREATE ON DATABASE fleet TO tubedepth_migrator`, harness setup).
+    """
+    if not POSTGRES_URL:
+        pytest.skip("set TUBEDEPTH_TEST_POSTGRES_URL, or run `just postgres`")
+
+    engine = create_engine(POSTGRES_URL)
+    with engine.begin() as connection:
+        connection.execute(text("SET ROLE tubedepth_owner"))
+        connection.execute(text(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"))
+        connection.execute(text("RESET ROLE"))
+        connection.execute(text(f"CREATE SCHEMA {SCHEMA} AUTHORIZATION tubedepth_owner"))
+        connection.execute(text("SET ROLE tubedepth_owner"))
+        connection.execute(text(f"GRANT USAGE, CREATE ON SCHEMA {SCHEMA} TO tubedepth_migrator"))
+        connection.execute(
+            text(
+                f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {SCHEMA} "
+                "TO tubedepth_migrator"
+            )
+        )
+        connection.execute(
+            text(
+                f"ALTER DEFAULT PRIVILEGES IN SCHEMA {SCHEMA} "
+                "GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO tubedepth_migrator"
+            )
+        )
+    engine.dispose()
+
+    monkeypatch.setenv("TUBEDEPTH_DATABASE_URL", POSTGRES_URL)
+    yield
+
+    engine = create_engine(POSTGRES_URL)
+    with engine.begin() as connection:
+        connection.execute(text("SET ROLE tubedepth_owner"))
+        connection.execute(text(f"DROP SCHEMA IF EXISTS {SCHEMA} CASCADE"))
+    engine.dispose()
+
 
 def _database(data_directory: Path) -> Database:
-    """The same database a CLI invocation against `data_directory` would open.
-
-    Reads and writes through SQLAlchemy rather than the raw `sqlite3` driver
-    this file used to reach for directly: it is the same behaviour these tests
-    ultimately assert on — a table's contents — through the one interface the
-    application itself uses, so a query here breaks the same way a query in
-    the application would. This still deliberately talks to the SQLite file
-    `--data-dir` falls back to (`database_url_for_tests`, since Task 7, names
-    an unrelated PostgreSQL schema); that fallback, and the CLI's own boot
-    behaviour around it, is what this file is testing.
+    """The database a CLI invocation opens — `data_directory` no longer names
+    it (there is no SQLite fallback under `--data-dir` to name any more), only
+    `TUBEDEPTH_DATABASE_URL` does, which `_cli_database_url` above points at
+    the real `tubedepth` schema, dropped and rebuilt before every test in this
+    file runs. The parameter stays so every call site here (many of them
+    predating the cutover) keeps reading the way it always did: "the database
+    this data directory's commands use."
     """
-    return Database(database_url(data_directory))
+    return Database(database_url())
 
 
 def queued_targets(data_directory: Path) -> list[str]:
     """Targets in the queue, and an empty list when there is no queue at all.
 
-    A command that refuses its arguments should not have created a database,
-    so "no such table" is the same answer as "no rows" for these tests.
+    A command that refuses its arguments should not have created a schema, so
+    "relation does not exist" is the same answer as "no rows" for these tests.
+    `DBAPIError` rather than `ProgrammingError` specifically: PostgreSQL raises
+    the former for a missing table, but the shape of "no schema behind this
+    connection at all" is worth tolerating too rather than pinning to today's
+    exact exception class.
     """
     try:
         with _database(data_directory).session(readonly=True) as session:
             return list(session.scalars(select(Job.target)))
-    except OperationalError:
+    except DBAPIError:
         return []
 
 
@@ -344,9 +418,8 @@ def test_the_backfill_command_reports_what_it_attributed(tmp_path: Path) -> None
     this one — the window closes as retention ages out the rows it would
     attribute.
 
-    Seeded straight into the SQLite file `--data-dir` falls back to, the same
-    reason `_database` exists: `database_url_for_tests` (Task 7) names an
-    unrelated PostgreSQL schema, not the file this CLI invocation opens.
+    Seeded straight through `_database()`, the same database
+    `_cli_database_url` pointed `TUBEDEPTH_DATABASE_URL` at for this test.
     """
     from tubedepth.fingerprints import fingerprint
     from tubedepth.models import utcnow

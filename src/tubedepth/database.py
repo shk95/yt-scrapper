@@ -27,8 +27,10 @@ from .models import Base
 #   engines            = 2 processes x 2 engines each = 4
 #   total ceiling      = 4 engines x 4 = 16
 #
-# 16 <= 20, with 4 left over as the operational safety margin
-# docs/shared-postgres.md rule 4 asks for, not spent down to the wire.
+# That is the steady-state term of rule 4's formula; `deploy/service-manifest.yaml`
+# carries the migration-connection and rolling-deploy-overlap terms alongside
+# it, for a total of 17 <= 20 — 3 left over as the operational safety margin
+# rule 4 asks for, not spent down to the wire.
 _POOL_SIZE = 2
 _MAX_OVERFLOW = 2
 
@@ -36,117 +38,80 @@ _MAX_OVERFLOW = 2
 class Database:
     """A database named by a URL, and the one setting that makes it safe to claim from.
 
-    On SQLite, every transaction is IMMEDIATE. Under SQLite's default DEFERRED
-    mode a read takes only a SHARED lock and the write lock is acquired at the
-    first write, so two workers can select the same job before either updates
-    it — and a failed lock *upgrade* raises SQLITE_BUSY at once, ignoring
-    busy_timeout entirely. IMMEDIATE takes RESERVED on the first statement
-    instead. On PostgreSQL there is no equivalent hook: `JobRepository.claim`
-    is a guarded UPDATE with a rowcount check, which is correct under READ
-    COMMITTED without any lock escalated up front.
+    PostgreSQL only, since the cutover (#15) — the constructor refuses any
+    other dialect, with one deliberate exception. `tubedepth transfer` reads
+    the index out of a SQLite file as the one-time act of carrying it onto
+    PostgreSQL, so its *source* endpoint passes `allow_sqlite_source=True`;
+    every other caller, including the application itself, gets the refusal.
+    See `transfer.py` and `docs/status.md` for why the source stays SQLite
+    while nothing else does.
 
-    Emitting this from the engine's begin event rather than inside the claim is
-    what makes it a property of the database rather than something every
-    repository method has to remember. It also means a claim issued after some
-    earlier write in the same unit of work works: the transaction is already
-    open, so nothing tries to start a second one.
+    `JobRepository.claim` is a guarded UPDATE (`state == QUEUED` in the WHERE
+    clause) with a rowcount check, which is correct under READ COMMITTED with
+    no lock escalated up front: two workers can both SELECT the same
+    candidate, but only one UPDATE matches a still-QUEUED row — the other
+    affects zero rows and returns None. That is the entire safety mechanism;
+    nothing here escalates a lock ahead of it the way SQLite's BEGIN IMMEDIATE
+    used to.
     """
 
     SCHEMA = "tubedepth"
 
-    def __init__(self, url: str) -> None:
+    def __init__(self, url: str, *, allow_sqlite_source: bool = False) -> None:
         self._url = url
+        dialect = make_url(url).get_backend_name()
+        if dialect != "postgresql" and not allow_sqlite_source:
+            raise ConfigurationError(
+                f"tubedepth runs on PostgreSQL only since the cutover (#15); got a "
+                f"{dialect!r} URL. `tubedepth transfer --from` is the one place a "
+                "SQLite source is still accepted, for carrying an old index across."
+            )
         # Explicit pool ceilings only on PostgreSQL: `_POOL_SIZE`/
-        # `_MAX_OVERFLOW` are what the arithmetic above is spent against, and
-        # SQLite's default pooling needs no ceiling — it is a local file, not
-        # a budget every other service on a shared server is also drawing
-        # from. Read from the URL rather than after `create_engine` because
-        # the pool class is chosen at construction time; there is no
-        # reconfiguring it afterwards.
+        # `_MAX_OVERFLOW` are what the arithmetic above is spent against. A
+        # SQLite source opened through `allow_sqlite_source` is a one-shot
+        # local file read by `tubedepth transfer`, not a budget any other
+        # service on a shared server draws from, so it gets no ceiling.
         pool_kwargs = (
             {"pool_size": _POOL_SIZE, "max_overflow": _MAX_OVERFLOW}
-            if make_url(url).get_backend_name() == "postgresql"
+            if dialect == "postgresql"
             else {}
         )
         self._engine = create_engine(url, **pool_kwargs)
-        # A second engine, and it earns its keep. On SQLite the BEGIN IMMEDIATE
-        # below is what makes claiming safe, but it applies to every
-        # transaction the engine opens — so a route that only counts rows took
-        # the write lock and queued behind the worker. WAL exists precisely so
-        # readers never block writers, and one event handler was opting out of
-        # it everywhere.
-        #
-        # Measured before this existed: 12 concurrent clients against a worker
-        # running 22 transcript jobs put `GET /healthz` — one COUNT — at a p99
-        # of 1,434 ms, while `GET /v1/sources`, which touches no database, sat
-        # at 335 ms under the same load.
-        #
-        # On PostgreSQL readers never block writers in the first place — MVCC
-        # means a SELECT never waits on a concurrent UPDATE's row locks — so
-        # this second engine is no longer about avoiding contention. It is
-        # about refusing writes and declaring intent: a route that only reads
+        # A second engine, and it earns its keep: a route that only reads
         # cannot accidentally acquire a row lock it has no business holding,
         # and the session's own type says so rather than relying on every
-        # caller remembering.
+        # caller remembering. On PostgreSQL readers never block writers in the
+        # first place — MVCC means a SELECT never waits on a concurrent
+        # UPDATE's row locks — so this is about refusing writes and declaring
+        # intent, not about avoiding contention.
         #
-        # Separate rather than a flag on the same engine because the guarantee
-        # is then structural: this engine has no IMMEDIATE hook to forget, and
-        # on SQLite `query_only` is set once per connection instead of per
-        # transaction.
+        # Measured before the read/write split existed: 12 concurrent clients
+        # against a worker running 22 transcript jobs put `GET /healthz` — one
+        # COUNT — at a p99 of 1,434 ms, while `GET /v1/sources`, which touches
+        # no database, sat at 335 ms under the same load. That measurement was
+        # taken on SQLite, where every transaction was IMMEDIATE and a reader
+        # took the write lock; the split stayed because the guarantee it buys
+        # — a session that claims `readonly=True` and then writes is refused,
+        # not merely unlikely — does not depend on which dialect is running.
         self._read_engine = create_engine(url, **pool_kwargs)
-        self.dialect = self._engine.dialect.name
-        self.sqlite_hooks_installed = self.dialect == "sqlite"
+        self.dialect = dialect
 
-        if self.sqlite_hooks_installed:
-            self._install_sqlite_hooks()
-        else:
+        if self.dialect == "postgresql":
             self._install_read_only_hook()
 
         self._sessions = sessionmaker(bind=self._engine, expire_on_commit=False)
         self._read_sessions = sessionmaker(bind=self._read_engine, expire_on_commit=False)
 
-    def _install_sqlite_hooks(self) -> None:
-        """WAL, a busy timeout, foreign keys, and IMMEDIATE writes.
-
-        SQLite-only: none of this has a PostgreSQL equivalent, and none of it
-        is needed on PostgreSQL — see the class docstring and the read
-        engine's comment above.
-        """
-
-        @event.listens_for(self._engine, "connect")
-        @event.listens_for(self._read_engine, "connect")
-        def _configure(dbapi_connection: object, record: object) -> None:
-            cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
-            # WAL so the API can read job state while a worker writes, and a
-            # busy timeout so a second writer waits its turn instead of raising
-            # on the first collision. Both only started mattering when the
-            # worker gained real concurrency.
-            cursor.execute("PRAGMA journal_mode=WAL")
-            cursor.execute("PRAGMA busy_timeout=5000")
-            cursor.execute("PRAGMA foreign_keys=ON")
-            cursor.close()
-
-        @event.listens_for(self._read_engine, "connect")
-        def _refuse_writes(dbapi_connection: object, record: object) -> None:
-            # Without this, `readonly=True` would be a performance hint that
-            # silently lies: a session taking no write lock but accepting
-            # writes is the one shape that must not exist, since two of them
-            # can interleave exactly the way IMMEDIATE was added to prevent.
-            cursor = dbapi_connection.cursor()  # type: ignore[attr-defined]
-            cursor.execute("PRAGMA query_only=ON")
-            cursor.close()
-
-        @event.listens_for(self._engine, "begin")
-        def _begin_immediate(connection: Connection) -> None:
-            connection.exec_driver_sql("BEGIN IMMEDIATE")
-
     def _install_read_only_hook(self) -> None:
-        """`readonly=True` refuses writes on any dialect.
+        """`readonly=True` refuses writes, on PostgreSQL.
 
-        On SQLite this is `PRAGMA query_only`; here it is the transaction's own
-        mode. Without it `readonly=True` would be a hint that silently lies —
-        a session that declares it only reads and then writes is the one shape
-        that must not exist.
+        A no-op on a SQLite source opened through `allow_sqlite_source`:
+        `tubedepth transfer` is the only caller that ever sees one, it is a
+        one-shot local read, and `SET TRANSACTION READ ONLY` is PostgreSQL
+        syntax with no SQLite equivalent. Without this hook, `readonly=True`
+        would otherwise be a hint that silently lies on the dialect that
+        matters — a session that declares it only reads and then writes is
+        the one shape that must not exist.
         """
 
         @event.listens_for(self._read_engine, "begin")

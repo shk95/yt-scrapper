@@ -76,8 +76,11 @@ def served_paths(tmp_path: Path) -> set[str]:
     from tubedepth.database import Database
     from tubedepth.payload_store import PayloadStore
 
+    # No connection is opened for route enumeration, so a URL that never
+    # resolves is fine — but it does have to be PostgreSQL, since the
+    # cutover (#15) `Database` refuses anything else.
     application = create_application(
-        database=Database(f"sqlite+pysqlite:///{tmp_path / 'tubedepth.db'}"),
+        database=Database("postgresql+psycopg://u:p@h:5432/fleet"),
         payloads=PayloadStore(tmp_path / "payloads"),
     )
     # From the OpenAPI document rather than `application.routes`: recent
