@@ -446,7 +446,7 @@ curl -s -X DELETE -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB
 | `state` | `queued`, `running`, `succeeded`, `failed`, `cancelled` |
 | `kind` | 위 kind 중 하나 |
 | `target` | 저장된 그대로의 target, 바이트 단위로 일치해야 한다 |
-| `since` / `until` | RFC 3339, **`created_at`** 기준 — 잡이 요청된 시각 |
+| `since` / `until` | RFC 3339, **오프셋 필수** (`2026-08-21T00:00:00Z`). 오프셋이 없으면 422 `invalid_request`로 거부한다. **`created_at`** 기준 — 잡이 요청된 시각 |
 | `limit` | 기본 50. 1–500 밖이면 잘라내지 않고 422 `invalid_request`로 **거부한다** |
 | `cursor` | 이전 페이지에서 받은 값 |
 
@@ -481,7 +481,7 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/jobs?state=failed&limit=20'
 | --- | --- |
 | `kind` | 위 kind 중 하나 |
 | `target` | 저장된 그대로의 target, 바이트 단위로 일치해야 한다 |
-| `since` / `until` | RFC 3339, **`fetched_at`** 기준 — 관측이 이뤄진 시각. 잡 라우트에서는 요청된 시각인 `created_at` 기준이다 |
+| `since` / `until` | RFC 3339, **오프셋 필수** (`2026-08-21T00:00:00Z`). 오프셋이 없으면 422 `invalid_request`로 거부한다. **`fetched_at`** 기준 — 관측이 이뤄진 시각. 잡 라우트에서는 요청된 시각인 `created_at` 기준이다 |
 | `limit` | 기본 50. 1–500 밖이면 잘라내지 않고 422 `invalid_request`로 **거부한다** |
 | `cursor` | 이전 페이지에서 받은 값 |
 

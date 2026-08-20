@@ -280,6 +280,29 @@ def test_the_local_postgres_is_behind_a_profile_and_uses_the_real_bootstrap() ->
     )
 
 
+def test_the_postgres_healthcheck_probes_tcp_rather_than_the_socket() -> None:
+    """`pg_isready` run inside the container reaches the Unix socket by
+    default, and the official image's entrypoint runs a temporary, local-only
+    server during initdb that answers the socket while the bootstrap in
+    `postgres-initdb/` may still be creating the roles. A pass at that moment
+    releases `migrate` against a database that does not have them yet, and
+    under `restart: "no"` its failure takes the whole stack with it.
+
+    The temporary server never binds a TCP interface at all
+    (`listen_addresses=''`), so `-h 127.0.0.1` is what makes "healthy" mean
+    the real server, started after initdb — and so after the bootstrap — has
+    finished. `tool/checks/test` documents the same trap and makes the same
+    choice, probing the mapped port from the host.
+    """
+    check = " ".join(services()["postgres"]["healthcheck"]["test"])
+
+    assert "pg_isready" in check
+    assert "-h 127.0.0.1" in check, (
+        "the probe must go over TCP, or initdb's temporary server answers it early — "
+        "see the healthcheck comment and tool/checks/test"
+    )
+
+
 def test_the_api_binds_beyond_loopback_and_publishes_a_port() -> None:
     """The opposite of what `tests/test_deployment_units.py` asserts for the
     units, and deliberately so.
