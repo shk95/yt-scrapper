@@ -68,8 +68,11 @@ Python + FastAPI + SQLAlchemy + SQLite, 패키지는 `tubedepth`, 실행은 전�
 ## 이 호스트
 
 - WSL2 (Ubuntu 26.04), 16 CPU / 15 GiB. `systemctl --user` 동작.
-- **Docker 없음, passwordless sudo 없음.** 그래서 egress 프록시는 Gluetun이 아니라 **wireproxy**
-  (유저스페이스 WireGuard, root 불필요): `nix profile install nixpkgs#wireproxy`.
+- **Docker 있음, passwordless sudo 없음.** 확인 2026-08-20: 서버 29.6.2, compose v5.3.1,
+  sudo 없이 동작하고 이미지 pull 이력도 있다. 이 줄은 오래 "Docker 없음"이었고, 그 전제 위에서
+  내려진 결정이 둘 있다 — egress 프록시로 Gluetun 대신 **wireproxy**를 고른 것(유저스페이스
+  WireGuard, root 불필요: `nix profile install nixpkgs#wireproxy`)과, 마일스톤 1의 서술이다.
+  **둘 다 근거가 사라졌으니 다시 판단할 것.**
 - Windows 절전/복귀 후 **벽시계가 점프한다.** 간격·윈도우·격리 기한은 전부 `time.monotonic()`을 쓴다.
 - 직결 회선은 가정용 IP(KT)라 **YouTube 상대로는 이게 가장 좋은 egress다.** VPN exit은 데이터센터
   주소라 봇 검사 1순위이며, 기본적으로 서드파티(SponsorBlock) lane 전용이다.
