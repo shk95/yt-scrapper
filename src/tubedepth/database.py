@@ -13,26 +13,37 @@ from .errors import ConfigurationError
 from .models import Base
 
 # docs/shared-postgres.md rule 4: the connection budget is a number written
-# down, not an assertion. `deploy/service-manifest.yaml` declares 20 as the
-# hard ceiling for this service (also `CONNECTION LIMIT 20` on
+# down, not an assertion. `deploy/service-manifest.yaml` declares 32 as the
+# hard ceiling for this service (also `CONNECTION LIMIT 32` on
 # `tubedepth_runtime` in deploy/postgres-bootstrap.sql, so a miscount here is
 # caught by the database itself rather than trusted).
 #
-# One process holds two engines — a writer and a reader (see the class
-# docstring for why they are separate) — and the deployment is one API
-# process plus one worker process (deploy/service-manifest.yaml), so the
-# ceiling below is spent four times over:
+# The API process holds two engines at this default ceiling — a writer and a
+# reader (see the class docstring for why they are separate):
 #
 #   ceiling per engine = pool_size + max_overflow = 2 + 2 = 4
-#   engines            = 2 processes x 2 engines each = 4
-#   total ceiling      = 4 engines x 4 = 16
+#   API total          = 2 engines x 4            = 8
 #
-# That is the steady-state term of rule 4's formula; `deploy/service-manifest.yaml`
-# carries the migration-connection and rolling-deploy-overlap terms alongside
-# it, for a total of 17 <= 20 — 3 left over as the operational safety margin
-# rule 4 asks for, not spent down to the wire.
+# The worker process is not symmetric with the API any more. Its write engine
+# is what `deploy/tubedepth-worker.service`'s `TUBEDEPTH_CONCURRENCY` actually
+# sizes — see `_write_pool_kwargs` — because `Worker.drain` runs one claim
+# thread and one lease-renewal thread per unit of concurrency
+# (`worker.py`'s `pump` and `_holding_lease`), and both take a session on the
+# *write* engine. At concurrency 8 that is up to 16 simultaneous demands on a
+# pool sized for 4, measured directly (`docs/status.md`) to serialize into
+# batches that each wait roughly one session's hold time behind the one
+# before it — real under load, not merely a thread-count guess. The worker's
+# read engine is not part of that burst (`Worker` takes at most one readonly
+# session at a time, in `reap()`) and stays at the default ceiling.
+#
+# `deploy/service-manifest.yaml` carries the full worked arithmetic and the
+# migration-connection and rolling-deploy-overlap terms alongside it.
 _POOL_SIZE = 2
 _MAX_OVERFLOW = 2
+
+
+def _write_pool_kwargs(dialect: str, *, pool_size: int, max_overflow: int) -> dict[str, int]:
+    return {"pool_size": pool_size, "max_overflow": max_overflow} if dialect == "postgresql" else {}
 
 
 class Database:
@@ -57,7 +68,23 @@ class Database:
 
     SCHEMA = "tubedepth"
 
-    def __init__(self, url: str, *, allow_sqlite_source: bool = False) -> None:
+    def __init__(
+        self,
+        url: str,
+        *,
+        allow_sqlite_source: bool = False,
+        pool_size: int = _POOL_SIZE,
+        max_overflow: int = _MAX_OVERFLOW,
+    ) -> None:
+        """`pool_size`/`max_overflow` size the *write* engine only.
+
+        Every caller but one wants the default (`_POOL_SIZE`/`_MAX_OVERFLOW`,
+        what the budget arithmetic above is spent against). `tubedepth work`
+        is the exception: it passes a ceiling derived from `--concurrency`,
+        because that process — not the API — is the one whose thread count
+        actually determines how many sessions it can want at once. See
+        `deploy/service-manifest.yaml` for the accounting this feeds.
+        """
         self._url = url
         dialect = make_url(url).get_backend_name()
         if dialect != "postgresql" and not allow_sqlite_source:
@@ -66,16 +93,11 @@ class Database:
                 f"{dialect!r} URL. `tubedepth transfer --from` is the one place a "
                 "SQLite source is still accepted, for carrying an old index across."
             )
-        # Explicit pool ceilings only on PostgreSQL: `_POOL_SIZE`/
-        # `_MAX_OVERFLOW` are what the arithmetic above is spent against. A
-        # SQLite source opened through `allow_sqlite_source` is a one-shot
-        # local file read by `tubedepth transfer`, not a budget any other
-        # service on a shared server draws from, so it gets no ceiling.
-        pool_kwargs = (
-            {"pool_size": _POOL_SIZE, "max_overflow": _MAX_OVERFLOW}
-            if dialect == "postgresql"
-            else {}
-        )
+        # Explicit pool ceilings only on PostgreSQL. A SQLite source opened
+        # through `allow_sqlite_source` is a one-shot local file read by
+        # `tubedepth transfer`, not a budget any other service on a shared
+        # server draws from, so it gets no ceiling.
+        pool_kwargs = _write_pool_kwargs(dialect, pool_size=pool_size, max_overflow=max_overflow)
         self._engine = create_engine(url, **pool_kwargs)
         # A second engine, and it earns its keep: a route that only reads
         # cannot accidentally acquire a row lock it has no business holding,
@@ -93,7 +115,14 @@ class Database:
         # took the write lock; the split stayed because the guarantee it buys
         # — a session that claims `readonly=True` and then writes is refused,
         # not merely unlikely — does not depend on which dialect is running.
-        self._read_engine = create_engine(url, **pool_kwargs)
+        # The read engine keeps the default ceiling regardless of what the
+        # write engine was given: nothing takes more than one readonly
+        # session at a time (`Worker.reap`), so it is not where concurrency
+        # burst pressure lands.
+        read_pool_kwargs = _write_pool_kwargs(
+            dialect, pool_size=_POOL_SIZE, max_overflow=_MAX_OVERFLOW
+        )
+        self._read_engine = create_engine(url, **read_pool_kwargs)
         self.dialect = dialect
 
         if self.dialect == "postgresql":
@@ -209,10 +238,11 @@ class Database:
     def session(self, *, readonly: bool = False) -> Iterator[Session]:
         """A unit of work. `readonly=True` for anything that only reads.
 
-        The default takes the write lock on its first statement, which is what
-        the claim needs and what every writer should have. A read-only session
-        takes none, so it never queues behind the worker — and is refused if it
-        tries to write, so the choice cannot quietly become wrong.
+        The default opens through the write engine, which is what a claim's
+        row lock needs and what every writer should have. A read-only session
+        goes through the separate read engine instead, on PostgreSQL refused
+        outright if it tries to write (`_install_read_only_hook`), so the
+        choice cannot quietly become wrong.
         """
         session = (self._read_sessions if readonly else self._sessions)()
         try:

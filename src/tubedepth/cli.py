@@ -19,7 +19,7 @@ from sqlalchemy import func, select, text
 from . import __version__
 from .api.application import create_application
 from .collection import CollectionService
-from .database import Database
+from .database import _MAX_OVERFLOW, _POOL_SIZE, Database
 from .egress.control import RateController
 from .egress.transport import DirectEgress
 from .errors import ConfigurationError, TubedepthError, ValidationError
@@ -122,7 +122,9 @@ def collect(
         typer.echo(json.dumps(body, indent=2, ensure_ascii=False))
 
 
-def _database(data_directory: Path) -> Database:
+def _database(
+    data_directory: Path, *, pool_size: int = _POOL_SIZE, max_overflow: int = _MAX_OVERFLOW
+) -> Database:
     """Open the database every CLI entry point uses.
 
     Creates no schema (#14) — but a database with none is not a database
@@ -149,7 +151,7 @@ def _database(data_directory: Path) -> Database:
     """
     data_directory.mkdir(parents=True, exist_ok=True)
     url = database_url()
-    database = Database(url)
+    database = Database(url, pool_size=pool_size, max_overflow=max_overflow)
     database.verify_placement()
     if not database.is_migrated():
         raise ConfigurationError(
@@ -297,8 +299,15 @@ def work(
     just as often. `Worker.serve` has the measurements.
     """
     configure_logging()
+    # Sized to `--concurrency`, not the API's fixed default: `Worker.drain`
+    # runs one claim thread and one lease-renewal thread per unit of
+    # concurrency (`worker.py`'s `pump` and `_holding_lease`), both against
+    # the write engine, so a fixed pool of 4 starves at concurrency > 2 —
+    # measured directly (`docs/status.md`), not assumed from the thread
+    # count. `deploy/service-manifest.yaml` carries this term in the
+    # connection budget.
     worker = Worker(
-        database=_database(data_directory),
+        database=_database(data_directory, pool_size=concurrency, max_overflow=concurrency),
         payloads=_payload_store(data_directory),
         name=f"cli-{os.getpid()}",
         concurrency=concurrency,

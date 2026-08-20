@@ -43,12 +43,25 @@ external_object_stores:
 #
 # Steady state — one API process + one worker process, each holding a write
 # engine and a read engine (src/tubedepth/database.py's `Database`, and its
-# docstring for why the two engines are separate) — four engines total. Each
-# engine is created with pool_size=2, max_overflow=2 on PostgreSQL, so:
+# docstring for why the two engines are separate). The two processes are no
+# longer symmetric, because the worker's write-engine pool is sized off
+# `TUBEDEPTH_CONCURRENCY`, not the fixed default (`cli.work`,
+# `database.py`'s `_write_pool_kwargs`):
 #
-#   ceiling per engine = pool_size + max_overflow = 2 + 2 = 4
-#   engines            = 2 processes x 2 engines each      = 4
-#   steady-state total = 4 engines x 4                     = 16
+#   API:    write engine (2+2=4) + read engine (2+2=4)              =  8
+#   worker: write engine (concurrency+concurrency) + read engine (4)
+#           = TUBEDEPTH_CONCURRENCY x 2 + 4
+#           = 8 x 2 + 4 (deploy/tubedepth-worker.service's default 8)  = 20
+#   steady-state total = 8 + 20                                       = 28
+#
+# The worker's write engine, not its read engine, is what needs the
+# concurrency term: `Worker.drain` runs one claim thread and one
+# lease-renewal thread per unit of concurrency (`worker.py`'s `pump` and
+# `_holding_lease`), both taking sessions on the write engine, so up to
+# 2 x concurrency simultaneous demands land on it — measured directly
+# (`docs/status.md`) to serialize into batches once demand exceeds the pool,
+# not merely inferred from the thread count. The read engine takes at most
+# one session at a time (`Worker.reap`) and keeps the default ceiling.
 #
 # Worker/scheduler/batch-only connections — the worker is already counted
 # above as one of the two processes; nothing here runs a separate scheduler
@@ -65,11 +78,15 @@ external_object_stores:
 # shape owes this line an update, not a silent doubling of the steady-state
 # term above it.
 #
-#   total = 16 + 0 + 1 + 0 = 17
+#   total = 28 + 0 + 1 + 0 = 29
 #
-# 17 <= 20, the number below, which is also the CONNECTION LIMIT
+# 29 <= 32, the number below, which is also the CONNECTION LIMIT
 # deploy/postgres-bootstrap.sql sets on tubedepth_runtime — a miscount here
 # is caught by the database itself, not only by this arithmetic. The 3 left
-# over is the operational safety margin rule 4 asks for. See docs/status.md
-# § "규정 적용" for the full accounting.
-connection_budget: 20
+# over is the operational safety margin rule 4 asks for, same margin as
+# before the concurrency term was added — this changes the total, not the
+# cushion. Raising `TUBEDEPTH_CONCURRENCY` beyond 8 moves both this number and
+# the CONNECTION LIMIT below; the two must be kept in step by hand, since
+# nothing here reads the unit file to check. See docs/status.md §
+# "규정 적용" for the full accounting.
+connection_budget: 32

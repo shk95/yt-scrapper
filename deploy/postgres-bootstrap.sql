@@ -112,7 +112,9 @@ ALTER ROLE tubedepth_runtime IN DATABASE :database SET transaction_timeout = '60
 ALTER ROLE tubedepth_runtime  IN DATABASE :database SET TimeZone = 'UTC';
 ALTER ROLE tubedepth_migrator IN DATABASE :database SET TimeZone = 'UTC';
 
--- Rule 4: connection budget. deploy/service-manifest.yaml declares 20 for
--- this service; CONNECTION LIMIT makes the database enforce it rather than
--- trust every pool configuration to add up correctly.
-ALTER ROLE tubedepth_runtime CONNECTION LIMIT 20;
+-- Rule 4: connection budget. deploy/service-manifest.yaml declares 32 for
+-- this service (raised from 20 once the worker's write-engine pool started
+-- scaling with TUBEDEPTH_CONCURRENCY instead of a fixed default — see that
+-- file's arithmetic); CONNECTION LIMIT makes the database enforce it rather
+-- than trust every pool configuration to add up correctly.
+ALTER ROLE tubedepth_runtime CONNECTION LIMIT 32;

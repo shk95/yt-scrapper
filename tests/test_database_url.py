@@ -62,6 +62,29 @@ def test_the_dialect_is_readable_without_opening_a_connection(tmp_path: Path) ->
     assert postgres.dialect == "postgresql"
 
 
+def test_the_write_engine_pool_is_sized_off_worker_concurrency(tmp_path: Path) -> None:
+    """`cli.work` passes `pool_size=max_overflow=concurrency` so the write
+    engine's ceiling actually covers `Worker.drain`'s claim and lease-renewal
+    threads, instead of the fixed default meant for the API. The read engine
+    must stay at the default regardless — `Worker.reap` is its only caller
+    and never wants more than one session at a time, so scaling it too would
+    only spend more of the shared budget for no benefit.
+
+    Construction only, same as `test_the_dialect_is_readable_without_opening_a_connection`
+    above — `create_engine` is lazy, so this proves the wiring without a
+    server.
+    """
+    default = Database("postgresql+psycopg://u:p@h:5432/fleet")
+    assert default._engine.pool.size() == 2  # type: ignore[attr-defined]  # noqa: SLF001
+    assert default._engine.pool._max_overflow == 2  # type: ignore[attr-defined]  # noqa: SLF001
+
+    scaled = Database("postgresql+psycopg://u:p@h:5432/fleet", pool_size=8, max_overflow=8)
+    assert scaled._engine.pool.size() == 8  # type: ignore[attr-defined]  # noqa: SLF001
+    assert scaled._engine.pool._max_overflow == 8  # type: ignore[attr-defined]  # noqa: SLF001
+    assert scaled._read_engine.pool.size() == 2  # type: ignore[attr-defined]  # noqa: SLF001
+    assert scaled._read_engine.pool._max_overflow == 2  # type: ignore[attr-defined]  # noqa: SLF001
+
+
 def test_a_non_postgresql_url_is_refused(tmp_path: Path) -> None:
     """The cutover's own guarantee (#15): every ordinary caller of `Database`
     gets a named refusal rather than quietly running against SQLite again."""
