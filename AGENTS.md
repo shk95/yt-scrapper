@@ -19,8 +19,10 @@ SQLite, the package is `tubedepth`, everything runs through `uv`.
 ## Where the work is
 
 **`gh api repos/:owner/:repo/milestones` — the milestones are the work that
-has an order.** Each milestone's description says why that work exists; each
-issue says what to do. An open issue with no milestone is standalone work.
+has an order.** Each milestone's description says why that work exists and
+where to start; each issue says what to do. An open issue with no milestone is
+standalone work. The same map, for someone arriving through GitHub rather than
+through a clone, is the pinned **"Start here"** issue.
 
 The plan's M0–M9 in `docs/plan.md` are **all finished and kept only as a
 record** — do not pick work from there.
