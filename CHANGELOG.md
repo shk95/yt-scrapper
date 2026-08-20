@@ -54,6 +54,27 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ### Added
 
+- **`tubedepth transfer --from <url> --to <url>`, and `tubedepth.transfer.transfer()` behind it.**
+  #15 and #24 both specify the PostgreSQL cutover's data move as one line —
+  "Data across: six tables" — and until now nothing in this repository has
+  ever moved a row from one database to another; the alternative was a
+  `pg_dump`-and-hope run by hand against 248 targets whose repeated
+  observations cannot be re-collected at any price. The transfer is
+  model-driven rather than a dialect-level dump: every row is read through
+  the ORM and reconstructed on the target column by column, which is what
+  preserves `identifier` primary keys and `fetched_at` verbatim to the
+  microsecond, and — the failure a `pg_dump` cannot see coming — routes every
+  instant back through `UtcDateTime`, which refuses a naive datetime rather
+  than letting SQLite's timezone-less storage silently become the wrong
+  instant under PostgreSQL's `timestamptz`. It refuses a target that already
+  holds any rows, since `artifacts` deliberately carries no unique constraint
+  on `fingerprint` and a partial second run would duplicate every
+  observation with nothing to catch it. It never imports the payload store —
+  rule 7 of `docs/shared-postgres.md` treats the index and the payload bytes
+  under `TUBEDEPTH_DATA_DIR/payloads` as one recovery set, and this moves
+  only the index half of it. `--dry-run` counts every table in the source
+  and writes nothing, so an operator sees six numbers before committing to a
+  cutover.
 - **A sampler, so a history starts accumulating.** `tubedepth-sample.timer` in
   `deploy/` forces a re-collection of a watch list every hour; the list is
   `~/.config/tubedepth/watchlist.txt`, one video id per line, and

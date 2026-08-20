@@ -572,6 +572,32 @@ create-from-models이 일치함을 확인하는 5개 revision이 있어서, 그 
 남기되(테스트와 새 `--data-dir`가 쓴다) `cli._database()`에서는 뺐다 — 스키마를 바꿀 수 있는
 경로는 이제 `tubedepth migrate` 하나뿐이다.
 
+**Task 6 — 데이터 이동은 `pg_dump`가 아니라 model 기반이다.** #15의 "Data across:
+six tables"와 #24의 "여섯 테이블"이 이동에 관한 명세 전부였고, 이동 전용 도구도
+검증도 이 저장소에 없었다 — `tests/test_migrations.py`와
+`tests/test_postgres_migrations.py`는 DDL만 확인한다. `tubedepth.transfer.transfer()`가
+그 도구다: `Base.metadata.sorted_tables`를 돌며 각 행을 ORM으로 읽어 대상에 컬럼
+단위로 재구성한다. `pg_dump`로 SQLite 파일을 그대로 복원했다면 SQLite가 저장한
+naive datetime 문자열이 `timestamptz` 컬럼에 변환 없이 그대로 얹혔을 것이다 —
+`UtcDateTime.process_bind_param`이 naive 값을 거부하는 것은 애플리케이션 경로에서만
+그렇고, dump-and-restore는 그 경로를 통째로 건너뛴다. round-trip 테스트
+(`tests/test_transfer.py::test_a_sqlite_index_round_trips_through_postgresql`)가
+바로 이 실패를 잡도록 짜여 있다 — 개수가 아니라 모든 컬럼을 값으로 비교해서,
+naive/aware 불일치나 enum이 이름으로 도착하는 것 같은 type 실패를 숫자 하나로
+가리지 않는다.
+
+`transfer`는 `tubedepth_runtime`으로 대상에 연결해서 써야 한다. `tubedepth_migrator`는
+NOINHERIT이고(규정 1) `tubedepth`의 테이블에 직접 권한이 없다 — `migrations/env.py`의
+명시적 `SET ROLE tubedepth_owner`를 통해서만 owner로 행동한다. migrator credential로
+곧장 `INSERT`를 시도하면 `permission denied for schema tubedepth`로 거부되는 것을
+실측으로 확인했다(2026-08-20, `docker run postgres:18-alpine` + `deploy/postgres-bootstrap.sql`).
+runtime은 정확히 `SELECT, INSERT, UPDATE, DELETE`만 직접 grant 받은 role이라(같은
+파일) transfer가 필요로 하는 권한과 정확히 일치한다. 대상이 이미 행을 가지고 있으면
+거부한다 — `artifacts`는 `fingerprint`에 unique 제약이 의도적으로 없어서, 부분
+재실행이 관측을 조용히 중복시킬 수 있기 때문이다. payload store는 옮기지 않고
+`transfer.py`는 `PayloadStore`를 import조차 하지 않는다 — 규정 7의 "복구 세트는
+index와 object가 함께"라는 원칙에서, 이 도구는 절반만 옮기는 도구라는 뜻이다.
+
 **Manifest**: [`deploy/service-manifest.yaml`](../deploy/service-manifest.yaml).
 
 

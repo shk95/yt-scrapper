@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
-from sqlalchemy import text
+from sqlalchemy import func, select, text
 
 from . import __version__
 from .api.application import create_application
@@ -26,7 +26,7 @@ from .errors import ConfigurationError, TubedepthError, ValidationError
 from .fixture_capture import redact_for_fixture
 from .identifiers import normalize_target, normalize_video_identifier
 from .innertube.client import InnerTubeClient
-from .models import WORKER_CONTROL_ID, Artifact, Job, JobState, WorkerControl, utcnow
+from .models import WORKER_CONTROL_ID, Artifact, Base, Job, JobState, WorkerControl, utcnow
 from .observability import configure_logging
 from .payload_store import PayloadStore
 from .repositories import JobRepository
@@ -38,6 +38,7 @@ from .sources import default_registry
 from .sources.innertube_sources import RECORDABLE_SURFACES, record_surface
 from .sources.registry import attempts_for
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime
+from .transfer import mapped_models, transfer
 from .worker import Worker
 
 logger = logging.getLogger(__name__)
@@ -513,6 +514,55 @@ def backfill_schema_versions(
         typer.echo(f"· {count} {kind} artifact(s) matched no known version")
     if outcome.unattributed:
         typer.echo("  a version missing from PREVIOUS_VERSIONS looks exactly like this")
+
+
+@application.command(name="transfer")
+def transfer_command(
+    source_url: Annotated[
+        str, typer.Option("--from", help="The database to carry the index out of")
+    ],
+    target_url: Annotated[
+        str, typer.Option("--to", help="The database to carry the index into; must hold no rows")
+    ],
+    dry_run: Annotated[
+        bool,
+        typer.Option("--dry-run", help="Count what would move and write nothing"),
+    ] = False,
+) -> None:
+    """Carry the index between databases. Payloads stay where they are.
+
+    The one tool #15 and #24 both assume exists for the PostgreSQL cutover:
+    six tables, moved row for row with `identifier` and `fetched_at`
+    preserved verbatim, rather than a `pg_dump` run by hand at 2am — see
+    `tubedepth.transfer` for why that would silently corrupt every instant.
+
+    `--to` names the database the connection will actually write through, so
+    in a real cutover that is the runtime credential: the migrator is
+    deployment-only (rule 1) and has no direct DML grant on `tubedepth`'s
+    tables outside `migrations/env.py`'s `SET ROLE`.
+
+    `--dry-run` counts each table in the source and reports it without
+    opening the target for writing — an operator standing in front of a
+    cutover wants to see six numbers before committing to them.
+    """
+    source = Database(source_url)
+
+    if dry_run:
+        models = mapped_models()
+        with source.session(readonly=True) as session:
+            for table in Base.metadata.sorted_tables:
+                count = session.scalar(select(func.count()).select_from(models[table.name]))
+                typer.echo(f"· {table.name}: {count} row(s) would move")
+        return
+
+    target = Database(target_url)
+    target.verify_placement()
+    if not target.is_migrated():
+        raise ConfigurationError(f"no schema at {target_url} — run: tubedepth migrate")
+
+    outcome = transfer(source=source, target=target)
+    for table_name, count in outcome.rows.items():
+        typer.echo(f"✓ {table_name}: {count} row(s) moved")
 
 
 @application.command()

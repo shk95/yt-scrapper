@@ -47,6 +47,21 @@
 
 ### Added
 
+- **`tubedepth transfer --from <url> --to <url>`, 그리고 그 뒤의 `tubedepth.transfer.transfer()`.**
+  #15와 #24는 PostgreSQL 컷오버의 데이터 이동을 "데이터를 옮긴다. 여섯 테이블." 한 줄로만
+  명시하는데, 지금까지 이 저장소에는 한 데이터베이스에서 다른 데이터베이스로 행을 옮긴 코드가
+  전혀 없었다 — 대안은 재수집이 불가능한 248개 타깃의 관측을 손으로 `pg_dump`-and-hope 하는
+  것이었다. 이 transfer는 dialect 수준 dump가 아니라 model 기반이다 — 모든 행을 ORM으로 읽어
+  타깃에 컬럼 단위로 재구성하며, 이것이 `identifier` primary key와 `fetched_at`을 microsecond
+  까지 그대로 보존하는 방법이고 — `pg_dump`가 보지 못하는 실패인데 — 모든 instant를
+  `UtcDateTime`을 통해 다시 흘려보내 naive datetime을 거부하게 만든다. 그렇지 않으면 SQLite의
+  timezone 없는 저장이 PostgreSQL의 `timestamptz` 아래에서 조용히 잘못된 instant가 된다.
+  `artifacts`는 `fingerprint`에 unique 제약이 의도적으로 없으므로, 이미 행을 가진 타깃은
+  거부한다 — 부분적으로 두 번 실행되면 아무것도 걸러내지 못한 채 모든 관측이 중복된다.
+  payload store는 절대 import하지 않는다 — `docs/shared-postgres.md` 규정 7은 index와
+  `TUBEDEPTH_DATA_DIR/payloads`의 payload bytes를 하나의 복구 세트로 다루고, 이 transfer는
+  그중 index 절반만 옮긴다. `--dry-run`은 소스의 모든 테이블 개수를 세고 아무것도 쓰지 않아서,
+  운영자가 컷오버를 실행하기 전에 숫자 여섯 개를 먼저 보게 한다.
 - **샘플러 — 이력이 쌓이기 시작한다.** `deploy/`의 `tubedepth-sample.timer`가 매시간 watch
   list를 강제로 다시 수집한다. 목록은 `~/.config/tubedepth/watchlist.txt`이고 한 줄에 영상 id
   하나이며, 형식은 `deploy/watchlist.example.txt`에 있다. 켜지 않으면 동작하지 않는다.
