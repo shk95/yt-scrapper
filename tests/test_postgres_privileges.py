@@ -334,3 +334,67 @@ def test_verify_placement_refuses_a_search_path_that_does_not_lead_with_the_sche
     with pytest.raises(ConfigurationError, match="ALTER ROLE") as refusal:
         database.verify_placement()
     assert "public" in str(refusal.value)
+
+
+@needs_postgres
+def test_is_migrated_sees_the_schema_through_the_migrator_role_without_set_role(
+    migrated_database: None,
+) -> None:
+    """`tubedepth migrate`, in a real deployment, runs against the migrator
+    URL. `migrations/env.py` does `SET ROLE tubedepth_owner` for the DDL
+    itself, but the post-migrate artifact check in `cli.migrate` reopens the
+    database through `_database()` — a plain connection, no `SET ROLE` — and
+    that used to call `is_migrated()`, which reflected `False` even though
+    the schema it just built is right there: the migrator is `NOINHERIT`
+    (rule 1) and has no direct `USAGE` on `tubedepth`, so an *unqualified*
+    lookup resolves `current_schema()` to `pg_catalog` rather than skipping
+    to `pg_catalog` and stopping, per PostgreSQL's rule of silently passing
+    over a `search_path` entry the role cannot use. The result: a `✓ … is at
+    the current schema` from the upgrade and a `✗ no schema at …` from the
+    very next line, for the same run.
+
+    First confirm the scenario this guards against is real, so a future
+    bootstrap change that starts granting the migrator direct `USAGE` cannot
+    make this test pass for the wrong reason (nothing left to see through):
+    """
+    engine = create_engine(MIGRATOR_URL or "")
+    with engine.connect() as connection:
+        current_schema = connection.exec_driver_sql("SELECT current_schema()").scalar_one()
+    engine.dispose()
+    assert current_schema != SCHEMA, (
+        "the migrator role can already see tubedepth without SET ROLE — "
+        "this test no longer exercises the regression it exists to guard"
+    )
+
+    database = Database(MIGRATOR_URL or "")
+    assert database.is_migrated() is True
+
+
+@needs_postgres
+def test_the_migrate_command_says_one_true_thing_against_the_migrator_url(
+    migrated_database: None, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The end-to-end regression: `tubedepth migrate`, run under the
+    migrator credential — the one a real deployment uses for this command —
+    against an already-migrated database. Before this fix, the post-migrate
+    artifact-count check reopened the database through a plain `_database()`
+    connection, no `SET ROLE`, and either misreported `is_migrated()` as
+    `False` (`✓ … is at the current schema` immediately followed by a false
+    `✗ no schema at …`) or, once that was fixed on its own, crashed with an
+    unhandled `UndefinedTable` — the migrator is deployment-only (rule 1) and
+    has no direct `SELECT` on `tubedepth`'s tables. `SET ROLE tubedepth_owner`
+    for that query, the same privilege the upgrade itself already needed, is
+    what makes the whole command say exactly one true thing.
+    """
+    from typer.testing import CliRunner
+
+    from tubedepth.cli import application
+
+    monkeypatch.setenv("TUBEDEPTH_DATABASE_URL", MIGRATOR_URL or "")
+    runner = CliRunner()
+
+    result = runner.invoke(application, ["migrate", "--data-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert result.output.count("is at the current schema") == 1
+    assert "no schema at" not in result.output

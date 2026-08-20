@@ -184,7 +184,27 @@ class Database:
         exactly what `tubedepth migrate` exists to catch — with a real
         error naming the missing column, not a blank database pretending to
         be fine.
+
+        On PostgreSQL the schema is passed explicitly rather than left to
+        `search_path` resolution. `tubedepth_migrator` is `NOINHERIT` (rule 1)
+        and holds no direct `USAGE` on `tubedepth` — only `tubedepth_owner`
+        does, and the migrator only acts as owner through the explicit
+        `SET ROLE` `migrations/env.py` performs for DDL. A plain connection as
+        the migrator therefore resolves `current_schema()` to `pg_catalog`,
+        since PostgreSQL silently drops a `search_path` entry the role has no
+        `USAGE` on when picking the implicit schema for an unqualified name —
+        so an unqualified `has_table` read `False` on a fully migrated
+        database, and `tubedepth migrate`, run against the very credential
+        `env.py` uses `SET ROLE` for, printed a `✓` from the upgrade and a
+        `✗ no schema at …` from the post-migrate check in the same run. Naming
+        the schema sidesteps that: PostgreSQL's catalog rows are visible
+        without `USAGE` on the containing schema — only *reading data* out of
+        it needs the grant — so `has_table("jobs", schema=self.SCHEMA)` is
+        correct without a `SET ROLE`, for every caller of `_database()`, not
+        only the one `migrate` happens to run right after an upgrade.
         """
+        if self.dialect == "postgresql":
+            return inspect(self._engine).has_table("jobs", schema=self.SCHEMA)
         return inspect(self._engine).has_table("jobs")
 
     @contextmanager

@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Annotated
 
 import typer
+from sqlalchemy import text
 
 from . import __version__
 from .api.application import create_application
@@ -467,7 +468,17 @@ def migrate(
     # this one closes: attribution works by recomputing fingerprints against
     # the versions a kind has had, and retention ages out the rows it would
     # attribute. Say so here, where someone is already standing.
-    with _database(data_directory).session(readonly=True) as session:
+    database = _database(data_directory)
+    with database.session(readonly=True) as session:
+        # tubedepth migrate runs under the migrator credential in a real
+        # deployment — the same one env.py just did SET ROLE tubedepth_owner
+        # with, above, for the upgrade. That role is deployment-only (rule 1)
+        # and has no direct SELECT on tubedepth's tables; without becoming
+        # the owner again here, this query only works by accident, when
+        # --data-dir happens to resolve to a URL that is actually the
+        # runtime role's rather than the migrator's.
+        if database.dialect == "postgresql":
+            session.execute(text("SET ROLE tubedepth_owner"))
         unattributed = session.query(Artifact).filter(Artifact.schema_version.is_(None)).count()
     if unattributed:
         typer.echo(f"· {unattributed} artifact(s) do not name the schema version that wrote them")
