@@ -433,10 +433,11 @@ CI service container are the whole cost.
 
 ### The order this is being done in
 
-1. **Check it runs here** — PostgreSQL 18 in a container, `alembic upgrade head`
-   against it. Four revisions use `batch_alter_table`; confirm by running.
+1. ~~**Check it runs here**~~ — done 2026-08-20, and it found two things. See
+   below.
 2. **The migration itself** — dialect branches, `_repair_existing_tables` gone,
-   `version_table_schema`, schema and role, CI service, data across.
+   schema and role, data across. The CI service container and the role setup
+   arrived with step 1, since the checks that found the bug needed them.
 3. **Issue #13** (a bundle's parts bypass every lane but its own). Independent
    of the database, and currently dormant — nothing runs bundles, since the
    sampler collects `video.metadata` only. It wakes the moment anything does.
@@ -445,6 +446,53 @@ CI service container are the whole cost.
 #13 sits after the migration rather than before it because it is dormant while
 SQLite-shaped decisions keep accruing — 2026-08-20 alone added four, one of
 them the deadlock.
+
+
+### Measured 2026-08-20: what the first PostgreSQL run found
+
+Step 1 was meant to be a yes-or-no about `batch_alter_table`. Batch mode was
+fine — it is a no-op on a dialect that can `ALTER` in place. Two other things
+were not, and neither would have been found by reading.
+
+**A boolean default that only SQLite accepts.** `50ee31ae8b82` added
+`refresh` with `server_default=sa.text("0")`, because SQLite refuses
+`ADD COLUMN … NOT NULL` without a default. PostgreSQL refuses the literal:
+`column "refresh" is of type boolean but default expression is of type
+integer`, and there is no implicit cast. `sa.false()` is rendered by the
+dialect — `0` on SQLite, `false` on PostgreSQL — so one revision is now correct
+on both. **The general form is the thing to keep**: `sa.text()` in a migration
+is a dialect assumption written in a place that outlives the dialect.
+
+**The rule in `docs/shared-postgres.md` had a bug of its own.** It said to set
+`version_table_schema="tubedepth"` *and* `include_schemas=False`. Doing both
+makes autogenerate propose `drop_table('alembic_version')` — alembic excludes
+its own version table by comparing the configured schema against the reflected
+one, and reflection under a `search_path` reports `None`, so `"tubedepth" !=
+None` and the exclusion misses. The setting written down to prevent a spurious
+`drop_table` produces one. The role's `search_path` alone already puts the
+version table in the service's schema; the two are alternatives, not a pair.
+The document is corrected, and the correction is asserted rather than
+described.
+
+Both were found by running, and both are now checks with callers rather than
+paragraphs: `tests/test_postgres_migrations.py`, run by `just postgres` and by
+a CI service container, against the same
+[`deploy/postgres-bootstrap.sql`](../deploy/postgres-bootstrap.sql) a
+deployment runs. The suite is `-m postgres` and deselected by default, for the
+reason `live` is: the offline suite must stay runnable with nothing installed.
+
+**One difference that helps.** PostgreSQL runs DDL inside a transaction, so the
+failed chain rolled all four revisions back and left an empty database. That is
+the opposite of SQLite, where a partial upgrade is exactly what produced the
+`duplicate column name` in [`troubleshooting.md`](troubleshooting.md). After
+the cutover, a failed migration is a failed migration rather than a schema
+somebody has to reconstruct by hand.
+
+**Unpaid, and worth naming.** Placing tables by `search_path` means a missing
+`ALTER ROLE … SET search_path` sends them silently to `public` — the shared
+schema, on a shared database. The test asserts where `alembic_version` lands,
+which catches it in CI; nothing catches it on a host where someone bootstrapped
+by hand.
 
 
 Three of these have since been paid for and moved to
