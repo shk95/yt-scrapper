@@ -341,6 +341,33 @@ its row in `running`.
 
 ---
 
+## What is actually running here
+
+Recorded 2026-08-20, because the deployment has diverged from `deploy/` in one
+way that nothing else would tell you.
+
+| unit | state |
+| --- | --- |
+| `tubedepth-worker` | enabled and running |
+| `tubedepth-sample.timer` | enabled, hourly |
+| `tubedepth-api` | **not installed** — the dashboard and every `/v1` route are reachable only by running `tubedepth serve` by hand |
+
+**The installed worker unit carries `TUBEDEPTH_LISTING_LIMIT=700`; the copy in
+`deploy/` has it commented out.** That was set to sweep one 697-video channel
+in full. If the API unit is installed later it **must carry the same value** —
+`serve` and `work` each read it once, and a disagreement makes the API compute
+a different cache key than the worker records, so it stops matching what the
+worker writes while still matching rows from before the change.
+
+The sampler's watch list is `~/.config/tubedepth/watchlist.txt`: 100 video ids
+from `@director_pihyunjung`, enumerated 2026-08-20. It is operator data and
+deliberately outside the repository.
+
+Store as of that day: 1,556 artifacts, 1,938 jobs, two active API keys. The
+oldest artifact is about a day old, so **nothing has reached the thirty-day
+retention age yet** — the first prune that actually deletes anything has not
+happened, and the shared-blob fix landed before it can.
+
 ## This machine
 
 Prefer `tool/doctor.sh` over reading this section — the script reports what is
