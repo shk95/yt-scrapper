@@ -425,12 +425,15 @@ def migrate(
     configuration = Config(str(root / "alembic.ini"))
     configuration.set_main_option("script_location", str(root / "migrations"))
     url = database_url(data_directory)
-    configuration.set_main_option("sqlalchemy.url", url)
 
-    # `migrations/env.py` does not yet read the Config object above — it has
-    # its own copy of this resolver and calls it directly (Task 8 unifies the
-    # two). Until then, this environment variable is the only thing that
-    # actually reaches it: without it, env.py falls back to `TUBEDEPTH_DATA_DIR`
+    # Not passed to `configuration` — `ConfigParser.set` validates `%`
+    # interpolation syntax, and a percent-encoded password (the ordinary shape
+    # of a fleet credential) makes that call raise. It would also be dead code
+    # today regardless: `migrations/env.py` does not read the Config object,
+    # it has its own copy of this resolver and calls it directly (Task 8
+    # unifies the two, and is where a `%`-escaped version of this belongs).
+    # Until then, this environment variable is the only thing that actually
+    # reaches it: without it, env.py falls back to `TUBEDEPTH_DATA_DIR`
     # (default `var`), silently ignoring whatever `--data-dir` named here.
     # Restored afterwards rather than left set — this process now honours
     # `TUBEDEPTH_DATABASE_URL` everywhere (that is the point of this change),

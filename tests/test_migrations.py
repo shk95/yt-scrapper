@@ -14,10 +14,12 @@ to discover mid-deploy.
 
 from __future__ import annotations
 
+import os
 import subprocess
 import sys
 from pathlib import Path
 
+import pytest
 from sqlalchemy import create_engine, inspect
 
 ROOT = Path(__file__).parent.parent
@@ -147,3 +149,59 @@ def test_the_cli_upgrades_an_empty_database(tmp_path: Path) -> None:
     assert result.exit_code == 0, result.output
     inspector = inspect(create_engine(f"sqlite+pysqlite:///{tmp_path / 'tubedepth.db'}"))
     assert "jobs" in inspector.get_table_names()
+
+
+def test_migrate_follows_an_operators_database_url_and_restores_it_afterwards(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--data-dir` only supplies the fallback; an operator's own URL wins.
+
+    `tubedepth migrate` sets `TUBEDEPTH_DATABASE_URL` around the Alembic call
+    because `migrations/env.py` reads it directly rather than the `Config`
+    object passed to it (Task 8 unifies the two). Two properties have to hold
+    for that to be safe: the variable this process already had wins over
+    `--data-dir` (so an operator's fleet URL is what actually gets migrated,
+    not a directory that only ever named the SQLite fallback), and the
+    variable is put back afterwards — otherwise the first `tubedepth migrate`
+    in a long-lived process would silently redirect everything it runs next,
+    `tubedepth work`/`serve` included, since `_database()` now honours this
+    variable too.
+    """
+    from typer.testing import CliRunner
+
+    from tubedepth.cli import application
+
+    operators_database = tmp_path / "operators.db"
+    operators_url = f"sqlite+pysqlite:///{operators_database}"
+    monkeypatch.setenv("TUBEDEPTH_DATABASE_URL", operators_url)
+
+    result = CliRunner().invoke(
+        application, ["migrate", "--data-dir", str(tmp_path / "fallback-only")]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert os.environ["TUBEDEPTH_DATABASE_URL"] == operators_url, (
+        "the variable was not restored to what it was set to before invoke()"
+    )
+    assert operators_database.exists(), (
+        "migrate did not follow the operator's TUBEDEPTH_DATABASE_URL"
+    )
+    assert not (tmp_path / "fallback-only" / "tubedepth.db").exists(), (
+        "migrate used --data-dir's fallback instead of the operator's URL"
+    )
+
+    # The case that actually distinguishes "restored" from "leaked": when the
+    # variable was not set beforehand, `migrate` falls back to `--data-dir`
+    # for the URL it operates on — `database_url()` returns the same value
+    # either way in the case above, so that assertion alone cannot tell a
+    # correct restore from a `finally` that does nothing. Unset it, let a
+    # second `migrate` run entirely off `--data-dir`, and require the
+    # variable to come back out unset rather than pinned to whatever
+    # `--data-dir` resolved to.
+    monkeypatch.delenv("TUBEDEPTH_DATABASE_URL", raising=False)
+    fallback_data_dir = tmp_path / "fallback-only-2"
+    CliRunner().invoke(application, ["migrate", "--data-dir", str(fallback_data_dir)])
+    assert (fallback_data_dir / "tubedepth.db").exists()
+    assert "TUBEDEPTH_DATABASE_URL" not in os.environ, (
+        "migrate left the variable set to its own fallback instead of restoring it to unset"
+    )

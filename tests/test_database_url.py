@@ -8,12 +8,17 @@ nothing saying so.
 
 from __future__ import annotations
 
+import os
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from tubedepth.database import Database
 from tubedepth.settings import database_url
+
+ROOT = Path(__file__).parent.parent
 
 
 def test_a_url_with_no_environment_names_the_sqlite_file_under_the_data_directory(
@@ -54,3 +59,40 @@ def test_a_postgresql_url_does_not_get_sqlite_pragmas(tmp_path: Path) -> None:
     database = Database("postgresql+psycopg://u:p@h:5432/fleet")
 
     assert database.sqlite_hooks_installed is False
+
+
+def test_an_ambient_database_url_does_not_redirect_the_suite(tmp_path: Path) -> None:
+    """The regression this module exists to close, reproduced directly.
+
+    `_database()` honours `TUBEDEPTH_DATABASE_URL` now — that is the point of
+    this cutover — which means a value already sitting in an operator's shell
+    (naming the shared fleet PostgreSQL, say) used to be inert to this suite
+    and is not any more. Without `refuse_an_ambient_database_url` in
+    `conftest.py`, running the CLI tests with the variable set redirects every
+    `_database()` call at that path and writes a file there; on a real
+    operator shell the same gap would run `tubedepth migrate` and then DML
+    against the fleet database.
+
+    A subprocess, not a monkeypatch in this process: the guard runs once per
+    test as fixture setup, before the test body executes, so a value this test
+    set itself would simply be honoured by anything it calls afterwards and
+    would prove nothing about a value that was already there when pytest
+    started — which is the actual shape of the bug.
+    """
+    ambient = tmp_path / "ambient.db"
+    env = dict(os.environ)
+    env["TUBEDEPTH_DATABASE_URL"] = f"sqlite+pysqlite:///{ambient}"
+
+    result = subprocess.run(
+        [sys.executable, "-m", "pytest", "tests/test_cli.py", "-q"],
+        cwd=ROOT,
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=120,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not ambient.exists(), (
+        f"the ambient TUBEDEPTH_DATABASE_URL redirected the suite: {result.stdout}"
+    )

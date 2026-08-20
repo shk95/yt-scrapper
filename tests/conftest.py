@@ -65,6 +65,22 @@ def refuse_outbound_network(
     yield
 
 
+@pytest.fixture(autouse=True)
+def refuse_an_ambient_database_url(monkeypatch: pytest.MonkeyPatch) -> None:
+    """An operator's shell is not a fixture, and must not become one.
+
+    `_database()` honours `TUBEDEPTH_DATABASE_URL` now (that is the point of
+    this cutover), which means a value already sitting in the environment —
+    naming the shared fleet PostgreSQL, say — used to be inert here and is not
+    any more: it would redirect every test that goes through `_database()` or
+    constructs a bare `Database(...)`, `just check` included. Deleting it for
+    every test is what keeps `database_url_for_tests` the only seam that names
+    a database in this suite, the same discipline `refuse_outbound_network`
+    applies to sockets.
+    """
+    monkeypatch.delenv("TUBEDEPTH_DATABASE_URL", raising=False)
+
+
 @pytest.fixture
 def fixture_root() -> Path:
     return FIXTURE_ROOT
