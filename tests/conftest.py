@@ -45,7 +45,11 @@ def refuse_outbound_network(
     httpx's ASGITransport and MockTransport never reach this, and neither does
     anything reading a fixture, so nothing legitimate is affected.
     """
-    if request.node.get_closest_marker("live") is not None:
+    # `postgres` too: those tests talk to a database server on localhost, which
+    # is neither the network nor the hazard this guard exists for. They are
+    # deselected by default for the same reason `live` is — they need something
+    # the offline suite must not assume is there.
+    if any(request.node.get_closest_marker(name) for name in ("live", "postgres")):
         yield
         return
 

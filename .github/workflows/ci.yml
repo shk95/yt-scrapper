@@ -49,10 +49,66 @@ jobs:
       - name: Test
         run: tool/checks/test
 
+  # The migration checks against the database this project is moving to. A
+  # separate job because it needs a server: folding it into `verify` would make
+  # every run wait on a container for checks that do not use one, and a red
+  # PostgreSQL job would then be indistinguishable from a red lint.
+  #
+  # It is required all the same. A migration that applies on SQLite and fails on
+  # PostgreSQL is exactly the failure this is here to catch, and it is only ever
+  # discovered at deploy time by whoever is least able to fix it.
+  postgres:
+    name: Migrations on PostgreSQL
+    runs-on: ubuntu-latest
+
+    services:
+      postgres:
+        # Pinned to the major the deployment will run. A migration is checked
+        # against a version or it is not checked.
+        image: postgres:18-alpine
+        env:
+          POSTGRES_USER: fleet
+          POSTGRES_PASSWORD: fleet
+          POSTGRES_DB: fleet
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U fleet"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
+    env:
+      PGPASSWORD: fleet
+      TUBEDEPTH_TEST_POSTGRES_URL: postgresql+psycopg://tubedepth:check@localhost:5432/fleet
+
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      # The same file a real deployment runs, so what CI checks is the shape
+      # production has — the `search_path` in particular, which is what decides
+      # whether this service's `alembic_version` lands in its own schema.
+      - name: Bootstrap the role and schema
+        run: |
+          psql -h localhost -U fleet -d fleet -v ON_ERROR_STOP=1 \
+            -v password="'check'" -f deploy/postgres-bootstrap.sql
+          # Harness only, and deliberately not in that file: the tests drop and
+          # recreate the schema between cases. In production the service role
+          # has no business creating schemas.
+          psql -h localhost -U fleet -d fleet -c 'GRANT CREATE ON DATABASE fleet TO tubedepth'
+
+      - name: Migrations
+        run: tool/checks/postgres
+
   required:
     name: Required checks
     runs-on: ubuntu-latest
-    needs: [verify]
+    needs: [verify, postgres]
     if: always()
     steps:
       # A stable job name for branch protection to require, so adding or
@@ -61,6 +117,10 @@ jobs:
         run: |
           if [ "${{ needs.verify.result }}" != "success" ]; then
             echo "verify did not succeed: ${{ needs.verify.result }}" >&2
+            exit 1
+          fi
+          if [ "${{ needs.postgres.result }}" != "success" ]; then
+            echo "postgres did not succeed: ${{ needs.postgres.result }}" >&2
             exit 1
           fi
           echo "all required checks passed"
