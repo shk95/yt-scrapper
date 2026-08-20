@@ -13,5 +13,9 @@ set -e
 . tool/checks/prerequisite
 require_command uv
 
+# See tool/checks/format: `uv run` does not install extras, and both ruff and
+# basedpyright are dev extras.
+uv sync --extra dev --frozen
+
 uv run ruff check .
 uv run basedpyright
