@@ -10,11 +10,83 @@ writing to, and a stop signal that abandons work.
 from __future__ import annotations
 
 import configparser
+import subprocess
+import sys
+from collections.abc import Sequence
 from pathlib import Path
 
 import pytest
 
 UNITS = Path(__file__).parent.parent / "deploy"
+
+
+def help_for(subcommand: str) -> str:
+    """`tubedepth <subcommand> --help`, rendered wide, with a bare environment.
+
+    `env=` replaces the whole environment rather than adding to it, and that is
+    the load-bearing part: nearly every option in this CLI carries an `envvar=`
+    default, and typer prints the effective value into the help text. A
+    `TUBEDEPTH_*` variable sitting in the shell that ran pytest would otherwise
+    be able to change what these tests read. `COLUMNS=200` stops rich from
+    wrapping an option name across two lines, which would make it unfindable
+    by substring.
+
+    Shared with `tests/test_compose.py`, which asks the same question of
+    `deploy/docker-compose.yml`'s `command:` lines. It was inline in the option
+    test below until there was a second caller.
+    """
+    return subprocess.run(
+        [sys.executable, "-m", "tubedepth.cli", subcommand, "--help"],
+        capture_output=True,
+        text=True,
+        env={"COLUMNS": "200", "PATH": "/usr/bin:/bin"},
+    ).stdout
+
+
+def arguments_of(command: str | Sequence[str]) -> list[str]:
+    """The words `tubedepth` itself is given, out of either shape a command takes.
+
+    A unit's `ExecStart` is one string naming the launcher first
+    (`/usr/bin/env uv run --frozen tubedepth work --poll 5`), so what the CLI
+    receives is everything after the program name. A compose `command:` is
+    already relative to the image's `ENTRYPOINT ["tubedepth"]` and may be a
+    YAML list rather than a string, so all of it is the CLI's.
+
+    Matched on the whole word rather than by splitting on the literal
+    `"tubedepth "`, so a path that merely contains the name —
+    `/etc/tubedepth/watchlist.txt`, which the compose `watch` service passes —
+    is not mistaken for the program.
+    """
+    words = command.split() if isinstance(command, str) else [str(word) for word in command]
+    if "tubedepth" in words:
+        words = words[words.index("tubedepth") + 1 :]
+    return words
+
+
+def assert_every_option_exists(command: str | Sequence[str], *, source: str) -> None:
+    """Fail if `command` passes an option the subcommand it names does not have.
+
+    The classic deployment failure: a command that no longer takes an option it
+    is given, discovered on a reboot — or on a `docker compose up` — rather
+    than on the commit that removed it. Checked against the CLI's own help so
+    it stays true as options change, rather than against a list copied here
+    that would rot beside them.
+
+    `--frozen` is `uv`'s option, not this CLI's. It sits before the program
+    name and is therefore already gone by here, but it is skipped explicitly as
+    well: that exclusion is what the check relied on before, and a launcher
+    that put its own flags after the program name would need it again.
+    """
+    words = arguments_of(command)
+    subcommand = words[0]
+    options = [word for word in words if word.startswith("--") and word != "--frozen"]
+
+    help_text = help_for(subcommand)
+    for option in options:
+        assert option in help_text, (
+            f"{source} passes {option}, which `tubedepth {subcommand}` lacks"
+        )
+
 
 # Read from the directory rather than listed here. A copied list is one a new
 # unit is added without, and a unit nobody checks is exactly the file these
@@ -142,41 +214,33 @@ def test_every_option_the_unit_passes_actually_exists(name: str) -> None:
     """The classic unit failure: a command that no longer takes an option it
     is given, discovered on a reboot rather than on the commit that removed it.
 
-    Checked against the CLI's own help so it stays true as options change,
-    rather than against a list copied here that would rot beside them.
+    The check itself is `assert_every_option_exists` above, shared with
+    `tests/test_compose.py` — a compose `command:` is the same mistake waiting
+    in a different file.
     """
-    import subprocess
-    import sys
-
-    command = unit(name)["Service"]["ExecStart"]
-    subcommand = command.split("tubedepth ")[1].split()[0]
-    options = [word for word in command.split() if word.startswith("--") and word != "--frozen"]
-
-    help_text = subprocess.run(
-        [sys.executable, "-m", "tubedepth.cli", subcommand, "--help"],
-        capture_output=True,
-        text=True,
-        env={"COLUMNS": "200", "PATH": "/usr/bin:/bin"},
-    ).stdout
-
-    for option in options:
-        assert option in help_text, f"{name} passes {option}, which `tubedepth {subcommand}` lacks"
+    assert_every_option_exists(unit(name)["Service"]["ExecStart"], source=name)
 
 
 def test_the_connection_budget_agrees_everywhere_it_is_declared() -> None:
     """`service-db.json`, `deploy/postgres-bootstrap.sql`'s `CONNECTION
     LIMIT` and session-default `ALTER ROLE ... SET` statements,
-    `deploy/tubedepth-worker.service`'s `TUBEDEPTH_CONCURRENCY`, and the
-    pool-sizing comment in `database.py` all have to agree, and nothing
-    enforced that before this test — the previous survivor was `database.py`
-    still asserting numbers a budget-raise had already changed everywhere
-    else.
+    `deploy/tubedepth-worker.service`'s `TUBEDEPTH_CONCURRENCY`,
+    `deploy/docker-compose.yml`'s `--concurrency`, and the pool-sizing comment
+    in `database.py` all have to agree, and nothing enforced that before this
+    test — the previous survivor was `database.py` still asserting numbers a
+    budget-raise had already changed everywhere else.
+
+    The compose file is the newest site and was added here rather than to
+    `tests/test_compose.py` deliberately: a budget that is cross-checked in two
+    files is a budget with two partial answers, and the next person to raise it
+    would find one of them. Everything that declares the number is compared in
+    one place.
 
     `service-db.json` is actual JSON, so it is loaded with `json.loads`. The
-    other three files are still parsed with regex, not a SQL/systemd parser,
-    to avoid a dependency this repository does not declare directly. A future
-    change to any one of them fails here rather than being caught by a human
-    rereading five files.
+    other four files are still parsed with regex, not a SQL/systemd/YAML
+    parser, to avoid a dependency this repository does not declare directly. A
+    future change to any one of them fails here rather than being caught by a
+    human rereading six files.
     """
     import json
     import re
@@ -200,6 +264,13 @@ def test_the_connection_budget_agrees_everywhere_it_is_declared() -> None:
     worker_text = (deploy / "tubedepth-worker.service").read_text()
     concurrency = find(r"^Environment=TUBEDEPTH_CONCURRENCY=(\d+)", worker_text)
 
+    # The compose worker passes the same number as a flag rather than an
+    # environment variable, so that `api` and `worker` can go on sharing one
+    # env anchor — see deploy/docker-compose.yml. Anchored to the `command:`
+    # line so the prose around it cannot satisfy this.
+    compose_text = (deploy / "docker-compose.yml").read_text()
+    compose_concurrency = find(r"^\s*command: work .*--concurrency (\d+)", compose_text)
+
     database_text = database_py.read_text()
     comment_budget = find(r"declares (\d+) as the ceiling", database_text)
     comment_concurrency = find(r"deployed\n# default is (\d+), the AIMD controller", database_text)
@@ -212,6 +283,11 @@ def test_the_connection_budget_agrees_everywhere_it_is_declared() -> None:
     assert concurrency == comment_concurrency, (
         "TUBEDEPTH_CONCURRENCY disagrees between the worker unit "
         f"({concurrency}) and database.py's comment ({comment_concurrency})"
+    )
+    assert concurrency == compose_concurrency, (
+        "worker concurrency disagrees between the worker unit "
+        f"({concurrency}) and docker-compose.yml's `--concurrency` "
+        f"({compose_concurrency}); both draw on the same 32-connection budget"
     )
     assert (
         concurrency == budget["worker"]["write_pool_size"] == budget["worker"]["write_max_overflow"]

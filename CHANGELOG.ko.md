@@ -51,6 +51,20 @@
 
 ### Added
 
+- **Docker 이미지, 그리고 전체를 돌리는 compose 예제 (#22).** 이미지 하나,
+  `ENTRYPOINT ["tubedepth"]`. 그래서 `deploy/docker-compose.yml`의 서비스 넷
+  — `migrate`·`api`·`worker`·`watch` — 은 `command:`만 다르다. `migrate`는
+  one-shot이고 나머지 셋은 그것이 *성공적으로 끝나는 것*을 기다린다. 부팅 경로가
+  DDL을 내지 않기 때문이고(#14), 시작할 때 migrate하는 컨테이너는 그 변경을 도로
+  무르는 것이기 때문이다. `api`와 `worker`는 리뷰가 아니라 YAML anchor로 env
+  block 하나를 공유한다. listing·comment·trending cap이 cache key의 일부라서,
+  둘이 다른 값을 읽으면 서로 다른 질문에 답한다. 이미지에는 `HEALTHCHECK`가
+  없다 — 포트를 열지 않는 worker와, 끝나는 게 정상인 one-shot에게 틀린 검사다 —
+  그래서 API의 healthcheck는 compose 파일에 있다. 기본 전제는 외부 fleet
+  PostgreSQL이고, `--profile local`이 `deploy/postgres-bootstrap.sql` 그 자체로
+  세팅되는 PostgreSQL을 띄운다. 명령은 `just compose-up` 하나. 레지스트리
+  배포는 없다.
+
 - **`tubedepth watch <목록>` — 채널·트렌드 키워드·지역을 한 스케줄에서 수집한다 (#20).** 목록에는
   타입이 붙는다: 한 줄에 `video`·`channel`·`search`·`trending` 중 하나와 타깃 하나. 한 줄에 id
   하나짜리 목록으로는 이것을 표현할 수 없었다 — `UCxxx`, `kpop debut`, `KR`은 문자열만 보고

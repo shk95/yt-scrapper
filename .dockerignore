@@ -1,0 +1,56 @@
+# What never belongs in the build context.
+#
+# Two different reasons are mixed here and both matter. Most entries are size:
+# the context is tarred and sent to the daemon before the first instruction
+# runs, and .git plus a local .venv is the bulk of this checkout. The entries
+# under "credentials and runtime state" are not about size at all — `var/`
+# holds the egress WireGuard configs (a PrivateKey each) and the payload
+# store, and a `.env` holds the database URL. A file that reaches the context
+# can reach a layer, and a layer is shipped.
+#
+# This file is a deny-list rather than an allow-list because the Dockerfile
+# already copies by name (pyproject.toml, uv.lock, src/, migrations/, …) —
+# nothing outside those lines is copied even when it survives this file.
+
+# Version control and CI
+.git/
+.github/
+.githooks/
+
+# Credentials and runtime state
+.env
+.env.*
+!.env.example
+var/
+*.conf
+*.pem
+*.key
+*.cookies.txt
+
+# Local build and tool state — the image builds its own venv from uv.lock, and
+# copying a host one in would put absolute host paths in the image.
+.venv/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.ruff_cache/
+.coverage
+htmlcov/
+
+# Not part of the runtime
+tests/
+docs/
+decisions/
+tool/
+Justfile
+*.md
+!README.md
+
+# Editor and OS junk
+.idea/
+.vscode/
+.DS_Store
+*.swp

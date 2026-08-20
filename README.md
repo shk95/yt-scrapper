@@ -149,6 +149,49 @@ The API binds to **loopback** by default. Authentication here is a header,
 which is not a substitute for TLS, so put a reverse proxy in front before
 exposing it.
 
+## Run it with Docker
+
+One image, four services in `deploy/docker-compose.yml`: `migrate` runs once,
+and `api`, `worker` and `watch` wait for it to complete successfully. They
+differ only by their `command:`, because the image is
+`ENTRYPOINT ["tubedepth"]`.
+
+```sh
+cp deploy/.env.example deploy/.env
+$EDITOR deploy/.env               # the two database URLs, and the local passwords
+just compose-up                   # --profile local, so it brings up a PostgreSQL too
+curl -s localhost:8080/healthz
+just compose-down
+```
+
+The database is the external fleet one by default. `--profile local` — what
+`just compose-up` passes — adds a PostgreSQL of its own, bootstrapped by
+`deploy/postgres-bootstrap.sql` itself rather than a containerised copy of it,
+so what you verify against is the shape production has.
+
+Every credential lives in `deploy/.env`. A compose file is committed and a
+database URL embeds a password, so `deploy/docker-compose.yml` interpolates all
+of them and carries no secret literal; a test asserts it.
+
+Three things there are not accidents. The image carries **no `HEALTHCHECK`** —
+it would be wrong for the worker and the watcher, which answer no port, and for
+`migrate`, a one-shot that is supposed to exit — so the API's healthcheck is in
+the compose file, on the one service that serves `/healthz`. The API runs with
+`--host 0.0.0.0` there while the systemd unit binds loopback: in a container
+nothing is reachable until a port is published, and the `ports:` line is where
+that decision is made. And `api` and `worker` share one env block through a
+YAML anchor rather than by review, because the listing, comment and trending
+caps are part of the cache key — two processes that disagree about them compute
+different keys, and the API then answers for a question the worker never
+collected.
+
+The payload store is a named volume shared by `api` and `worker`: payload bytes
+are gzipped files on disk, not database rows, and the API serves what the
+worker wrote.
+
+No registry publishing. The image is built where it runs — `just compose-up`
+builds it, and CI builds it on every push to check that it still can.
+
 ## Documentation
 
 | | |

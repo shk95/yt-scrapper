@@ -89,6 +89,34 @@ serve port="8080":
 worker:
     uv run tubedepth work
 
+# The same two processes plus the migration and the watcher, in containers.
+#
+# `--profile local` is what adds a PostgreSQL of its own; without it the stack
+# expects the external fleet one, which is the default deploy/docker-compose.yml
+# is written for. Copy `deploy/.env.example` to `deploy/.env` first — the
+# database URLs live there and nowhere else, because a compose file is
+# committed and a URL embeds a password.
+#
+# `--build` because the image is tagged rather than pulled: without it a code
+# change is invisible and you spend the afternoon debugging the last build.
+# `--wait` blocks until `migrate` has exited 0 and the API's /healthz answers,
+# so a stack that did not come up is this command failing rather than a
+# `docker compose ps` somebody has to think to read.
+
+# Build the image and bring the whole stack up, on a PostgreSQL of its own
+[group('run')]
+compose-up:
+    docker compose -f deploy/docker-compose.yml --profile local up -d --build --wait
+
+# Stops without removing the volumes. The payload store is one of them, and a
+# month of watching is not something to delete as a side effect of stopping a
+# stack — add `-v` yourself, at the moment you mean it.
+
+# Stop the stack, keeping the payload store and the database
+[group('run')]
+compose-down:
+    docker compose -f deploy/docker-compose.yml --profile local down
+
 ############################################################################
 #
 #  fixtures
