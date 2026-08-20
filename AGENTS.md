@@ -2,15 +2,16 @@
 
 An **asynchronous job-queue API** that collects the YouTube video and channel
 data the official Data API does not expose. Python + FastAPI + SQLAlchemy +
-SQLite, the package is `tubedepth`, everything runs through `uv`.
+PostgreSQL, the package is `tubedepth`, everything runs through `uv`.
 
 *[한국어](AGENTS.ko.md)*
 
 ## Every session starts here
 
 1. `tool/doctor.sh` — the toolchain and the git hooks. Do not skip it: a clone
-   has no hooks until `core.hooksPath` is set, and an old SQLite tells you
-   inside a worker, as an `OperationalError`.
+   has no hooks until `core.hooksPath` is set, and a missing or unreachable
+   `TUBEDEPTH_DATABASE_URL` otherwise tells you inside a worker, as a refusal
+   with no context.
 2. `gh issue list --label blocked` — work an earlier session could not finish
    because it needed something this host did not have.
 3. `docs/status.md` — where things stand, and the decisions that are expensive
@@ -73,9 +74,11 @@ are the actual messages. Do not read it from the top — it is a lookup table.
   `$XDG_RUNTIME_DIR` (tmpfs, 0600) and is removed on exit. `.gitignore` is a
   backstop, not a defence — a key that reaches history survives deleting the
   file.
-- **Keep the database on a Linux filesystem.** `/mnt/c` (drvfs) does not
-  reliably provide the POSIX locks WAL needs, and the symptom is intermittent
-  `database is locked`. `tool/doctor.sh` checks it.
+- **Keep `TUBEDEPTH_DATA_DIR` (the payload store) on a Linux filesystem.**
+  `/mnt/c` (drvfs) does not reliably provide POSIX semantics; `tool/doctor.sh`
+  checks it. The database is PostgreSQL now (#15), reached over TCP, so this
+  is no longer about SQLite's WAL locking — see `docs/troubleshooting.md`'s
+  SQLite section, kept as history, for what that used to look like.
 
 ## Workflow
 
@@ -137,9 +140,10 @@ tool/worktree.sh list
 tool/worktree.sh done <name>
 ```
 
-**What does not parallelise**: the one SQLite database file, the port range
-wireproxy binds (`27100+`), and ProtonVPN's concurrent-connection quota. One
-session at a time holds those.
+**What does not parallelise**: this repository's migration state on the
+shared PostgreSQL instance (`tubedepth migrate` from two worktrees at once
+races), the port range wireproxy binds (`27100+`), and ProtonVPN's
+concurrent-connection quota. One session at a time holds those.
 
 ## Layout
 

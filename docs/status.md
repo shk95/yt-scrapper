@@ -3,7 +3,7 @@
 Rewritten freely as the project moves. Anything that must survive a rewrite —
 an error and its fix — belongs in [`troubleshooting.md`](troubleshooting.md).
 
-Last updated: 2026-08-19.
+Last updated: 2026-08-20.
 
 ---
 
@@ -451,14 +451,17 @@ Before the tag, in order:
 2. ~~**Stop reconnecting six times a minute**~~ — done. The worker was a poll
    loop made of process restarts, which is a local inefficiency against a file
    and a fleet-budget problem against a shared instance. See `Worker.serve`.
-3. **[#14](https://github.com/slopindustries/yt-scrapper/issues/14)** — no DDL
-   on the boot path. Small, independently useful, and it makes the next step
-   smaller.
-4. **[#15](https://github.com/slopindustries/yt-scrapper/issues/15)**, the
+3. ~~**[#14](https://github.com/slopindustries/yt-scrapper/issues/14)** — no
+   DDL on the boot path.~~ Done.
+4. ~~**[#15](https://github.com/slopindustries/yt-scrapper/issues/15)**, the
    cutover, deciding
    [#16](https://github.com/slopindustries/yt-scrapper/issues/16) along the way
-   rather than after it — both now shaped by the fleet regulation (see "규정
-   적용" below).
+   rather than after it — both shaped by the fleet regulation (see "규정
+   적용" below).~~ Done 2026-08-20 (Task 8): `Database` refuses a non-PostgreSQL
+   URL, `settings.database_url` has no fallback, and the SQLite branch is
+   gone from every path except `tubedepth transfer --from`'s source. #16's
+   `verify_placement()`-before-`is_migrated()` ordering landed in an earlier
+   task and is unchanged here.
 5. **The [release gate](https://github.com/slopindustries/yt-scrapper/milestone/4)** — the three conditions the owner
    set, in order: **[#20](https://github.com/slopindustries/yt-scrapper/issues/20)** a `watch` subcommand collecting by
    channel, search keyword and trending region; **[#21](https://github.com/slopindustries/yt-scrapper/issues/21)** the
@@ -552,7 +555,7 @@ migrator와 runtime 둘 다 `search_path = tubedepth, pg_catalog`로 둔다. `do
 | 1 owner/migrator/runtime | **적용됨(#15).** `tubedepth_owner`(NOLOGIN) / `tubedepth_migrator`(배포 전용, `GRANT tubedepth_owner`) / `tubedepth_runtime`(DML만) 3-role 분리. `migrations/env.py`가 postgres에서 `SET ROLE tubedepth_owner`; runtime의 부정 테스트 4종과 소유권 감사가 `tests/test_postgres_privileges.py` | `deploy/postgres-bootstrap.sql`, `migrations/env.py` |
 | 2 autogenerate 격리 | search_path 전략 + sentinel 증명 (위 선언, 테스트는 #15에서 실제로 작성됨) | `tests/test_postgres_migrations.py` |
 | 3 version table 격리 | `tubedepth.alembic_version`, 테스트가 위치를 단언 | 같은 파일 |
-| 4 connection budget | **적용됨(#15, Task 7).** manifest에 상한 20 선언; `tubedepth_runtime`에 `CONNECTION LIMIT 20`. `Database`가 PostgreSQL 대상일 때 write/read 두 engine 모두 `pool_size=2, max_overflow=2`(engine당 상한 4)로 명시적으로 생성 — API 프로세스 1개 + worker 프로세스 1개, 각각 write/read engine 하나씩이라 engine은 총 4개. 4 × 4 = 16 ≤ 20, 여유 4는 규정이 요구하는 운영 안전 여유. SQLite는 pool 상한을 두지 않는다(로컬 파일이라 예산과 무관) | `src/tubedepth/database.py`, `deploy/service-manifest.yaml`, `deploy/postgres-bootstrap.sql` |
+| 4 connection budget | **적용됨(#15, Task 7-8).** manifest에 상한 20 선언; `tubedepth_runtime`에 `CONNECTION LIMIT 20`. `Database`는 이제 PostgreSQL만 받고, write/read 두 engine 모두 `pool_size=2, max_overflow=2`(engine당 상한 4)로 생성 — API 프로세스 1개 + worker 프로세스 1개, 각각 write/read engine 하나씩이라 engine은 총 4개, steady state 4 × 4 = 16. Task 8에서 manifest에 규정 공식의 나머지 두 항을 명시: migration 연결(+1, `migrations/env.py`가 `NullPool`로 여는 연결 하나)과 rolling-deploy overlap(+0, 이 배포는 blue-green이 아니라 평범한 systemd 재시작이라 신구 인스턴스가 동시에 뜨지 않음 — 다음에 배포 방식이 바뀌면 이 줄부터 고친다). 합계 16+1+0 = 17 ≤ 20, 여유 3 | `src/tubedepth/database.py`, `deploy/service-manifest.yaml`, `deploy/postgres-bootstrap.sql` |
 | 5 timeout | **적용됨(#15).** `tubedepth_runtime`에 `statement_timeout`(15s), `lock_timeout`(3s, statement보다 짧게), `idle_in_transaction_session_timeout`(30s), `transaction_timeout`(60s, PG17+이므로 무조건 설정)을 role-scoped로 부여. 워커는 이미 network 호출을 transaction 밖에서 한다 | `deploy/postgres-bootstrap.sql` |
 | 6 startup DDL 금지 | **적용됨.** `_database()`가 더는 `create_schema()`를 호출하지 않는다; 스키마 경로는 `tubedepth migrate` 하나뿐 | #14 |
 | 7 외부 object 일관성 | payload는 content-addressed(불변 key), write-then-record 순서로 이미 규정 형태. grace period와 reconciliation은 #17에 병합 | `payload_store.py`, #17 |
@@ -632,6 +635,51 @@ marker가 붙은 소수만 예외 처리해서는 나머지가 전부 막힌다.
 없으면 `just postgres`와 같은 방식으로 throwaway container를 직접 띄우고 정리한다
 (`tool/checks/postgres`는 그래서 사라졌고, CI도 `verify`/`postgres` 두 job을
 하나로 합쳤다).
+
+**Task 8 — 컷오버가 끝난다: SQLite가 없어진다.** #15 "a cutover, not a
+dual-dialect period"가 뜻하던 것은 여기서다. `Database`는 PostgreSQL이 아닌
+URL을 `ConfigurationError`로 거부한다 — 단 하나 의도된 예외는
+`allow_sqlite_source=True`이고, `tubedepth transfer --from`만 이것을 쓴다.
+실제 컷오버가 데이터를 옮겨오는 곳이 SQLite이므로, 이 지원은 애플리케이션이
+더 이상 SQLite에서 실행되지 않는데도 남는다 — 지운 것은 "SQLite로 서비스를
+운영한다"이지 "SQLite에서 옮겨온다"가 아니다. `settings.database_url()`은
+`data_directory` 인자와 SQLite 대체 경로를 잃고 `TUBEDEPTH_DATABASE_URL`이
+없으면 예외를 던진다. `migrations/env.py`는 자기 복사본 대신 그 함수를 부르고,
+SQLite 전용이던 `render_as_batch`를 뗐다.
+
+`tests/test_transfer.py`의 offline 메커니즘 테스트(개수, identifier 보존,
+부분 실패 메시지, 재확인)는 여전히 양끝 다 SQLite다 — 서버 없이도
+`tubedepth transfer`가 동작함을 증명하는 것이 그 테스트들의 존재 이유이고,
+`transfer()` 자체는 ORM으로 행을 옮기므로 dialect에 무관하기 때문이다. 실제
+운영 조합(SQLite in, PostgreSQL out, 진짜 migrator/runtime role)은 그 파일
+맨 아래 `test_a_sqlite_index_round_trips_through_postgresql`이 증명한다.
+
+`tests/test_cli.py`의 CLI 테스트 약 30개는 `--data-dir`의 SQLite 대체 경로에
+기대고 있었다. 이제 `verify_placement()`가 모든 `_database()` 호출을 통과하고
+그 검사는 고정된 스키마 이름(`"tubedepth"`)을 요구하므로, 임의의 per-test
+스키마로는 통과할 수 없다 — 그래서 이 파일은 실제 `tubedepth` 스키마를 테스트마다
+drop/재생성하는 autouse fixture 하나로 옮겼다(`test_postgres_migrations.py`의
+`empty_database`와 같은 모양). 결과적으로 Deferred Minor 5가 물었던 질문의
+답은 "강제로 옮겨간다"이다: 이 파일의 모든 명령이 이제 실제 PostgreSQL 위에서
+돈다 — 달리 열 곳이 없어서다.
+
+`tests/test_migrations.py`는 지웠다. 그 파일이 SQLite로 확인하던 성질들(head
+하나, 모델과 일치, 되돌릴 수 있음, drift 없음, version table 위치)은 이미
+`tests/test_postgres_migrations.py`가 PostgreSQL로 증명하고 있었고 — 그 파일
+자신의 docstring이 말하듯 SQLite는 애초에 PostgreSQL에만 있는 dialect 차이를
+볼 수 없었다. CLI 수준 성질(predates-migration stamp, 빈 스키마 upgrade,
+operator URL이 이기고 복원됨, 값 없으면 깨끗이 거부)은
+`test_postgres_migrations.py`로 옮겨 다시 썼다.
+
+`deploy/*.service` 세 유닛 모두 `TUBEDEPTH_DATABASE_URL`을 위한 필수
+`EnvironmentFile`을 갖는다(worker는 기존의 선택적 파일을 필수로 바꿈). manifest와
+`database.py`의 connection 산수는 규정 4의 나머지 두 항(migration 연결
++1, rolling-deploy overlap +0)을 명시해서 17 ≤ 20이 됐다 — 위 표 참고.
+`repositories.JobRepository.claim()`의 docstring은 더 이상 SQLite의 BEGIN
+IMMEDIATE를 "belt and braces"로 부르지 않는다 — guarded UPDATE와 rowcount
+확인이 이제 유일한 메커니즘이라고 고쳤다. `tests/conftest.py`의 socket guard는
+호스트 allow-list에 더해 `TUBEDEPTH_TEST_POSTGRES_URL`이 실제로 이름하는
+포트로 좁혔다.
 
 **Manifest**: [`deploy/service-manifest.yaml`](../deploy/service-manifest.yaml).
 

@@ -48,9 +48,9 @@ Data API v3는 공개 영상에 대해서도 많은 것을 감춘다. `snippet.t
 
 ```sh
 git config core.hooksPath .githooks   # 클론은 훅이 꺼진 상태로 온다
-tool/doctor.sh                        # 툴체인·SQLite·훅 확인
+tool/doctor.sh                        # 툴체인·PostgreSQL 접속·훅 확인
 uv sync --extra dev
-just check                            # format + lint + 오프라인 테스트
+just check                            # format + lint + 테스트 스위트 (Docker 필요)
 
 uv run tubedepth key create --label local   # 키는 이때 한 번만 출력된다
 uv run tubedepth serve --port 8080 &        # API (기본 127.0.0.1)
@@ -86,11 +86,21 @@ systemd **유저 유닛**이 `deploy/`에 있다. 어느 것도 root가 필요 �
 없다. 그중 둘이 서비스 본체다:
 
 ```sh
+mkdir -p ~/.config/tubedepth
+echo 'TUBEDEPTH_DATABASE_URL=postgresql+psycopg://tubedepth_runtime:...@host/db' \
+  > ~/.config/tubedepth/worker.env
+cp ~/.config/tubedepth/worker.env ~/.config/tubedepth/database.env   # api.service가 읽는 파일
+chmod 0600 ~/.config/tubedepth/worker.env ~/.config/tubedepth/database.env
+
 cp deploy/tubedepth-api.service deploy/tubedepth-worker.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now tubedepth-api tubedepth-worker
 loginctl enable-linger $USER    # 로그아웃 후에도 살아있게 — 없으면 재부팅이 크래시처럼 보인다
 ```
+
+SQLite 대체 경로는 없다: 모든 유닛이 정상 동작하는 `TUBEDEPTH_DATABASE_URL` 없이는 시작을
+거부한다. 그 URL이 가리키는 role과 schema를 만드는 것이 `deploy/postgres-bootstrap.sql`이고,
+그 뒤의 규정이 `docs/shared-postgres.md`다.
 
 셋째는 선택이고 기본적으로 꺼져 있다. `tubedepth-sample.timer`는 영상 목록을 매시간 다시
 수집하되 신선도 기간을 강제로 넘겨서, 매 회차가 새 관측을 기록하게 한다. `GET /v1/artifacts`를

@@ -57,6 +57,12 @@ would break on every recording and on every video YouTube still answers fully.
 
 ## SQLite
 
+**Historical.** The application ran on SQLite until the PostgreSQL cutover
+(#15); `Database` refuses a SQLite URL now, except as `tubedepth transfer
+--from`'s source. Kept rather than deleted: these cost someone an afternoon
+each, and the reasoning survives even though the entry point that could
+trigger them no longer does.
+
 ### `database is locked`
 
 Two causes, and they need different fixes.

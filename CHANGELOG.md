@@ -233,6 +233,20 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
   `duplicate column name` — see `docs/troubleshooting.md`, which says how to
   tell whether the answer is `--stamp` or an upgrade.
 
+### Removed
+
+- **SQLite support (#15).** The cutover completes: `Database` refuses any URL
+  that is not PostgreSQL, with one deliberate exception —
+  `tubedepth transfer --from` still accepts a SQLite source, because that is
+  what a real cutover moves data out of. `TUBEDEPTH_DATABASE_URL` has no
+  fallback any more and is required; a checkout with nothing configured now
+  gets a named refusal instead of a `var/tubedepth.db` it never asked for.
+  `psycopg[binary]` moved from an optional extra into `dependencies`.
+  Deployment units gain a mandatory `EnvironmentFile` for the URL.
+  `tool/doctor.sh`'s SQLite version check became a PostgreSQL reachability
+  check. `docs/troubleshooting.md`'s SQLite entries are kept, marked
+  historical.
+
 ## [0.1.0] - 2026-08-19
 
 Everything the plan called M0–M9, plus an operator dashboard it did not ask

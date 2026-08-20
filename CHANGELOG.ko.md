@@ -176,6 +176,17 @@
   `tubedepth migrate`가 `duplicate column name`으로 실패한다 — `--stamp`가 답인지 upgrade가
   답인지 구분하는 방법은 `docs/troubleshooting.md`에 있다.
 
+### Removed
+
+- **SQLite 지원 (#15).** 컷오버가 완료됐다: `Database`는 PostgreSQL이 아닌 URL을 전부
+  거부한다. 단 하나 의도된 예외는 `tubedepth transfer --from`인데, 실제 컷오버가 데이터를
+  옮겨오는 곳이 SQLite이기 때문이다. `TUBEDEPTH_DATABASE_URL`에는 더 이상 대체 경로가
+  없고 필수다 — 아무것도 설정하지 않은 체크아웃은 이제 묻지도 않은 `var/tubedepth.db`
+  대신 이름이 붙은 거부를 받는다. `psycopg[binary]`는 선택 extra에서 `dependencies`로
+  옮겼다. 배포 유닛들은 그 URL을 위한 필수 `EnvironmentFile`을 갖는다. `tool/doctor.sh`의
+  SQLite 버전 확인은 PostgreSQL 접속 확인이 됐다. `docs/troubleshooting.md`의 SQLite
+  항목들은 지우지 않고 역사로 표시해 남겼다.
+
 ## [0.1.0] - 2026-08-19
 
 계획서가 M0–M9로 부른 것 전부와, 계획에 없던 운영 대시보드. 지속 부하에서는 아직
