@@ -15,16 +15,17 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
-from tubedepth.api.application import create_application
+from tubedepth.api.application import MAXIMUM_PAGE, create_application
 from tubedepth.database import Database
 from tubedepth.egress.control import Lane
 from tubedepth.egress.transport import Egress
+from tubedepth.errors import ConfigurationError, TubedepthError, UnavailableError
 from tubedepth.identifiers import TargetType
-from tubedepth.models import Job, JobState
+from tubedepth.models import Artifact, Job, JobState
 from tubedepth.payload_store import PayloadStore
 from tubedepth.services.keys import ApiKeyService
 from tubedepth.sources import SourceRegistry
-from tubedepth.sources.registry import SourceCost
+from tubedepth.sources.registry import DataSource, SourceCost
 from tubedepth.sources.ytdlp_runtime import YtdlpRuntime
 
 
@@ -45,15 +46,13 @@ class EchoSource:
         return EchoPayload(target=target)
 
 
-def build_api(tmp_path: Path) -> tuple[TestClient, str, Database]:
+def build_api(tmp_path: Path, database: Database) -> tuple[TestClient, str, Database]:
     """The fixture's body as a plain function.
 
     Other test modules need the same client and were reaching into the
     fixture's `__wrapped__`, which is an implementation detail of pytest and
     not a seam anyone should rely on.
     """
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
     registry = SourceRegistry()
     registry.register(EchoSource())  # type: ignore[arg-type]
     application = create_application(
@@ -68,8 +67,37 @@ def build_api(tmp_path: Path) -> tuple[TestClient, str, Database]:
 
 
 @pytest.fixture
-def api(tmp_path: Path) -> tuple[TestClient, str, Database]:
-    return build_api(tmp_path)
+def api(tmp_path: Path, database: Database) -> tuple[TestClient, str, Database]:
+    return build_api(tmp_path, database)
+
+
+class RaisingRegistry(SourceRegistry):
+    """A registry whose lookup fails with whichever domain error it was given.
+
+    `registry.get` is the first thing `POST /v1/jobs` touches, so this raises
+    the failure from inside a real route — which is where the status mapping
+    is attached — rather than by calling the handler directly. Nothing else
+    provokes an `UnavailableError` or a `ConfigurationError` without a network
+    or a database that is misconfigured on purpose.
+    """
+
+    def __init__(self, failure: TubedepthError) -> None:
+        super().__init__()
+        self._failure = failure
+
+    def get(self, kind: str) -> DataSource:
+        raise self._failure
+
+
+def build_api_that_fails_with(
+    tmp_path: Path, database: Database, failure: TubedepthError
+) -> tuple[TestClient, str]:
+    application = create_application(
+        database=database,
+        payloads=PayloadStore(tmp_path / "payloads"),
+        registry=RaisingRegistry(failure),
+    )
+    return TestClient(application), ApiKeyService(database).mint(label="test").secret
 
 
 def test_health_needs_no_key(api: tuple[TestClient, str, Database]) -> None:
@@ -173,6 +201,76 @@ def test_an_unknown_kind_is_a_not_found(api: tuple[TestClient, str, Database]) -
     )
 
     assert response.status_code == 404
+
+
+def test_a_query_value_that_cannot_be_parsed_comes_back_in_the_documented_shape(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """`docs/api.md` promises one error shape and this used to be the other.
+
+    Everything raised inside a route reaches the domain handler and answers
+    `{"error": {...}}`; everything FastAPI refuses before the route runs used
+    to answer `{"detail": [...]}`. Two shapes for one class of failure is two
+    branches in every client, for the failures a client provokes most often.
+    """
+    client, key, _ = api
+
+    response = client.get("/v1/jobs?since=last-tuesday", headers={"X-API-Key": key})
+
+    assert response.status_code == 422
+    body = response.json()
+    assert "detail" not in body, "FastAPI's own shape reached a client"
+    assert body["error"]["code"] == "invalid_request"
+    assert "since" in body["error"]["message"], "the message says which value was refused"
+
+
+def test_a_malformed_body_comes_back_in_the_documented_shape(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    client, key, _ = api
+
+    response = client.post("/v1/jobs", json={"kind": "video.echo"}, headers={"X-API-Key": key})
+
+    assert response.status_code == 422
+    body = response.json()
+    assert "detail" not in body
+    assert body["error"]["code"] == "invalid_request"
+    assert "target" in body["error"]["message"], "the message names the missing field"
+
+
+@pytest.mark.parametrize(
+    ("failure", "expected_status", "expected_code"),
+    [
+        (UnavailableError("video is not available in this country"), 404, "unavailable"),
+        (ConfigurationError("TUBEDEPTH_DATA_API_KEY is not set"), 503, "not_configured"),
+    ],
+    ids=["unavailable", "not_configured"],
+)
+def test_a_failure_that_is_not_our_bug_is_not_reported_as_our_bug(
+    tmp_path: Path,
+    database: Database,
+    failure: TubedepthError,
+    expected_status: int,
+    expected_code: str,
+) -> None:
+    """Both used to fall through to the catch-all as 500 `internal_error`.
+
+    Which the reference defines as our bug — so a geo-blocked video and an
+    unset key both sent whoever was on call into our tracebacks. Since #16 a
+    `search_path` that does not lead with this project's schema raises
+    `ConfigurationError` too, and 503 is what tells an operator to go and look
+    at the configuration.
+    """
+    client, key = build_api_that_fails_with(tmp_path, database, failure)
+
+    response = client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+        headers={"X-API-Key": key},
+    )
+
+    assert response.status_code == expected_status
+    assert response.json()["error"]["code"] == expected_code
 
 
 def test_asking_for_a_result_before_the_job_finishes_says_so(
@@ -303,6 +401,93 @@ def test_a_cached_result_comes_back_without_a_job(
     assert json.loads(response.text)["target"] == "dQw4w9WgXcQ"
 
 
+def test_a_forced_collection_records_a_second_observation(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    """`refresh` has to survive the queue, not just the request handler.
+
+    The artifact table is the history this project keeps by appending, so a
+    forced collection that is quietly served from the cache records no new row:
+    the series stops moving while every job still reports success and points at
+    a digest. Nothing errors, which is the failure this repository exists to
+    make impossible — and it is the one the trend work depends on not having.
+    """
+    from tubedepth.worker import Worker
+
+    client, key, database = api
+
+    def drain() -> None:
+        registry = SourceRegistry()
+        registry.register(EchoSource())  # type: ignore[arg-type]
+        Worker(
+            database=database,
+            payloads=PayloadStore(tmp_path / "payloads"),
+            registry=registry,
+            name="test",
+            concurrency=1,
+        ).drain()
+
+    client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+        headers={"X-API-Key": key},
+    )
+    drain()
+
+    response = client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ", "refresh": True},
+        headers={"X-API-Key": key},
+    )
+    drain()
+
+    assert response.status_code == 202, "a forced collection answered with the cached body"
+    with database.session() as session:
+        assert session.query(Artifact).count() == 2, (
+            "the forced collection was served from the cache and recorded no observation"
+        )
+
+
+def test_a_job_whose_payload_has_aged_out_says_so_instead_of_raising(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    """Retention deletes artifacts and never touches job rows.
+
+    So this is the ordinary state of every job older than the retention
+    window, not a corner case: the row still names a digest and the bytes are
+    gone. `payloads.read` raises `FileNotFoundError`, which is not a
+    `TubedepthError` and therefore reaches FastAPI's default handler — an
+    unhandled traceback and a 500 for the most predictable outcome this
+    endpoint has. A 500 sends whoever is on call into our tracebacks to
+    discover that retention did exactly what it was configured to do.
+    """
+    from tubedepth.worker import Worker
+
+    client, key, database = api
+    registry = SourceRegistry()
+    registry.register(EchoSource())  # type: ignore[arg-type]
+    job_id = client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+        headers={"X-API-Key": key},
+    ).json()["job_id"]
+    payloads = PayloadStore(tmp_path / "payloads")
+    Worker(
+        database=database, payloads=payloads, registry=registry, name="test", concurrency=1
+    ).drain()
+    with database.session() as session:
+        job = session.get(Job, job_id)
+        assert job is not None and job.payload_digest is not None
+        digest = job.payload_digest
+    # What retention does, without waiting thirty days for it.
+    payloads.delete("video.echo", digest)
+
+    response = client.get(f"/v1/jobs/{job_id}/result", headers={"X-API-Key": key})
+
+    assert response.status_code == 404, "an aged-out payload answered as though it were our bug"
+    assert response.json()["error"]["code"] == "not_found"
+
+
 def test_the_openapi_document_is_served(api: tuple[TestClient, str, Database]) -> None:
     client, _, _ = api
 
@@ -310,6 +495,30 @@ def test_the_openapi_document_is_served(api: tuple[TestClient, str, Database]) -
 
     assert response.status_code == 200
     assert "/v1/jobs" in response.json()["paths"]
+
+
+def test_the_openapi_document_advertises_the_page_bounds(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """The advertised contract moved with the behaviour, which is the point.
+
+    `limit` was a bare `int` with the bound applied afterwards by a clamp, so
+    the schema promised an unbounded integer and the code quietly refused to
+    honour it. A generated client reading that schema would have offered a
+    caller a page size the API never intended to serve.
+    """
+    client, _, _ = api
+
+    paths = client.get("/openapi.json").json()["paths"]
+
+    for route in ("/v1/jobs", "/v1/artifacts"):
+        declared = next(
+            parameter
+            for parameter in paths[route]["get"]["parameters"]
+            if parameter["name"] == "limit"
+        )
+        assert declared["schema"]["minimum"] == 1
+        assert declared["schema"]["maximum"] == MAXIMUM_PAGE
 
 
 def test_cancelling_a_queued_job_over_http_reports_it_cancelled(
@@ -530,6 +739,38 @@ def test_artifacts_can_be_listed_and_filtered(api: tuple[TestClient, str, Databa
     assert listed["artifacts"][0]["byte_count"] == 123
 
 
+@pytest.mark.parametrize("route", ["/v1/jobs", "/v1/artifacts"])
+@pytest.mark.parametrize("limit", [0, -1, 100000])
+def test_a_page_size_outside_the_bounds_is_refused_rather_than_clamped(
+    api: tuple[TestClient, str, Database], route: str, limit: int
+) -> None:
+    """It was `max(1, min(limit, 500))` on both routes.
+
+    A clamp answers 200 to a request it did not honour: `limit=100000` came
+    back as 500 rows and `limit=0` as one, with nothing in the response saying
+    the number had been changed. A caller paging on the size it asked for
+    cannot tell that from the API agreeing with it.
+    """
+    client, key, _ = api
+
+    response = client.get(f"{route}?limit={limit}", headers={"X-API-Key": key})
+
+    assert response.status_code == 422
+    assert response.json()["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize("route", ["/v1/jobs", "/v1/artifacts"])
+def test_the_largest_page_the_reference_documents_is_accepted(
+    api: tuple[TestClient, str, Database], route: str
+) -> None:
+    """The bound is inclusive, which is what the reference says it is."""
+    client, key, _ = api
+
+    response = client.get(f"{route}?limit={MAXIMUM_PAGE}", headers={"X-API-Key": key})
+
+    assert response.status_code == 200
+
+
 def test_the_dashboard_is_served_and_needs_no_key_to_load(
     api: tuple[TestClient, str, Database],
 ) -> None:
@@ -572,3 +813,447 @@ def test_the_dashboard_never_embeds_a_key(api: tuple[TestClient, str, Database])
 
     assert key not in client.get("/").text
     assert "ytd_" not in client.get("/").text
+
+
+def test_a_submission_carries_the_bound_its_kind_deserves(
+    tmp_path: Path, database: Database
+) -> None:
+    """The API is the third place a job is constructed, and the easiest to miss.
+
+    A client cannot ask for a retry budget and should not: how many times a
+    kind is worth trying is a property of what collecting it costs, which the
+    registry knows and the submitter does not.
+    """
+
+    class ExpensivePayload(BaseModel):
+        target: str
+
+    class ExpensiveSource:
+        kind = "video.expensive"
+        target_type = TargetType.VIDEO
+        lane = Lane.YOUTUBE
+        cost = SourceCost.EXPENSIVE
+        schema_version = "1"
+        payload_model: type[BaseModel] = ExpensivePayload
+        default_freshness = timedelta(hours=6)
+
+        def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> ExpensivePayload:
+            return ExpensivePayload(target=target)
+
+    registry = SourceRegistry()
+    registry.register(EchoSource())  # type: ignore[arg-type]
+    registry.register(ExpensiveSource())  # type: ignore[arg-type]
+    client = TestClient(
+        create_application(
+            database=database, payloads=PayloadStore(tmp_path / "payloads"), registry=registry
+        )
+    )
+    key = ApiKeyService(database).mint(label="test").secret
+
+    for kind in ("video.expensive", "video.echo"):
+        client.post(
+            "/v1/jobs",
+            json={"kind": kind, "target": "dQw4w9WgXcQ"},
+            headers={"X-API-Key": key},
+        )
+
+    with database.session() as session:
+        bounds = {job.kind: job.max_attempts for job in session.query(Job).all()}
+    assert bounds["video.expensive"] < bounds["video.echo"], (
+        f"the expensive kind was submitted with as many tries as the standard one: {bounds}"
+    )
+
+
+def _stored_artifact(tmp_path: Path, database: Database, *, kind: str, version: str | None) -> str:
+    """One artifact row and its payload, as a collection would have left them."""
+    from tubedepth.models import Artifact, utcnow
+
+    payloads = PayloadStore(tmp_path / "payloads")
+    stored = payloads.put(kind, b'{"target": "dQw4w9WgXcQ", "kept": true}')
+    with database.session() as session:
+        session.add(
+            Artifact(
+                kind=kind,
+                target="dQw4w9WgXcQ",
+                fingerprint=f"fp-{kind}-{version}",
+                schema_version=version,
+                digest=stored.digest,
+                byte_count=stored.byte_count,
+                fetched_at=utcnow(),
+                fresh_until=utcnow(),
+            )
+        )
+    return stored.digest
+
+
+def test_an_artifact_can_be_read_by_its_digest(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    """`GET /v1/artifacts` hands out digests and nothing could dereference them.
+
+    A list route whose identifiers lead nowhere is a defect on its own terms —
+    the dashboard renders the digest as a dead cell — and it is what history
+    has to go through, since the alternative is keeping a job id forever.
+    """
+    client, key, database = api
+    digest = _stored_artifact(tmp_path, database, kind="video.echo", version="1")
+
+    response = client.get(f"/v1/artifacts/{digest}", headers={"X-API-Key": key})
+
+    assert response.status_code == 200
+    body = response.json()
+    assert body["digest"] == digest
+    assert body["schema_version"] == "1"
+    assert body["payload"] == {"target": "dQw4w9WgXcQ", "kept": True}
+
+
+def test_a_digest_this_instance_never_stored_is_not_found(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    client, key, _ = api
+
+    response = client.get(f"/v1/artifacts/{'0' * 64}", headers={"X-API-Key": key})
+
+    assert response.status_code == 404
+
+
+def test_an_observation_from_a_retracted_version_is_gone_rather_than_served(
+    api: tuple[TestClient, str, Database], tmp_path: Path, database_url_for_tests: str
+) -> None:
+    """`channel.about` v1 read the home tab as the about panel and returned a
+    video's description as the channel's. That data is wrong rather than old,
+    so the honest answer is that it was withdrawn — 410, not 404, because the
+    observation happened and 404 would claim it never did.
+    """
+    from tubedepth.egress.control import Lane as _Lane
+
+    class Retracted:
+        kind = "channel.retracted"
+        target_type = TargetType.CHANNEL
+        lane = _Lane.YOUTUBE
+        cost = SourceCost.CHEAP
+        schema_version = "2"
+        retracted_versions = frozenset({"1"})
+        payload_model: type[BaseModel] = EchoPayload
+        default_freshness = timedelta(hours=6)
+
+        def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
+            return EchoPayload(target=target)
+
+    database = Database(database_url_for_tests)
+    registry = SourceRegistry()
+    registry.register(Retracted())  # type: ignore[arg-type]
+    client = TestClient(
+        create_application(
+            database=database, payloads=PayloadStore(tmp_path / "payloads"), registry=registry
+        )
+    )
+    key = ApiKeyService(database).mint(label="test").secret
+    digest = _stored_artifact(tmp_path, database, kind="channel.retracted", version="1")
+
+    response = client.get(f"/v1/artifacts/{digest}", headers={"X-API-Key": key})
+
+    assert response.status_code == 410
+    assert response.json()["error"]["code"] == "retracted"
+
+
+def test_a_batch_queues_every_target_in_one_request(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """One charge against the allowance, not one per target.
+
+    A key is allowed 60 requests a minute, so a hundred-video sweep submitted
+    one at a time is rate-limited before it is half done — which makes the
+    difference between "the API can express this" and "the API can do this".
+    """
+    client, key, database = api
+
+    response = client.post(
+        "/v1/jobs/batch",
+        json={"kind": "video.echo", "targets": ["dQw4w9WgXcQ", "nfgdJyL-Jmg"], "refresh": True},
+        headers={"X-API-Key": key},
+    )
+
+    assert response.status_code == 202
+    assert len(response.json()["queued"]) == 2
+    with database.session() as session:
+        assert session.query(Job).count() == 2
+        assert all(job.refresh for job in session.query(Job).all())
+
+
+def test_a_batch_says_which_targets_it_did_not_need_to_queue(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    """Reporting rather than returning: a hundred cached payloads is megabytes,
+    and the caller asked to collect, not to download."""
+    from tubedepth.worker import Worker
+
+    client, key, database = api
+    registry = SourceRegistry()
+    registry.register(EchoSource())  # type: ignore[arg-type]
+    client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+        headers={"X-API-Key": key},
+    )
+    Worker(
+        database=database,
+        payloads=PayloadStore(tmp_path / "payloads"),
+        registry=registry,
+        name="test",
+        concurrency=1,
+    ).drain()
+
+    response = client.post(
+        "/v1/jobs/batch",
+        json={"kind": "video.echo", "targets": ["dQw4w9WgXcQ", "nfgdJyL-Jmg"]},
+        headers={"X-API-Key": key},
+    )
+
+    body = response.json()
+    assert [held["target"] for held in body["held"]] == ["dQw4w9WgXcQ"]
+    assert [job["target"] for job in body["queued"]] == ["nfgdJyL-Jmg"]
+
+
+def test_a_batch_that_names_one_bad_target_queues_nothing(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """All or nothing, because a partial answer to a sweep is the worst one.
+
+    Queueing 99 of 100 and returning 202 leaves the caller believing the sweep
+    ran; the missing one surfaces as an absence nobody looks for.
+    """
+    client, key, database = api
+
+    response = client.post(
+        "/v1/jobs/batch",
+        json={"kind": "video.echo", "targets": ["dQw4w9WgXcQ", "not a video id"]},
+        headers={"X-API-Key": key},
+    )
+
+    assert response.status_code == 422
+    with database.session() as session:
+        assert session.query(Job).count() == 0
+
+
+def test_a_batch_larger_than_the_cap_is_refused(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """An unbounded list is a way to queue a hundred thousand jobs in one
+    request that the allowance was supposed to bound."""
+    client, key, _ = api
+
+    response = client.post(
+        "/v1/jobs/batch",
+        json={"kind": "video.echo", "targets": [f"video{index:07d}" for index in range(501)]},
+        headers={"X-API-Key": key},
+    )
+
+    assert response.status_code == 422
+
+
+def test_the_worker_can_be_paused_and_resumed_through_the_api(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """The API and the worker are separate processes, so this is the channel.
+
+    Nothing in the API can reach into the worker to stop it — that split is
+    what keeps a yt-dlp crash from taking the API down — so the control is a
+    row the worker reads, and this route is what writes it.
+    """
+    client, key, _ = api
+
+    paused = client.patch(
+        "/v1/control",
+        json={"paused": True, "reason": "watching a quota"},
+        headers={"X-API-Key": key},
+    )
+    reported = client.get("/v1/control", headers={"X-API-Key": key})
+    resumed = client.patch("/v1/control", json={"paused": False}, headers={"X-API-Key": key})
+
+    assert paused.json()["paused"] is True
+    assert reported.json() == {**paused.json()}
+    assert reported.json()["reason"] == "watching a quota"
+    assert resumed.json()["paused"] is False
+
+
+def test_control_reports_a_running_worker_before_anyone_has_touched_it(
+    api: tuple[TestClient, str, Database],
+) -> None:
+    """No row yet is not an error; it means nobody has ever paused this."""
+    client, key, _ = api
+
+    response = client.get("/v1/control", headers={"X-API-Key": key})
+
+    assert response.status_code == 200
+    assert response.json()["paused"] is False
+
+
+def test_a_batch_whose_first_target_is_uncached_does_not_deadlock(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    """The batch route's own use case, which it could not serve.
+
+    `submit_batch` holds a write session, so from the second target on it holds
+    SQLite's RESERVED lock — and `CollectionService._cached` opened the *write*
+    engine to answer a question that only reads. Second `BEGIN IMMEDIATE`,
+    against a lock the same request is holding: five seconds of `busy_timeout`
+    and then `database is locked`.
+
+    `decisions/002-only-writers-take-the-write-lock.md` records this exact
+    shape happening once before, inside `_repair_existing_tables`.
+
+    The order matters and is why the first two batch tests missed it: one
+    passes `refresh: true`, which skips the cache check entirely, and the other
+    puts the cached target first so the lock is not held yet when the second
+    check runs.
+    """
+    from tubedepth.worker import Worker
+
+    client, key, database = api
+    registry = SourceRegistry()
+    registry.register(EchoSource())  # type: ignore[arg-type]
+    # Warm exactly one target, and send it *second*.
+    client.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "nfgdJyL-Jmg"},
+        headers={"X-API-Key": key},
+    )
+    Worker(
+        database=database,
+        payloads=PayloadStore(tmp_path / "payloads"),
+        registry=registry,
+        name="test",
+        concurrency=1,
+    ).drain()
+
+    response = client.post(
+        "/v1/jobs/batch",
+        json={"kind": "video.echo", "targets": ["dQw4w9WgXcQ", "nfgdJyL-Jmg"]},
+        headers={"X-API-Key": key},
+    )
+
+    assert response.status_code == 202
+    body = response.json()
+    assert [job["target"] for job in body["queued"]] == ["dQw4w9WgXcQ"]
+    assert [held["target"] for held in body["held"]] == ["nfgdJyL-Jmg"]
+
+
+def test_an_observation_whose_version_is_unrecorded_is_not_claimed_to_be_fine(
+    tmp_path: Path,
+    database_url_for_tests: str,
+) -> None:
+    """The window between deploying the column and running the backfill.
+
+    `channel.about` was already at "2" before `Artifact.schema_version`
+    existed, so on any real database its v1 rows hold NULL — and
+    `None in frozenset({"1"})` is False. The retraction check therefore did not
+    fire, and the route added to refuse a video's description presented as the
+    channel's served exactly that, with a 200 and no log.
+
+    A null version is not "fine", it is "not known". Saying so is the whole
+    difference, and the message names the command that resolves it.
+    """
+    from tubedepth.egress.control import Lane as _Lane
+
+    class Retracted:
+        kind = "channel.retracted"
+        target_type = TargetType.CHANNEL
+        lane = _Lane.YOUTUBE
+        cost = SourceCost.CHEAP
+        schema_version = "2"
+        retracted_versions = frozenset({"1"})
+        payload_model: type[BaseModel] = EchoPayload
+        default_freshness = timedelta(hours=6)
+
+        def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
+            return EchoPayload(target=target)
+
+    database = Database(database_url_for_tests)
+    database.create_schema()
+    registry = SourceRegistry()
+    registry.register(Retracted())  # type: ignore[arg-type]
+    client = TestClient(
+        create_application(
+            database=database, payloads=PayloadStore(tmp_path / "payloads"), registry=registry
+        )
+    )
+    key = ApiKeyService(database).mint(label="test").secret
+    digest = _stored_artifact(tmp_path, database, kind="channel.retracted", version=None)
+
+    response = client.get(f"/v1/artifacts/{digest}", headers={"X-API-Key": key})
+
+    assert response.status_code == 409, (
+        "an unattributed observation was served as though known good"
+    )
+    assert "backfill-schema-versions" in response.json()["error"]["message"]
+
+
+def test_a_shared_digest_says_how_many_observations_it_covers(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    """Identical bytes are one file, and that is half this store.
+
+    Content addressing means a video whose counts have not moved records a new
+    row against the same digest — which `GET /v1/artifacts` teaches readers to
+    expect and which the hourly watch pass produces by design. On the working
+    store 756 of 1,556 rows share a digest, one of them across nine
+    observations spanning eight hours.
+
+    Answering with only the newest `fetched_at` throws that away and quietly
+    misdates every older duplicate. Reporting the span says the thing a series
+    actually wants: nothing changed between these two times.
+    """
+    from tubedepth.models import Artifact, utcnow
+
+    client, key, database = api
+    payloads = PayloadStore(tmp_path / "payloads")
+    stored = payloads.put("video.echo", b'{"target": "dQw4w9WgXcQ", "unchanged": true}')
+    first = utcnow() - timedelta(hours=3)
+    with database.session() as session:
+        for offset in (3, 2, 1):
+            session.add(
+                Artifact(
+                    kind="video.echo",
+                    target="dQw4w9WgXcQ",
+                    fingerprint="fp",
+                    schema_version="1",
+                    digest=stored.digest,
+                    byte_count=stored.byte_count,
+                    fetched_at=utcnow() - timedelta(hours=offset),
+                    fresh_until=utcnow(),
+                )
+            )
+
+    body = client.get(f"/v1/artifacts/{stored.digest}", headers={"X-API-Key": key}).json()
+
+    assert body["observations"] == 3
+    assert body["first_fetched_at"] is not None
+    assert body["first_fetched_at"][:13] == first.isoformat()[:13]
+    assert body["fetched_at"] > body["first_fetched_at"]
+
+
+def test_a_missing_payload_does_not_blame_retention_for_it(
+    api: tuple[TestClient, str, Database], tmp_path: Path
+) -> None:
+    """The index row is two days old and the bytes are gone. Retention is 30 days.
+
+    "It has aged out of retention" is the one explanation this route cannot
+    check and the one it used to give unconditionally. The other explanation is
+    that the index and the payload store were separated — a cutover that moved
+    the database and not `TUBEDEPTH_DATA_DIR` — and telling an operator their
+    fresh observation expired sends them to look for a retention bug that is
+    not there.
+    """
+    client, key, database = api
+    digest = _stored_artifact(tmp_path, database, kind="video.echo", version="1")
+    PayloadStore(tmp_path / "payloads").delete("video.echo", digest)
+
+    response = client.get(f"/v1/artifacts/{digest}", headers={"X-API-Key": key})
+
+    assert response.status_code == 404
+    message = response.json()["error"]["message"]
+    assert "it has aged out of retention" not in message, (
+        "a two-day-old observation was told, as a fact, that it expired"
+    )
+    assert "TUBEDEPTH_DATA_DIR" in message, "the other explanation is not offered"

@@ -20,8 +20,9 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 
 from .database import Database
-from .errors import ExtractionError, RateLimitedError, UpstreamError
-from .models import SourceHealth, utcnow
+from .egress.control import LaneState
+from .errors import ConfigurationError, ExtractionError, RateLimitedError, UpstreamError
+from .models import LaneHealth, SourceHealth, utcnow
 
 # How many failures in a row before a source is called broken rather than
 # unlucky. Three, because one is noise and two is a coincidence — and because
@@ -41,6 +42,11 @@ class HealthEntry:
     last_success_at: datetime | None
     last_failure_at: datetime | None
     last_error_code: str | None
+    # The code alone says `ExtractionError`; the message is the line that names
+    # the renderer that changed. Recorded since this table existed and read by
+    # nothing, which left `/healthz` telling an operator that a source is
+    # broken and needs a code change without saying which one.
+    last_error_message: str | None = None
 
 
 def _counts_against_the_source(error: BaseException | None) -> bool:
@@ -51,13 +57,21 @@ def _counts_against_the_source(error: BaseException | None) -> bool:
     fail legitimately and repeatedly; a sweep of such videos would paint the
     source red while it works perfectly.
 
-    So only two kinds of failure count. `ExtractionError` means our parser no
+    So three kinds of failure count. `ExtractionError` means our parser no
     longer matches what YouTube sends, which is the exact thing this table
     exists to surface. `UpstreamError` and its subclasses mean the other end
-    refused or could not be reached. Everything else — a missing caption track,
-    a private video, a bad identifier — is a fact about the target.
+    refused or could not be reached. `ConfigurationError` means the source
+    cannot run at all — a missing API key, a credential the other end will not
+    accept — and excluding it left `trending.videos` reporting as never tried
+    while every job it had failed, which is the lie the docstring above is
+    about.
+
+    Everything else — a missing caption track, a private video, a bad
+    identifier — is a fact about the **target**, and that is the line: a target
+    this source cannot serve says nothing about the source, and a source that
+    cannot serve anything says nothing about the target.
     """
-    return isinstance(error, ExtractionError | UpstreamError)
+    return isinstance(error, ExtractionError | UpstreamError | ConfigurationError)
 
 
 class SourceHealthService:
@@ -122,6 +136,7 @@ class SourceHealthService:
                 last_success_at=row.last_success_at if row else None,
                 last_failure_at=row.last_failure_at if row else None,
                 last_error_code=row.last_error_code if row else None,
+                last_error_message=row.last_error_message if row else None,
             )
         return entries
 
@@ -135,3 +150,40 @@ class SourceHealthService:
         if row.last_success_at is not None and now - row.last_success_at > self._stale_after:
             return "stale"
         return "healthy"
+
+
+class LaneHealthService:
+    """Write what the rate controller believes somewhere another process can read.
+
+    The controller keeps its state in a dict keyed by `(egress, lane)` and
+    measures time with `time.monotonic`, both of which are correct and both of
+    which are invisible outside the worker. So a quarantined lane looks exactly
+    like an empty queue from the API, from the dashboard, and from anyone
+    trying to work out why collection stopped.
+
+    Written on the same tick as source health, for the same reason: the process
+    that knows is not the process being asked.
+    """
+
+    def __init__(self, *, database: Database, clock: Callable[[], datetime] = utcnow) -> None:
+        self._database = database
+        self._clock = clock
+
+    def observe(self, egress: str, lane: str, *, state: LaneState, monotonic: float) -> None:
+        """Record one lane's state, converting its deadline to a wall clock.
+
+        `monotonic` is the controller's own reading taken at the same moment,
+        so the remaining quarantine is a difference between two monotonic
+        values — which is the only arithmetic on them that is meaningful — and
+        only the result crosses into wall-clock time.
+        """
+        now = self._clock()
+        remaining = state.quarantined_until - monotonic
+        with self._database.session() as session:
+            row = session.get(LaneHealth, (egress, lane)) or LaneHealth(egress=egress, lane=lane)
+            row.window = state.window
+            row.in_flight = state.in_flight
+            row.quarantine_streak = state.quarantine_streak
+            row.quarantined_until = now + timedelta(seconds=remaining) if remaining > 0 else None
+            row.observed_at = now
+            session.add(row)

@@ -1,0 +1,48 @@
+# The watch list. Copy to ~/.config/tubedepth/watchlist.txt and replace these
+# with what you actually want a history of.
+#
+# One directive per line: the type, then whitespace, then the target. The type
+# is written down because the target alone cannot carry it — `UCxxx`,
+# `@handle` and `kpop debut` are three different things that all look like a
+# string.
+#
+#   video    <id or watch?v= / youtu.be URL>   collect this one video
+#   channel  <@handle or UC… id or URL>        enumerate the channel's videos
+#   search   <query, spaces and all>           enumerate a search
+#   trending <ISO 3166-1 alpha-2 region>       enumerate the region's chart
+#
+# Blank lines are skipped, and so is any line whose first non-whitespace
+# character is `#`. There is no inline comment syntax: a `#` anywhere else on
+# the line is part of the target, so `search #shorts recap` searches for what
+# it says. A directive that is not one of the four above is refused, naming
+# the line — a typo that quietly collects nothing is the failure this format
+# exists to prevent.
+#
+# Every line is collected forced, past the freshness window, because the point
+# of watching is the second observation. There is no per-line flag.
+#
+# SIZE IT DELIBERATELY, and note that the four types do not cost the same.
+#
+# A `video` line is one forced collection per firing of tubedepth-watch.timer,
+# out of the same per-address budget everything else draws on. Thirty lines
+# hourly is about one percent of the measured ceiling. Three hundred is ten
+# percent, and the behaviour of this system under that kind of sustained load
+# has not been measured — see docs/status.md.
+#
+# A `channel`, `search` or `trending` line is far more expensive. Each one
+# fans out to a `video.metadata` job per video it finds, up to
+# TUBEDEPTH_LISTING_LIMIT (default 100). **One channel line can be a hundred
+# collections, not one.** Ten of them at the default cap is a thousand jobs an
+# hour, which is a third of the measured ~3,100 jobs/h ceiling — from ten
+# lines that look no bigger than the video lines above them. The fan-out is
+# not itself forced, so a video already held fresh costs nothing the second
+# time; the enumeration is, so new videos do appear.
+#
+# `trending` needs TUBEDEPTH_DATA_API_KEY in the unit's EnvironmentFile — the
+# chart is the one source that comes from the official Data API. Without a key
+# the job fails with a ConfigurationError. Nothing else here needs one.
+
+video    dQw4w9WgXcQ
+channel  @director_pihyunjung
+search   케이팝 데뷔
+trending KR

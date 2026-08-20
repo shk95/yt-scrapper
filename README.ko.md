@@ -32,6 +32,7 @@ curl -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
 | `channel.about` | 가입일, 국가, 외부 링크, **정확한 총 조회수**, 설명, 태그, 아바타 | 대부분 없음 |
 | `channel.community` | 커뮤니티 게시물 | 없음 |
 | `channel.videos` · `playlist.items` · `search.videos` | 목록 — `--then`으로 항목별 수집까지 팬아웃 | 가능하나 쿼터 소모 |
+| `trending.videos` | YouTube 자신이 인기라고 부르는 것을, 그 순서 그대로 | chart 엔드포인트이고, 이 소스가 쓰는 것이 그것이다 |
 
 <!-- kinds:end -->
 
@@ -47,9 +48,9 @@ Data API v3는 공개 영상에 대해서도 많은 것을 감춘다. `snippet.t
 
 ```sh
 git config core.hooksPath .githooks   # 클론은 훅이 꺼진 상태로 온다
-tool/doctor.sh                        # 툴체인·SQLite·훅 확인
+tool/doctor.sh                        # 툴체인·PostgreSQL 접속·훅 확인
 uv sync --extra dev
-just check                            # format + lint + 오프라인 테스트
+just check                            # format + lint + 테스트 스위트 (Docker 필요)
 
 uv run tubedepth key create --label local   # 키는 이때 한 번만 출력된다
 uv run tubedepth serve --port 8080 &        # API (기본 127.0.0.1)
@@ -81,14 +82,52 @@ uv run tubedepth serve --port 8080
 
 ## 배포
 
-systemd **유저 유닛** 두 개가 `deploy/`에 있다. root가 필요 없고, 권한을 조용히 얻을 수도 없다.
+systemd **유저 유닛**이 `deploy/`에 있다. 어느 것도 root가 필요 없고, 권한을 조용히 얻을 수도
+없다. 그중 둘이 서비스 본체다:
 
 ```sh
-cp deploy/tubedepth-*.service ~/.config/systemd/user/
+mkdir -p ~/.config/tubedepth
+echo 'TUBEDEPTH_DATABASE_URL=postgresql+psycopg://tubedepth_runtime:...@host/db' \
+  > ~/.config/tubedepth/worker.env
+cp ~/.config/tubedepth/worker.env ~/.config/tubedepth/database.env   # api.service가 읽는 파일
+chmod 0600 ~/.config/tubedepth/worker.env ~/.config/tubedepth/database.env
+
+cp deploy/tubedepth-api.service deploy/tubedepth-worker.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now tubedepth-api tubedepth-worker
 loginctl enable-linger $USER    # 로그아웃 후에도 살아있게 — 없으면 재부팅이 크래시처럼 보인다
 ```
+
+SQLite 대체 경로는 없다: 모든 유닛이 정상 동작하는 `TUBEDEPTH_DATABASE_URL` 없이는 시작을
+거부한다. 그 URL이 가리키는 role과 schema를 만드는 것이 `deploy/postgres-bootstrap.sql`이고,
+그 뒤의 규정이 `docs/shared-postgres.md`다.
+
+셋째는 선택이고 기본적으로 꺼져 있다. `tubedepth-watch.timer`가 매시간 `tubedepth watch`를
+돌려서 watch list 전체를 큐에 넣되 신선도 기간을 강제로 넘겨서, 매 회차가 새 관측을 기록하게
+한다. `GET /v1/artifacts`를 캐시가 아니라 미분 가능한 이력으로 만드는 것이 이것이고, 이력은
+실시간으로만 쌓이므로 필요해지기 전에 시작해두는 편이 낫다.
+
+```sh
+mkdir -p ~/.config/tubedepth
+cp deploy/watchlist.example.txt ~/.config/tubedepth/watchlist.txt
+$EDITOR ~/.config/tubedepth/watchlist.txt        # 한 줄에 타입 붙은 directive 하나
+cp deploy/tubedepth-watch.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now tubedepth-watch.timer
+```
+
+목록에는 타입이 붙는다 — `video`, `channel`, `search`, `trending` 다음에 타깃 — 그래서 스케줄
+하나가 고정된 영상 묶음, 채널 업로드, 트렌드 키워드, 지역 차트를 한꺼번에 수집한다. 넷 중 하나가
+아닌 directive는 줄 번호를 짚어 거부한다. 조용히 아무것도 수집하지 않는 오타야말로 watch list가
+가장 못 보여주는 실패이기 때문이다. 타이머가 없는 환경 — compose — 에서는
+`tubedepth watch --every 3600`이 상주한다.
+
+**목록 크기는 의도해서 정하고, 네 타입의 값이 같지 않다는 것을 안다.** `video` 한 줄은 발화마다
+강제 수집 한 건이고, 나머지 전부가 쓰는 것과 같은 per-address 예산에서 나간다. 30줄을 시간당
+도는 것은 측정된 처리량의 약 1%다. `channel`·`search`·`trending` 한 줄은 찾아낸 영상마다
+`video.metadata` 잡으로 퍼지며, `TUBEDEPTH_LISTING_LIMIT`(기본 100)까지 간다 — **그런 줄 하나가
+수집 한 건이 아니라 백 건일 수 있다.** 산수는 `deploy/watchlist.example.txt`에 있다. 그보다 한참
+위의 지속 부하에서 이 시스템이 어떻게 움직이는지는 측정된 바 없다.
 
 API와 워커를 나눈 이유는 취향이 아니다. yt-dlp 추출은 블로킹이고 메모리를 쓰므로,
 같이 돌리면 댓글 수집 하나가 `GET /v1/jobs/{job_id}`의 p99를 결정하고 yt-dlp 크래시가
@@ -97,6 +136,45 @@ API를 같이 죽인다.
 API는 기본적으로 **loopback에만** 바인딩한다. 이 프로젝트의 인증은 헤더이고 그건 TLS의
 대체물이 아니므로, 외부에 열려면 리버스 프록시를 앞에 둔다.
 
+## Docker로 돌리기
+
+이미지 하나, `deploy/docker-compose.yml`에 서비스 넷. `migrate`가 한 번 돌고,
+`api`·`worker`·`watch`가 그것이 성공적으로 끝나기를 기다린다. 이미지가
+`ENTRYPOINT ["tubedepth"]`라서 세 서비스는 `command:`만 다르다.
+
+```sh
+cp deploy/.env.example deploy/.env
+$EDITOR deploy/.env               # 데이터베이스 URL 둘, 그리고 로컬 비밀번호들
+just compose-up                   # --profile local이라 PostgreSQL도 같이 뜬다
+curl -s localhost:8080/healthz
+just compose-down
+```
+
+기본 전제는 외부 fleet PostgreSQL이다. `just compose-up`이 붙이는
+`--profile local`이 자체 PostgreSQL을 하나 띄우고, 그것을
+`deploy/postgres-bootstrap.sql` — 컨테이너용 사본이 아니라 실제 배포가 돌리는
+그 파일 — 로 세팅한다. 그래서 여기서 확인하는 모양이 프로덕션의 모양이다.
+
+자격증명은 전부 `deploy/.env`에 있다. compose 파일은 커밋되고 데이터베이스 URL은
+비밀번호를 품으므로, `deploy/docker-compose.yml`은 전부 `${...}`로 받고 비밀
+리터럴을 하나도 갖지 않는다 — 테스트가 그것을 확인한다.
+
+우연이 아닌 것 셋. 이미지에는 **`HEALTHCHECK`가 없다** — 포트를 열지 않는
+worker와 watch에게, 그리고 끝나는 게 정상인 one-shot `migrate`에게 틀린 검사이기
+때문이다. `/healthz`를 답하는 서비스는 `api` 하나뿐이므로 healthcheck는 compose에
+있다. 그 `api`는 `--host 0.0.0.0`으로 뜨는데, systemd 유닛이 loopback에 묶는 것과
+반대다: 컨테이너 네트워크는 포트를 게시하기 전까지 아무도 닿지 못하고, 그 결정이
+내려지는 곳이 `ports:` 한 줄이다. 그리고 `api`와 `worker`는 리뷰가 아니라 YAML
+anchor로 env block 하나를 공유한다. listing·comment·trending cap이 cache key의
+일부라서, 둘이 다른 값을 읽으면 서로 다른 키를 계산하고 API는 worker가 수집한 적
+없는 질문에 답하게 된다.
+
+payload store는 `api`와 `worker`가 공유하는 named volume이다. payload 바이트는
+데이터베이스 행이 아니라 디스크의 gzip 파일이고, API는 worker가 쓴 것을 서빙한다.
+
+레지스트리 배포는 없다. 이미지는 돌아가는 자리에서 빌드한다 —
+`just compose-up`이 빌드하고, CI가 push마다 여전히 빌드되는지 확인한다.
+
 ## 문서
 
 | | |
@@ -104,11 +182,12 @@ API는 기본적으로 **loopback에만** 바인딩한다. 이 프로젝트의 �
 | [`docs/api.ko.md`](docs/api.ko.md) | REST 레퍼런스 — 엔드포인트, 오류 코드, 웹훅 계약 |
 | [`docs/status.md`](docs/status.md) | 현재 상태와 그 뒤의 결정들 |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | 이미 누군가의 오후를 잡아먹은 에러들. 읽지 말고 grep |
+| [`docs/shared-postgres.md`](docs/shared-postgres.md) | 다른 스크래퍼들과 공유하는 PostgreSQL 인스턴스의 규약 |
 | [`CHANGELOG.ko.md`](CHANGELOG.ko.md) | 릴리스별 변경 내역 |
 | [`docs/releasing.md`](docs/releasing.md) | 릴리스를 내는 절차 |
-| [`AGENTS.md`](AGENTS.md) | 이 저장소에서 작업하는 법 |
+| [`AGENTS.ko.md`](AGENTS.ko.md) | 이 저장소에서 작업하는 법 |
 
-`README.md`·`docs/api.md`·`CHANGELOG.md`가 정본이고, 옆의 `.ko.md`가 번역이다.
+`README.md`·`docs/api.md`·`CHANGELOG.md`·`AGENTS.md`가 정본이고, 옆의 `.ko.md`가 번역이다.
 나머지 문서는 한국어로만 있다.
 
 ## 버전 관리
@@ -152,7 +231,7 @@ API는 기본적으로 **loopback에만** 바인딩한다. 이 프로젝트의 �
 
 - **관련 영상·채널 About·커뮤니티 게시물은 InnerTube 렌더러 파싱에 의존한다.** 이름이 예고 없이 바뀐다 —
   `compactVideoRenderer`가 이미 `lockupViewModel`로 바뀌었다. `tests/fixtures/innertube/`의 날짜가 각 표면이
-  마지막으로 동작한 시점이다. 응답의 `degradations`에 `parse_mismatch`가 있으면 그중 하나가 깨진 것이다.
+  마지막으로 동작한 시점이다. 응답의 `degradations`에 `ExtractionError`가 있으면 그중 하나가 깨진 것이다.
   CI의 fixture 회귀는 **우리 코드가 퇴행하지 않았음**을 증명할 뿐, YouTube가 지금 무엇을 보내는지에 대해서는
   아무것도 증명하지 못한다. 그건 `just contract`가 한다.
 - **차단될 수 있다.** 요청량에 따라 로그인·PO token을 요구받을 수 있다. 고장 났을 때 첫 수순은
@@ -163,14 +242,14 @@ API는 기본적으로 **loopback에만** 바인딩한다. 이 프로젝트의 �
 - **ProtonVPN으로 YouTube 트래픽을 보내지 마라.** yt-dlp의 공식 권고 자체가 "VPN을 끄고 레지덴셜 회선을
   쓰라"이다. YouTube의 봇 검사는 데이터센터 주소 대역을 표적으로 하고, 상용 VPN exit은 전부 그 대역이다.
   이 프로젝트를 개발한 머신의 **직결 회선은 가정용 IP라 현재 잘 동작하며, VPN exit은 아마 그렇지 않을 것이다.**
-  `TUBEDEPTH_EGRESS_ALLOW_VPN_FOR_YOUTUBE`의 기본값이 `0`인 이유다. 켜는 것은 고침이 아니라 *측정*이고,
-  안 통하면 컨트롤러가 물어보기 전에 이미 강등해 놨을 것이다.
+  이것을 켜는 설정은 없다. 켤 것이 아직 만들어지지 않았기 때문이다. 만들어지면, 그것은 고침이 아니라
+  *측정*으로 다뤄야 한다는 것이 요점이다.
 - **프록시 풀에는 현재 측정된 근거가 없다.** 원래의 정량적 근거는 Return YouTube Dislike의 문서화된
   일일 한도(10,000/일 → exit 10개면 시간당 약 4,000건)였는데, **그 소스를 제거하면서 근거도 함께 사라졌다.**
   남은 서드파티는 SponsorBlock 하나이고 그 한도는 비공개다. YouTube 쪽은 위 항목 그대로 VPN이 도움이 안 된다.
   즉 지금 exit을 늘려서 확실히 나아지는 것은 **아무것도 측정되지 않았다.** 풀을 만들기 전에 그것부터 재라.
 - **YouTube 처리량을 실제로 올리는 것은 레지덴셜/모바일 프록시뿐**이며 대략 $5–15/GB다.
-  `ExternalProxyEgress`가 그걸 코드 변경이 아니라 설정 한 줄로 만들어 둔다.
+  `ProxiedEgress`가 그 자리다.
 - **ProtonVPN 동시 접속 수를 확인하라.** wireproxy 프로세스 하나가 한 자리를 먹으므로, 풀이 당신의 휴대폰·
   노트북과 같은 할당량을 놓고 경쟁한다. 무료 플랜은 풀 용도로 부적합하다.
 
@@ -179,7 +258,7 @@ API는 기본적으로 **loopback에만** 바인딩한다. 이 프로젝트의 �
 | 종류 | 시간당 수천 건? |
 | --- | --- |
 | SponsorBlock · 캐시 히트 | 가능. 캐시 히트가 유일하게 우리가 완전히 통제하는 축이다 |
-| 영상 메타 · 관련영상 · 검색 | 실측 8,417/시간(40건, 동시 8). 지속 부하는 미측정 |
+| 영상 메타 · 관련영상 · 검색 | **지속 실측 ~3,100/시간**(474건, 실패 0, 430초, 동시 8). 40건 버스트는 8,417/시간까지 가는데, 그건 버스트가 재는 값이다 |
 | 댓글 전량 수집 | **불가능.** 1,000댓글 = 50+ 요청 = 1–3분. 게다가 그 요청들이 메타 수집이 써야 할 IP 예산을 갉아먹는다 |
 
 **법적 위치.** YouTube 이용약관은 공개 API 외의 자동화 접근을 금지한다. 데이터가 공개적으로 보인다는 사실이나
@@ -191,9 +270,15 @@ API는 기본적으로 **loopback에만** 바인딩한다. 이 프로젝트의 �
 
 **검증된 것과 아닌 것.** 계획 단계에서 이 머신에서 직접 확인: yt-dlp 78키, 자막 json3 취득, 댓글 20건 6.7초,
 SponsorBlock 200/404 양쪽, InnerTube `/next`·`/browse` 도달,
-SQLite 3.46.1, wireproxy 1.1.3 가용, 메타 추출 병렬 4건 3.11초.
-**아직 확인하지 않음**: 지속 부하에서의 봇 검사 임계, PO token 조건, **실제 VPN egress를 통한 요청**
-(config가 아직 없어 한 번도 프록시로 나가본 적 없다), AIMD의 실부하 수렴 거동, 장시간 다중 워커 운용.
+PostgreSQL 연결 확인(그 당시 backend였던 SQLite는 3.46.1), wireproxy 1.1.3 가용,
+메타 추출 병렬 4건 3.11초.
+
+그 뒤 지속 부하에서: 474건, 실패 0, AIMD 창은 상한에 붙었고 격리 연속 카운트는 0 — 이 속도에서
+컨트롤러는 진동하지 않고 수렴하며, 봇 검사에는 닿지 않았다. **여전히 확인하지 않음**: 봇 검사 임계가
+실제로 어디인지, PO token 조건, **실제 VPN egress를 통한 요청**(config가 아직 없어 한 번도 프록시로
+나가본 적 없다), 장시간 다중 워커 운용. 미검증으로 남은 것들은 여기 서술로만 두지 않고
+[`verification`](https://github.com/slopindustries/yt-scrapper/issues?q=is%3Aissue+is%3Aopen+label%3Averification)
+라벨의 이슈로 추적한다.
 
 ## 라이선스
 

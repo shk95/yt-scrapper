@@ -85,6 +85,16 @@ class UnauthenticatedError(TubedepthError):
     """
 
 
+class RetractedError(TubedepthError):
+    """A stored observation whose version is known to have collected it wrongly.
+
+    Distinct from NotFoundError because the observation happened and a 404
+    would claim it never did. Distinct from an ordinary parse problem because
+    nothing is broken now — the bytes are exactly what was collected, and what
+    was collected is what is wrong.
+    """
+
+
 class ConflictError(TubedepthError):
     """The thing exists but is in the wrong state — a result asked for before
     its job finished.

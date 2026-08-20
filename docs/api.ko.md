@@ -67,6 +67,12 @@ POST /v1/jobs  ─┬─→ 200 + 결과                 이미 신선한 artifa
 200은 클라이언트가 무시해도 되는 최적화 세부사항이 아니다. 신선도 기간 안에 같은 것을 두 번
 요청하면 그게 정상 응답이고, 폴링 한 번을 아낀다. 그래도 수집시키려면 `"refresh": true`.
 
+그래서 `"refresh": true`를 실은 제출은 항상 202이고 200이 되지 않는다 — 받아들일 캐시된 답이
+없기 때문이다. 이 플래그는 요청에서 소비되는 대신 잡에 실려 가므로, 워커가 그 잡에 도달했을 때
+다시 수집하고, 그 잡이 재시도되어도 여전히 강제 수집이다. **`GET /v1/artifacts`가 캐시가 아니라
+이력인 것은 이 때문이다:** 강제 수집은 새 관측을 기록하고, 조용히 캐시로 답한 수집은 기록하지
+않는다.
+
 ## kind
 
 잡이 요청할 수 있는 것. `GET /v1/sources`가 레지스트리에서 같은 표를 돌려주므로 그쪽은
@@ -87,12 +93,35 @@ POST /v1/jobs  ─┬─→ 200 + 결과                 이미 신선한 artifa
 | `channel.videos` | channel | youtube | cheap | 6시간 | 채널 업로드 목록 |
 | `playlist.items` | playlist | youtube | cheap | 6시간 | 재생목록 항목 |
 | `search.videos` | query | youtube | cheap | 6시간 | 검색 결과 |
+| `trending.videos` | region | youtube_data_api | cheap | 15분 | YouTube 자신이 인기라고 부르는 것을, 그 순서대로. 관측이 아니라 순위를 보고하는 유일한 kind이고, per-address 예산 대신 Google API 쿼터를 쓰는 유일한 kind다 |
 
 <!-- kinds:end -->
 
+**채널을 통째로 열거하려면 그 채널의 업로드 재생목록에 `playlist.items`를 쓴다** — 채널 id의
+`UC`를 `UU`로 바꾼 것이다. `channel.videos`는 `/videos` 탭을 읽는데, 그 탭에는 Shorts도 지난
+라이브 스트림도 없다. 상한을 아무리 올려도 그렇다. 697개짜리 채널 하나에서 측정, 2026-08-20:
+
+| | 항목 | 요청 |
+| --- | --- | --- |
+| `UU…`에 대한 `playlist.items` | **698** | **8** |
+| `channel.videos` | 474 | 16 |
+
+업로드 재생목록이 더 넓으면서 동시에 더 싸다 — 한 번에 100개씩 넘기고, 탭은 30개씩 넘긴다.
+추가되는 224개는 Shorts 216개, 지난 라이브 3개, 그리고 제목과 조회수를 달고 그리드에 나타나지만
+전혀 볼 수 없는 5개다. 그 다섯은 `not_found`로 실패하는 잡이 된다 — 평평한 목록에서는 살아있는
+영상과 구별할 방법이 없기 때문이다.
+
+상한에 유의: `TUBEDEPTH_LISTING_LIMIT`은 배포 전역이라, 기본값 100이면 698개 중 100개가 나온다.
+
 `target`은 등록 요청의 `target` 필드가 가리켜야 하는 것이다. 영상은 id·`youtu.be` 링크·
-`watch?v=` URL을, 채널은 id·`@handle`·채널 URL을 받는다. 정규화는 잡이 기록되기 전에
-일어나므로 원장에는 정규형 하나만 남는다.
+`watch?v=` URL을, 채널은 id·`@handle`·채널 URL을 받는다. 정규화는 URL에서 그 안의 식별자만
+꺼내고 식별자가 아닌 것은 거부한다. **handle을 채널 id로 해석하지 않고, 대소문자도 접지
+않는다** — 둘 다 등록 시점에 네트워크 요청이 필요한데, 등록은 어떤 요청도 나가기 전에 답하기
+때문이다.
+
+그래서 `@veritasium`과 `UCHnyfMqiRRG1u-2MsSQLbXA`는 **한 채널의 두 표기가 아니라 서로 다른 두
+target이다**: 캐시 키도 둘, 잡 이력도 둘, artifact 이력도 둘이고, 나중에 그 둘을 합쳐 주는 것은
+없다. 채널마다 표기 하나를 정하고, 그 이력을 하나의 이력으로 두고 싶은 동안은 그것만 쓴다.
 
 `lane`은 요청이 어느 업스트림으로 나가는지, `cost`는 큐가 그것을 어떻게 값매기는지다.
 댓글 수집이 나머지를 굶기지 못하게 하려고 둘 다 있다.
@@ -102,6 +131,9 @@ POST /v1/jobs  ─┬─→ 200 + 결과                 이미 신선한 artifa
 ## `GET /healthz`
 
 인증 없음. 서비스가 살아 있는지, 어떤 버전인지, 큐와 각 소스가 무엇을 하고 있었는지.
+
+**응답** 200. 키를 받지 않으므로 401은 나오지 않는다 — 자격증명을 쥔 사람이 생기기 전에도
+쓸 수 있는 이유가 그것이다.
 
 ```sh
 curl -s localhost:8080/healthz
@@ -120,15 +152,44 @@ curl -s localhost:8080/healthz
       "consecutive_failures": 0,
       "last_success_at": "2026-08-19T09:12:44Z",
       "last_failure_at": null,
-      "last_error_code": null
+      "last_error_code": null,
+      "last_error_message": null
     }
   ]
 }
 ```
 
+`lanes`는 rate controller가 각 경로에 현재 허용하는 것이다. 워커가 기록한다 — 컨트롤러의
+상태는 워커 메모리의 dict이고 프로세스와 함께 죽기 때문이다.
+
+```json
+{
+  "lanes": [
+    {
+      "egress": "direct",
+      "lane": "youtube",
+      "window": 3.5,
+      "in_flight": 1,
+      "quarantine_streak": 0,
+      "quarantined_until": null,
+      "observed_at": "2026-08-20T09:12:44Z"
+    }
+  ]
+}
+```
+
+`window`는 설정이 아니라 **측정된** 상한이다. 업스트림이 거부하면 절반이 되고 성공하면 다시
+자란다. 그래서 1보다 한참 작은 window가 큐가 느리게 빠지는 이유를 설명하는 숫자다.
+`quarantined_until`은 경로가 열려 있으면 null이고, 값이 있으면 그때까지 그 경로로 아무것도
+시도하지 않는다는 뜻이다 — 밖에서 보면 빈 큐와 구분되지 않으므로, 누군가 말해주지 않으면 모른다.
+
 개별 소스가 성치 않아도 `status`는 `"ok"`로 남는다. 이 엔드포인트는 프로세스를 재시작하는
 것들이 읽고, 파서 하나가 깨진 것은 나머지 열 종류가 여전히 수집 중인 API를 재기동할 이유가
-아니기 때문이다. 나쁜 소식은 사람이 읽는 `sources`에 실린다.
+아니기 때문이다. 나쁜 소식은 사람이 읽는 `sources`에 실린다 — 그리고 `last_error_code`가 아니라
+`last_error_message`에 실린다. 코드는 `ExtractionError`라고 말한다 — Python 클래스 이름이고,
+`## 오류`가 설명하는 두 번째 어휘에서 온 값이지 그 절의 HTTP 표에서 온 값이 아니다 — 그리고
+메시지는 더 이상 맞지 않는 렌더러의 이름을 말한다. 소스가 깨졌다는 것을 아는 것과 무엇을
+고쳐야 하는지 아는 것의 차이다.
 
 소스의 `status`는 고치는 방법이 서로 다른 원인들을 구분한다.
 
@@ -136,7 +197,7 @@ curl -s localhost:8080/healthz
 | --- | --- | --- |
 | `ok` | 최근 성공 | — |
 | `degraded` | 최근 실패 1건 | 보통 아무것도. 지켜본다 |
-| `broken` | 우리 파서가 안 맞기 시작 | 코드 변경 — `degradations`의 `parse_mismatch` 확인 |
+| `broken` | 우리 파서가 안 맞기 시작 | 코드 변경 — `degradations`의 `ExtractionError` 확인 |
 | `blocked` | 주소가 거부당하고 있음 | 다른 egress, 또는 대기 |
 | `stale` | 최근에 아무도 돌리지 않음 | 잡을 하나 돌린다 |
 | `unknown` | 이 인스턴스에서 시도된 적 없음 | 잡을 하나 돌린다 |
@@ -146,10 +207,45 @@ curl -s localhost:8080/healthz
 
 ---
 
+## `GET /v1/control`, `PATCH /v1/control`
+
+워커가 잡을 집고 있는지, 그리고 집지 말라고 말하는 유일한 방법.
+
+**응답** 둘 다 200. 401 `unauthenticated`; 429 `rate_limited`; 그리고 `PATCH`에서는 본문이
+`{"paused": <bool>}`(`reason`은 선택)이 아니면 422 `invalid_request`.
+
+```sh
+curl -s -X PATCH -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+     -d '{"paused": true, "reason": "쿼터 지켜보는 중"}' \
+     localhost:8080/v1/control
+```
+
+```json
+{ "paused": true, "reason": "쿼터 지켜보는 중", "changed_at": "2026-08-20T09:12:44Z" }
+```
+
+**이것은 워커에 손을 뻗지 않는다.** API와 워커는 의도적으로 별개 프로세스다 — yt-dlp 크래시가
+API를 같이 죽이면 안 되기 때문이다 — 그래서 여기서 무언가를 직접 멈출 수는 없다. 워커가 매
+drain 시작에 읽는 행을 쓸 뿐이고, `tubedepth work`는 drain하고 종료하며 유닛이 10초마다
+재시작하므로, 일시정지는 대략 그 안에 효력이 생긴다.
+
+**이미 실행 중인 잡은 끝까지 간다.** 일시정지는 "새로 집지 않는다"이지 취소가 아니며, 진행 중인
+추출은 끝날 때까지 계속 요청을 쓴다. 그것을 멈추려면 그 잡을 취소한다.
+
+큐에 있던 잡은 큐에 그대로 남고 들어오는 길에 실패 처리되는 것도 없으므로, 재개가 되돌리기의
+전부다. `reason`은 선택이지만 채울 값어치가 있다 — 한 시간 뒤에 아무도 설명하지 못하는
+일시정지는 아무도 못 푸는 일시정지다.
+
+행이 아직 없다는 것은 아무도 이것을 멈춘 적 없다는 뜻이고, 오류가 아니라 "돌고 있음"으로 보고된다.
+
+---
+
 ## `GET /v1/sources`
 
 이 빌드가 수집할 수 있는 것. 레지스트리에서 읽으므로 코드에 추가된 소스는 아무도 목록을
 편집하지 않아도 여기 나타난다.
+
+**응답** 200. 401 `unauthenticated`; 429 `rate_limited`.
 
 ```sh
 curl -s -H "X-API-Key: $KEY" localhost:8080/v1/sources
@@ -162,7 +258,8 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/sources
     "target": "video",
     "lane": "youtube",
     "cost": "standard",
-    "freshness_seconds": 21600
+    "freshness_seconds": 21600,
+    "cache_parameters": {}
   }
 }
 ```
@@ -171,7 +268,12 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/sources
 
 ## `POST /v1/jobs`
 
-데이터를 요청한다. 202와 잡을 주거나, 이미 신선한 결과가 있으면 200과 결과를 준다.
+데이터를 요청한다.
+
+**응답** 200 또는 202. 둘은 본문 모양이 아니라 **상태 코드로** 구분한다. **`Location` 헤더는
+202에만 실린다** — `/v1/jobs/{job_id}`. 401 `unauthenticated`; 이 빌드에 없는 `kind`는 404
+`not_found`; 해석되지 않는 `target`이나 형식이 틀린 `webhook_url`은 422 `invalid_request`;
+429 `rate_limited`.
 
 | 필드 | 타입 | 기본값 | |
 | --- | --- | --- | --- |
@@ -201,15 +303,55 @@ curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
 **200 OK** — 신선한 artifact가 있었고, 본문은 잡이 아니라 수집된 데이터 자체다.
 둘은 모양이 아니라 **상태 코드로** 구분한다.
 
-분기할 가치가 있는 실패: 모르는 `kind`나 해석되지 않는 `target`은 422 `invalid_request`.
-형식이 틀린 `webhook_url`은 저장되지 않고 여기서 거부된다 — 잘못된 URL을 저장하는 것은
-이후 모든 전송 시도에서 영원히 실패하는 배달을 만드는 일이기 때문이다.
+분기할 가치가 있는 실패, 그리고 둘은 같은 상태 코드가 아니다: 모르는 `kind`는 **404
+`not_found`**다 — 이 빌드에 그런 소스가 없고, 같은 단어로 다시 물어도 달라지지 않는다 —
+해석되지 않는 `target`은 **422 `invalid_request`**다. 형식이 틀린 `webhook_url`도 422이고,
+저장되지 않고 여기서 거부된다 — 잘못된 URL을 저장하는 것은 이후 모든 전송 시도에서 영원히
+실패하는 배달을 만드는 일이기 때문이다.
+
+---
+
+## `POST /v1/jobs/batch`
+
+kind 하나, 타깃 여럿, 요청 하나.
+
+**응답** 언제나 202 — 모든 타깃이 이미 보유 중이라 큐에 아무것도 넣지 않았을 때도 그렇다.
+`POST /v1/jobs`와 달리 **`Location` 헤더가 없다**: 배치는 잡 여럿이고 가리킬 잡 하나가 없다.
+두 라우트가 대칭이라고 가정하지 말고 본문의 `queued`와 `held`를 읽는다. 401 `unauthenticated`;
+모르는 `kind`는 404 `not_found`; 빈 목록·500개 초과·잘못된 타깃 하나는 422 `invalid_request`;
+429 `rate_limited`.
+
+```sh
+curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+     -d '{"kind":"video.metadata","targets":["dQw4w9WgXcQ","nfgdJyL-Jmg"]}' \
+     localhost:8080/v1/jobs/batch
+```
+
+```json
+{
+  "queued": [{ "job_id": "j_2f7c1d9a", "kind": "video.metadata", "target": "nfgdJyL-Jmg", "state": "queued", "attempt_count": 0 }],
+  "held": [{ "target": "dQw4w9WgXcQ", "digest": "b9f4c0e2..." }]
+}
+```
+
+**편의 기능이 아니다.** 키 하나는 분당 60요청이므로, 영상 100개짜리 스윕을 한 건씩 제출하면
+절반도 못 가서 rate limit에 걸린다. 스윕을 *표현할 수 있는* API와 *실행할 수 있는* API의 차이다.
+
+**전부 아니면 전무.** 한 줄이라도 큐에 넣기 전에 모든 타깃을 정규화하므로, 잘못된 id 하나면
+나머지 99개를 넣고 202로 답하는 대신 배치 전체를 422로 거부한다. 부분 스윕은 가능한 결과 중
+가장 나쁘다 — 호출자는 실행됐다고 믿고, 빠진 부분은 나중에 아무도 안 찾는 부재로 드러난다.
+
+타깃은 최대 500개이고 그 이상은 422. `POST /v1/jobs`와 달리 payload를 절대 돌려주지 않는다.
+이미 보유한 타깃은 `digest`로 이름만 알려주며, 그것이 `GET /v1/artifacts/{digest}`가 받는 값이다.
+본문 100개를 돌려주는 것은 제출을 대량 다운로드로 만드는 일이다.
 
 ---
 
 ## `GET /v1/jobs/{job_id}`
 
 잡 하나의 현재 상태.
+
+**응답** 200. 401 `unauthenticated`; 404 `not_found`; 429 `rate_limited`.
 
 ```sh
 curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB
@@ -246,6 +388,8 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB
 
 수집된 데이터 원본 — 저장된 payload 그대로이며, 다시 인코딩한 것이 아니다.
 
+**응답** 200. 401 `unauthenticated`; 404 `not_found`; 409 `conflict`; 429 `rate_limited`.
+
 ```sh
 curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB/result
 ```
@@ -253,9 +397,17 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB/result
 잡은 있으나 아직 끝나지 않았으면 **409 `conflict`**. 404가 아닌 이유는, "기다려라"와
 "그런 것은 없다"의 차이가 재시도하는 클라이언트와 포기하는 클라이언트의 차이이기 때문이다.
 
+잡은 끝났으나 그 결과가 retention 기간을 지나 사라졌으면 **404 `not_found`**. 이것은 오류가
+아니라 오래된 잡의 정상적인 최종 상태다 — retention은 artifact를 지우고 잡 원장은 건드리지
+않으므로, 수집한 것이 사라진 뒤에도 잡은 자기가 무엇을 했는지 계속 답할 수 있다. **결과는
+영구적이지 않고, 잡 원장이 영구적이다.** retention 기간 너머까지 데이터가 필요한 클라이언트는
+가져올 때 자기 쪽에 저장해야 한다.
+
 모든 payload에는 `degradations` 목록이 있다. 깨끗한 수집에서는 비어 있고, 그렇지 않으면
 얻지 못한 것의 이름이 들어간다 — 댓글이 꺼진 영상의 `video.bundle`이라든가, 렌더러가 더
-이상 맞지 않는 표면(`parse_mismatch`). **빈 목록은 약속이고, 빠진 것에는 항상 이름이 있다.**
+이상 맞지 않는 표면(`ExtractionError`). 각 항목의 `code`는 잡의 `error_code`와 같은 두 번째
+어휘의 클래스 이름이고, `## 오류`에서 설명한다. **빈 목록은 약속이고, 빠진 것에는 항상
+이름이 있다.**
 요청받은 것보다 조용히 적게 돌려주는 것이 이 프로젝트가 구조적으로 불가능하게 만들려는
 실패다.
 
@@ -265,6 +417,9 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB/result
 
 더 이상 원하지 않는 잡을 멈춘다. 행은 남는다 — 무엇을 멈추라고 들었는지 잊는 큐는 왜
 아무것도 오지 않았는지 답할 수 없다.
+
+**응답** 200, 잡을 실어서. 그 `state`가 답이다. 401 `unauthenticated`; 404 `not_found`;
+이미 끝난 잡은 409 `conflict`; 429 `rate_limited`.
 
 ```sh
 curl -s -X DELETE -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB
@@ -283,13 +438,16 @@ curl -s -X DELETE -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB
 
 잡 원장, 최신순.
 
+**응답** 200. 401 `unauthenticated`; 범위 밖의 `limit`, 해석되지 않는 `since`/`until`,
+이 API가 발급하지 않은 cursor는 422 `invalid_request`; 429 `rate_limited`.
+
 | 파라미터 | |
 | --- | --- |
 | `state` | `queued`, `running`, `succeeded`, `failed`, `cancelled` |
 | `kind` | 위 kind 중 하나 |
-| `target` | 저장된 정규형 target |
-| `since` / `until` | RFC 3339, `created_at` 기준 |
-| `limit` | 기본 50, 최대 500 |
+| `target` | 저장된 그대로의 target, 바이트 단위로 일치해야 한다 |
+| `since` / `until` | RFC 3339, **`created_at`** 기준 — 잡이 요청된 시각 |
+| `limit` | 기본 50. 1–500 밖이면 잘라내지 않고 422 `invalid_request`로 **거부한다** |
 | `cursor` | 이전 페이지에서 받은 값 |
 
 ```sh
@@ -298,17 +456,37 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/jobs?state=failed&limit=20'
 
 ```json
 {
-  "jobs": [{ "job_id": "j_2f7c1d9a", "state": "failed", "error_code": "upstream_error" }],
+  "jobs": [{ "job_id": "j_2f7c1d9a", "state": "failed", "error_code": "UpstreamError" }],
   "cursor": "MjAyNi0wOC0xOVQwOToxMjozMSswMDowMHxqXzJmN2MxZDlh"
 }
 ```
 
 ---
 
+`cache_parameters`는 kind와 target 외에 그 소스의 답을 다른 답으로 만드는 것이다 — 리스팅의
+상한, 댓글 수집의 정렬과 상한, 자막의 언어 우선순위. **응답한 프로세스에서 실제로 적용 중인
+값이다.** `tubedepth serve`와 `tubedepth work`는 각각 별개 프로세스에서 환경변수를 한 번씩
+읽고, 둘이 어긋나면 API가 워커가 기록하는 것과 다른 캐시 키를 계산한다 — 워커가 쓰는 것과는
+더 이상 맞지 않으면서, 변경 이전의 행과는 계속 맞는다. 둘 사이에서 이 라우트를 비교하는 것이
+그것을 잡는 방법이다.
+
 ## `GET /v1/artifacts`
 
-요청된 것이 아니라 **실제로 수집된 것**. `kind`, `target`, `since`, `until`, `limit`,
-`cursor`를 받고 `fetched_at`으로 거른다.
+요청된 것이 아니라 **실제로 수집된 것**.
+
+**응답** 200. 401 `unauthenticated`; 범위 밖의 `limit`, 해석되지 않는 `since`/`until`,
+이 API가 발급하지 않은 cursor는 422 `invalid_request`; 429 `rate_limited`.
+
+| 파라미터 | |
+| --- | --- |
+| `kind` | 위 kind 중 하나 |
+| `target` | 저장된 그대로의 target, 바이트 단위로 일치해야 한다 |
+| `since` / `until` | RFC 3339, **`fetched_at`** 기준 — 관측이 이뤄진 시각. 잡 라우트에서는 요청된 시각인 `created_at` 기준이다 |
+| `limit` | 기본 50. 1–500 밖이면 잘라내지 않고 422 `invalid_request`로 **거부한다** |
+| `cursor` | 이전 페이지에서 받은 값 |
+
+**여기에는 `state`가 없고, 그것은 의도된 것이다.** state는 요청에 딸린 것이고 이 표는 이미
+일어난 일의 기록만 담는다 — 이 표의 모든 행은 성공한 수집이다.
 
 ```sh
 curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/artifacts?target=dQw4w9WgXcQ'
@@ -320,6 +498,7 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/artifacts?target=dQw4w9WgXcQ'
     {
       "kind": "video.metadata",
       "target": "dQw4w9WgXcQ",
+      "schema_version": "1",
       "digest": "b9f4c0e2...",
       "byte_count": 26417,
       "fetched_at": "2026-08-19T09:12:44Z",
@@ -330,6 +509,11 @@ curl -s -H "X-API-Key: $KEY" 'localhost:8080/v1/artifacts?target=dQw4w9WgXcQ'
 }
 ```
 
+`schema_version`은 그 kind의 normalizer 중 어느 버전이 이 바이트를 썼는지다. 컬럼이 생기기 전에
+수집된 것은 `null`이다 — fingerprint가 버전을 품고 있지만 SHA-256이라 행에서 되돌릴 수 없다.
+**`schema_version`이 다른 두 관측은 직접 비교할 수 없다**: bump는 모양이 바뀌었다는 뜻이고, 한쪽에
+있는 필드를 다른 쪽은 애초에 수집하지 않았을 수 있다.
+
 artifact 테이블은 덮어쓰지 않고 덧붙이므로, `target`으로 거르면 영상 하나의 이력이 나온다 —
 수치가 어떻게 움직였는지. 잡 원장은 그걸 답할 수 없고, 그것을 보관하는 것이 이 테이블이다.
 
@@ -337,6 +521,89 @@ artifact 테이블은 덮어쓰지 않고 덧붙이므로, `target`으로 거르
 `fetched_at`이 다른데 digest가 같다면 그 사이에 아무것도 바뀌지 않았다는 뜻이다.
 
 ---
+
+## `GET /v1/artifacts/{digest}`
+
+관측 하나를, 그 내용 주소로. 이력을 읽는 방법이 이것이다 — 목록 라우트가 digest를 내주고,
+이 라우트가 그것을 실제 데이터로 바꾼다.
+
+**응답** 200. 401 `unauthenticated`; 404 `not_found`; 409 `conflict`; 410 `retracted`;
+429 `rate_limited`.
+
+```sh
+curl -s -H "X-API-Key: $KEY" localhost:8080/v1/artifacts/b9f4c0e2...
+```
+
+```json
+{
+  "digest": "b9f4c0e2...",
+  "kind": "video.metadata",
+  "target": "dQw4w9WgXcQ",
+  "observations": 9,
+  "first_fetched_at": "2026-08-19T15:12:56Z",
+  "fetched_at": "2026-08-19T23:24:55Z",
+  "schema_version": "1",
+  "current_schema_version": "1",
+  "payload_fields": ["chapters", "most_replayed", "tags", "view_count"],
+  "current_fields": ["chapters", "most_replayed", "published_date", "tags", "view_count"],
+  "payload": { "...": "수집된 그대로의 바이트" }
+}
+```
+
+**digest 하나는 관측 하나가 아니다.** 저장소는 내용 주소 방식이라, 수치가 움직이지 않은 영상은
+같은 digest에 새 행을 남긴다 — digest가 같으면 "아무것도 안 변했다"로 읽히는 이유가 그것이고,
+매시간 도는 watch 회차가 설계상 만들어내는 상황이다. `observations`는 이 바이트를 공유하는 행의 수이고
+`first_fetched_at`은 그중 가장 이른 것이다. 둘을 합치면 쓸모 있는 진술이 된다: 이 payload가
+그 기간 동안 이 영상의 모습이었다. `fetched_at`은 가장 최근이다.
+
+**payload는 그대로 돌려주며 다시 파싱하지 않는다.** 옛 normalizer가 쓴 payload도 저장된 모습
+그대로 나온다. 보관할 가치가 있는 것은 원래의 관측이고, 오늘의 모델로 다시 모양을 잡는 것이
+이력이 이력이기를 그만두는 방식이기 때문이다.
+
+`payload_fields`와 `current_fields`는 선언이 아니라 계산된 값이고, 그 차이가 "이 옛 관측에는
+무엇이 없는가"에 대한 정직한 답이다. 옛 버전이 애초에 수집하지 않은 필드는 `payload_fields`에
+**없다** — null보다 강한 진술이다.
+
+그 관측을 수집한 버전을 소스가 철회했다면 **410 `retracted`**. 그 버전의 payload는 낡은 것이
+아니라 틀린 것이고, 그것을 이력으로 내주는 것은 잘못된 것으로 알려진 관측을 세탁하는 일이다.
+404가 아닌 이유는, 관측은 실제로 일어났고 404는 일어나지 않았다고 말하기 때문이다.
+
+관측의 schema 버전이 기록된 적 없고 그 kind가 어떤 버전을 철회한 적이 있다면 **409 `conflict`**.
+null 버전은 "괜찮다"가 아니라 "모른다"이고, 버전을 철회한 kind에는 컬럼보다 오래된 행이 있어서
+둘 중 어느 쪽인지 알 수 없다. `tubedepth backfill-schema-versions`를 돌린 뒤 다시 물으면 된다.
+
+이 인스턴스가 저장한 적 없는 digest, 그리고 index에는 행이 있으나 payload store에 바이트가
+없는 digest는 404 `not_found`. 메시지는 원인을 단정하지 않고 두 가지를 모두 제시한다 —
+retention이 바이트를 지웠거나, `TUBEDEPTH_DATA_DIR`가 이 index가 만들어질 때의 store가
+아니거나. index와 store는 한 쌍이고, 어느 쪽이 움직였는지는 운영자만 안다.
+
+### 한 target의 이력을 끝까지 읽기
+
+두 라우트를 한 쌍으로: 한 target의 관측 목록을 받고, 거기서 받은 digest 하나를 실제 데이터로
+바꾼다.
+
+```sh
+KEY=ytd_...
+TARGET=dQw4w9WgXcQ
+
+# 그 target의 모든 관측, 최신순
+curl -s -H "X-API-Key: $KEY" \
+     "localhost:8080/v1/artifacts?kind=video.metadata&target=$TARGET"
+
+# 그중 가장 최근 것을 통째로
+DIGEST=$(curl -s -H "X-API-Key: $KEY" \
+     "localhost:8080/v1/artifacts?kind=video.metadata&target=$TARGET" \
+     | jq -r '.artifacts[0].digest')
+curl -s -H "X-API-Key: $KEY" "localhost:8080/v1/artifacts/$DIGEST"
+```
+
+모르면 반나절을 쓰게 되는 것 둘:
+
+- **`target`은 저장된 그대로 바이트 단위로 일치해야 한다.** 이 라우트로 들어올 때 정규화되지
+  않고, 접두사 매칭도 대소문자 무시도 없다. 등록 때 저장된 값과 정확히 같아야 한다.
+- **handle과 채널 id는 서로 다른 target이다** (`## kind` 참조). `@veritasium`으로 수집된 이력은
+  `UCHnyfMqiRRG1u-2MsSQLbXA`로 물어도 나오지 않으며, 어느 쪽도 무언가를 빠뜨린 것이 아니다 —
+  그냥 이력이 둘인 것이다.
 
 ## 페이지네이션
 
@@ -354,29 +621,84 @@ curl -s -H "X-API-Key: $KEY" "localhost:8080/v1/jobs?cursor=$CURSOR"
 
 ## 오류
 
-모든 오류는 같은 모양이다.
+이 문서가 설명하는 모든 오류는 같은 모양이다. 라우트가 실행되기도 전에 프레임워크가 거부하는
+것들 — 형식이 틀린 본문, 해석되지 않는 `since`, 범위 밖의 `limit` — 도 모두 이 모양의
+`invalid_request`다.
 
 ```json
 { "error": { "code": "not_found", "message": "job not found: j_2f7c1d9a" } }
 ```
 
+<!-- error-codes:start -->
+
 | 상태 | 코드 | 뜻 |
 | --- | --- | --- |
 | 401 | `unauthenticated` | 키가 없거나, 형식이 틀렸거나, 모르는 키이거나, 폐기됨 |
-| 422 | `invalid_request` | 모르는 kind, 해석 불가한 target, 이 API가 발급하지 않은 커서 |
-| 404 | `not_found` | 그런 잡이 없음 — 또는 영상이 요청된 것을 갖고 있지 않음 |
+| 422 | `invalid_request` | 형식이 틀린 본문, 해석되지 않는 쿼리 값, 범위 밖의 limit, 읽을 수 없는 target, 이 API가 발급하지 않은 cursor |
+| 404 | `not_found` | 그런 잡이나 digest가 없음, 그 kind로 등록된 소스가 없음 — 또는 영상이 요청된 것을 갖고 있지 않음 |
+| 404 | `unavailable` | 영상은 있으나 여기서 볼 수 없음: 비공개, 삭제됨, 멤버십 전용, 연령 제한, 지역 차단. 우리 버그가 아니고 재시도할 값어치도 없다 |
 | 409 | `conflict` | 잡은 있으나 아직 끝나지 않음 |
+| 410 | `retracted` | 이 관측을 수집한 버전이 철회됨 |
 | 429 | `rate_limited` | 키 할당량 초과, 또는 업스트림이 이 주소를 거부 |
 | 502 | `parse_mismatch` | YouTube는 답했고 우리 파서가 그것을 더는 이해하지 못함 |
 | 502 | `upstream_error` | 업스트림이 답했으나 그 답을 쓸 수 없음 |
+| 503 | `not_configured` | 이 배포에 필요한 것이 빠져 있음 — 설정되지 않은 data API 키, search path가 한 번도 설정된 적 없는 데이터베이스 role. 설정을 고치고 다시 요청하면 된다 |
 | 500 | `internal_error` | 우리 버그 |
+
+<!-- error-codes:end -->
+
+이 서비스의 것이 아니라 프레임워크의 것이어서 저 모양을 쓰지 않는 응답이 둘 있다. 이 API가
+아예 라우팅하지 않는 경로로 온 요청과, 라우팅되는 경로에 없는 메서드로 온 요청은 `detail`
+필드를 단 404와 405로 돌아온다. 이 문서가 설명하는 것 중에 그렇게 답하는 것은 없다.
 
 `parse_mismatch`는 다른 모든 업스트림 실패와 분리되어 있고 **절대 재시도되지 않는다.**
 일시적인 것도 네트워크 문제도 아니다. 재시도는 멀쩡히 답한 주소에 대고 요청을 낭비할 뿐이고,
 고치는 것은 코드 변경뿐이다. 500이 아니라 502인 것도 같은 이유다 — 500은 운영자를 우리
 트레이스백으로 보내고, 502는 메시지에 적힌 렌더러 이름으로 보낸다.
 
+`unavailable`과 `not_configured`는 반대 방향에서 같은 이유로 있다. 둘 다 예전에는 500
+`internal_error`로 나왔는데, 이 표는 그것을 "우리 버그"라고 정의한다. 지역 차단된 영상은 우리
+버그가 아니고, 설정되지 않은 키도 아니다 — 특히 503은 운영자에게 트레이스백이 아니라 설정을
+보라고 말하는 응답이다.
+
 `message`는 사람에게 보여줄 것으로 쓰였고 문제가 된 값을 이름으로 담는다.
+
+### 잡의 `error_code`는 다른 어휘다
+
+**필드 이름은 같고 값의 공간은 다르다.** 위 표는 HTTP 오류 본문 안의 `code`다. 잡의
+`error_code` — `GET /v1/jobs`, `GET /v1/jobs/{job_id}`, 웹훅 본문, payload의 `degradations`
+각 항목, 그리고 `/healthz`의 `last_error_code` — 는 그 표에서 오지 않는다. 실패가 발생한
+**Python 클래스의 이름**을 그대로 쓴 것이고, 예외가 아닌 리터럴 하나가 더 있다.
+
+그래서 실패한 잡은 `UpstreamError`라고 말하지 `upstream_error`라고 말하지 않는다. 둘 사이를
+번역해 주는 것은 없고, 양쪽 표기가 모두 존재하는 값도 하나도 없다.
+
+<!-- job-error-codes:start -->
+
+| 값 | 무엇이 일어났나 |
+| --- | --- |
+| `ValidationError` | 요청을 이해할 수 없었다: 형식이 틀린 식별자, 잘못된 옵션 |
+| `NotFoundError` | 요청된 것이 여기 없거나, 영상이 그것을 갖고 있지 않다 |
+| `UnavailableError` | 영상은 있으나 여기서 볼 수 없다: 비공개, 삭제됨, 멤버십 전용, 연령 제한, 지역 차단 |
+| `UpstreamError` | 백엔드가 답했고, 그 답을 쓸 수 없었다 |
+| `RateLimitedError` | 업스트림이 속도를 줄이라고 했거나 이 주소를 아예 거부했다 |
+| `ExtractionError` | 백엔드는 답했는데 그 응답에 파서가 찾는 것이 더는 없다 |
+| `ConfigurationError` | 우리 쪽 설정 오류. 클라이언트 잘못인 적이 없다 |
+| `UnauthenticatedError` | 키가 제시되지 않았거나, 제시된 키를 모르거나 폐기됐다 |
+| `RetractedError` | 저장된 관측인데, 그것을 수집한 버전이 잘못 수집한 것으로 밝혀졌다 |
+| `ConflictError` | 그것은 있지만 상태가 맞지 않는다 |
+| `lease_expired` | 예외가 아니다: 워커가 잡을 집은 뒤 lease를 갱신하지 않았고, 마지막 시도까지 쓴 뒤 reaper가 포기했다 |
+
+<!-- job-error-codes:end -->
+
+이 프로젝트가 정의하는 도메인 오류가 전부 실려 있다. 워커는 자기에게 도달한 것을 그대로 쓰기
+때문이다. 실제 잡에서 보기 어려운 것도 여럿 있다.
+
+**이 이름들을 HTTP 코드에 맞춰 바꾸지 않으며, 앞으로도 바꾸지 않는다.** 데이터베이스에 이미
+들어 있는 행들이 클래스 이름을 담고 있고, 이름을 바꾸면 원장이 한꺼번에 두 어휘를 갖게 된다 —
+같은 실패를 두고 어떤 행은 `ExtractionError`라 하고 어떤 행은 `parse_mismatch`라고 하는 상태다.
+그런 원장은 어떤 문서도 정직하게 설명할 수 없고 어떤 클라이언트도 분기할 수 없다. 안정된 쪽은
+이 이름들이고, 움직여도 되는 쪽은 HTTP로의 대응이다.
 
 ## 웹훅
 
@@ -420,6 +742,11 @@ hmac.compare_digest(expected, presented)
 
 전송은 at-least-once이고 8회 시도 후 포기한다. 2xx면 배달된 것으로 세고, 그 밖이면 잡은
 빚진 상태로 남아 다음 스윕이 다시 시도한다.
+
+**전송은 10초에 타임아웃되고, 타임아웃은 실패한 전송이다.** 그보다 오래 걸려 답하는 수신자는
+다른 실패와 똑같이 재시도되고, 자기 쪽 작업이 아무리 잘 끝났어도 같은 본문을 다시 받는다.
+콜백에는 데이터가 실려 있지 않으므로 답하기 전에 할 일도 없다 — 먼저 응답하고, 그 다음에
+일한다.
 
 ## 이 API가 하지 않는 것
 

@@ -151,6 +151,15 @@ def caption_track_candidates(
 
     A list rather than one track because the ranking is a preference and a
     fetch can still be refused; see `TranscriptSource.collect`.
+
+    Raises rather than returning an empty list, and the message says which of
+    three failures it is — captions off, a language we will not serve, or a
+    fallback that did not match — because they are acted on differently. This
+    used to live in a `select_caption_track` wrapper that returned the head,
+    and `collect` re-implemented the same two lines because it wants the whole
+    ranking. So every test of the selection policy named a function the worker
+    never called: change the policy there and eleven assertions stay green
+    while nothing the worker collects moves.
     """
     manual = dump.get("subtitles") or {}
     automatic = dump.get("automatic_captions") or {}
@@ -171,17 +180,9 @@ def caption_track_candidates(
             track = _track(automatic, key, is_automatic=True)
             if track is not None:
                 candidates.append(track)
-    return candidates
-
-
-def select_caption_track(
-    dump: Mapping[str, Any], *, fallback_languages: Sequence[str] = FALLBACK_LANGUAGES
-) -> CaptionTrack:
-    """The single best track. See `caption_track_candidates` for the ranking."""
-    candidates = caption_track_candidates(dump, fallback_languages=fallback_languages)
     if not candidates:
         raise NotFoundError(_no_track_message(dump, fallback_languages))
-    return candidates[0]
+    return candidates
 
 
 def _no_track_message(dump: Mapping[str, Any], fallback_languages: Sequence[str]) -> str:
@@ -258,12 +259,16 @@ class TranscriptSource:
 
     def __init__(self, *, fallback_languages: Sequence[str] = FALLBACK_LANGUAGES) -> None:
         self._fallback_languages = tuple(fallback_languages)
+        # The same defect as the listing limit, one source over. Swap this order
+        # and every cached transcript answers a request that asked for a
+        # different language preference — and which language counts as the
+        # video's own words is the whole point of this source. A list because
+        # the order is a preference, not a set.
+        self.cache_parameters = {"fallback_languages": list(self._fallback_languages)}
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> Transcript:
         dump = runtime.extract(target, egress=egress)
         candidates = caption_track_candidates(dump, fallback_languages=self._fallback_languages)
-        if not candidates:
-            raise NotFoundError(_no_track_message(dump, self._fallback_languages))
 
         # Walk the ranking rather than committing to its head: a manual track
         # can be refused while the transcription of the same video is served,

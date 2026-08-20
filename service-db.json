@@ -1,0 +1,48 @@
+{
+  "manifest_version": 1,
+  "service": "tubedepth",
+  "schema": "tubedepth",
+  "roles": {
+    "owner": "tubedepth_owner",
+    "migrator": "tubedepth_migrator",
+    "runtime": "tubedepth_runtime"
+  },
+  "cross_service_dependencies": [],
+  "required_extensions": [],
+  "external_object_stores": [
+    {
+      "kind": "filesystem",
+      "path": "${TUBEDEPTH_DATA_DIR}/payloads",
+      "write_protocol": "content-addressed, write-then-record",
+      "referenced_by": "artifacts.digest"
+    }
+  ],
+  "connection_budget": {
+    "total": 32,
+    "api": {
+      "max_instances_including_rollout": 1,
+      "write_pool_size": 2,
+      "write_max_overflow": 2,
+      "read_pool_size": 2,
+      "read_max_overflow": 2
+    },
+    "worker": {
+      "max_instances_including_rollout": 1,
+      "write_pool_size": 6,
+      "write_max_overflow": 6,
+      "read_pool_size": 2,
+      "read_max_overflow": 2
+    },
+    "workers_and_schedulers": 0,
+    "migration": 1,
+    "rolling_deploy_overlap": 0,
+    "service_spare": 7
+  },
+  "session_defaults": {
+    "timezone": "UTC",
+    "statement_timeout": "15s",
+    "lock_timeout": "3s",
+    "idle_in_transaction_session_timeout": "30s",
+    "transaction_timeout": "60s"
+  }
+}

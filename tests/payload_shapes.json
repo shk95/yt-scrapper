@@ -1,0 +1,293 @@
+{
+ "form": 2,
+ "kinds": {
+  "channel.about": {
+   "2": {
+    "shape": [
+     "avatar_url null|string",
+     "channel_id string",
+     "country null|string",
+     "description null|string",
+     "handle null|string",
+     "joined_text null|string",
+     "links list",
+     "links[] string",
+     "name null|string",
+     "subscriber_count_approximate integer|null",
+     "subscriber_count_text null|string",
+     "tags list",
+     "tags[] string",
+     "video_count integer|null",
+     "view_count integer|null"
+    ]
+   }
+  },
+  "channel.community": {
+   "1": {
+    "shape": [
+     "channel_id string",
+     "posts list",
+     "posts[] object",
+     "posts[].post_id null|string",
+     "posts[].published_text null|string",
+     "posts[].text null|string",
+     "posts[].vote_count_text null|string"
+    ]
+   }
+  },
+  "channel.videos": {
+   "1": {
+    "shape": [
+     "listing_id null|string",
+     "skipped_count integer",
+     "source_kind string",
+     "title null|string",
+     "videos list",
+     "videos[] object",
+     "videos[].channel null|string",
+     "videos[].channel_id null|string",
+     "videos[].duration_seconds integer|null",
+     "videos[].published_at null|string(date-time)",
+     "videos[].title null|string",
+     "videos[].video_id string",
+     "videos[].view_count integer|null"
+    ]
+   }
+  },
+  "playlist.items": {
+   "1": {
+    "shape": [
+     "listing_id null|string",
+     "skipped_count integer",
+     "source_kind string",
+     "title null|string",
+     "videos list",
+     "videos[] object",
+     "videos[].channel null|string",
+     "videos[].channel_id null|string",
+     "videos[].duration_seconds integer|null",
+     "videos[].published_at null|string(date-time)",
+     "videos[].title null|string",
+     "videos[].video_id string",
+     "videos[].view_count integer|null"
+    ]
+   }
+  },
+  "search.videos": {
+   "1": {
+    "shape": [
+     "listing_id null|string",
+     "skipped_count integer",
+     "source_kind string",
+     "title null|string",
+     "videos list",
+     "videos[] object",
+     "videos[].channel null|string",
+     "videos[].channel_id null|string",
+     "videos[].duration_seconds integer|null",
+     "videos[].published_at null|string(date-time)",
+     "videos[].title null|string",
+     "videos[].video_id string",
+     "videos[].view_count integer|null"
+    ]
+   }
+  },
+  "trending.videos": {
+   "1": {
+    "shape": [
+     "listing_id null|string",
+     "skipped_count integer",
+     "source_kind string",
+     "title null|string",
+     "videos list",
+     "videos[] object",
+     "videos[].channel null|string",
+     "videos[].channel_id null|string",
+     "videos[].duration_seconds integer|null",
+     "videos[].published_at null|string(date-time)",
+     "videos[].title null|string",
+     "videos[].video_id string",
+     "videos[].view_count integer|null"
+    ]
+   }
+  },
+  "video.bundle": {
+   "1": {
+    "shape": [
+     "degradations list",
+     "degradations[] object",
+     "degradations[].code string",
+     "degradations[].detail string",
+     "degradations[].source string",
+     "parts object",
+     "parts.video.metadata@1.caption_tracks list",
+     "parts.video.metadata@1.caption_tracks[] object",
+     "parts.video.metadata@1.caption_tracks[].is_automatic boolean",
+     "parts.video.metadata@1.caption_tracks[].language string",
+     "parts.video.metadata@1.caption_tracks[].name null|string",
+     "parts.video.metadata@1.categories list",
+     "parts.video.metadata@1.categories[] string",
+     "parts.video.metadata@1.channel null|string",
+     "parts.video.metadata@1.channel_id null|string",
+     "parts.video.metadata@1.chapters list",
+     "parts.video.metadata@1.chapters[] object",
+     "parts.video.metadata@1.chapters[].end_seconds null|number",
+     "parts.video.metadata@1.chapters[].start_seconds number",
+     "parts.video.metadata@1.chapters[].title string",
+     "parts.video.metadata@1.comment_count integer|null",
+     "parts.video.metadata@1.description string",
+     "parts.video.metadata@1.duration_seconds integer|null",
+     "parts.video.metadata@1.like_count integer|null",
+     "parts.video.metadata@1.most_replayed list",
+     "parts.video.metadata@1.most_replayed[] object",
+     "parts.video.metadata@1.most_replayed[].end_seconds number",
+     "parts.video.metadata@1.most_replayed[].rank integer",
+     "parts.video.metadata@1.most_replayed[].score number minimum=0.0 maximum=1.0",
+     "parts.video.metadata@1.most_replayed[].start_seconds number",
+     "parts.video.metadata@1.published_at null|string(date-time)",
+     "parts.video.metadata@1.published_date null|string(date)",
+     "parts.video.metadata@1.tags list",
+     "parts.video.metadata@1.tags[] string",
+     "parts.video.metadata@1.title string",
+     "parts.video.metadata@1.video_id string",
+     "parts.video.metadata@1.view_count integer|null",
+     "parts.video.related@1.items list",
+     "parts.video.related@1.items[] object",
+     "parts.video.related@1.items[].channel null|string",
+     "parts.video.related@1.items[].duration_text null|string",
+     "parts.video.related@1.items[].title null|string",
+     "parts.video.related@1.items[].video_id string",
+     "parts.video.related@1.items[].view_count_text null|string",
+     "parts.video.related@1.renderer_shape null|string",
+     "parts.video.related@1.video_id string",
+     "parts.video.sponsor_segments@1.segments list",
+     "parts.video.sponsor_segments@1.segments[] object",
+     "parts.video.sponsor_segments@1.segments[].action_type null|string",
+     "parts.video.sponsor_segments@1.segments[].category string",
+     "parts.video.sponsor_segments@1.segments[].end_seconds number",
+     "parts.video.sponsor_segments@1.segments[].is_locked boolean",
+     "parts.video.sponsor_segments@1.segments[].start_seconds number",
+     "parts.video.sponsor_segments@1.segments[].votes integer|null",
+     "parts.video.sponsor_segments@1.source string",
+     "parts.video.sponsor_segments@1.video_id string",
+     "parts.video.transcript@1.full_text string",
+     "parts.video.transcript@1.is_automatic boolean",
+     "parts.video.transcript@1.language string",
+     "parts.video.transcript@1.name null|string",
+     "parts.video.transcript@1.segments list",
+     "parts.video.transcript@1.segments[] object",
+     "parts.video.transcript@1.segments[].duration_seconds number",
+     "parts.video.transcript@1.segments[].start_seconds number",
+     "parts.video.transcript@1.segments[].text string",
+     "video_id string"
+    ]
+   }
+  },
+  "video.comments": {
+   "1": {
+    "shape": [
+     "comments list",
+     "comments[] object",
+     "comments[].author null|string",
+     "comments[].author_id null|string",
+     "comments[].author_is_uploader boolean",
+     "comments[].author_is_verified boolean",
+     "comments[].comment_id string",
+     "comments[].is_hearted_by_uploader boolean",
+     "comments[].is_pinned boolean",
+     "comments[].like_count integer|null",
+     "comments[].parent_id null|string",
+     "comments[].published_at null|string(date-time)",
+     "comments[].published_text null|string",
+     "comments[].text string",
+     "is_truncated boolean",
+     "retrieved_count integer",
+     "sort string"
+    ]
+   }
+  },
+  "video.metadata": {
+   "1": {
+    "shape": [
+     "caption_tracks list",
+     "caption_tracks[] object",
+     "caption_tracks[].is_automatic boolean",
+     "caption_tracks[].language string",
+     "caption_tracks[].name null|string",
+     "categories list",
+     "categories[] string",
+     "channel null|string",
+     "channel_id null|string",
+     "chapters list",
+     "chapters[] object",
+     "chapters[].end_seconds null|number",
+     "chapters[].start_seconds number",
+     "chapters[].title string",
+     "comment_count integer|null",
+     "description string",
+     "duration_seconds integer|null",
+     "like_count integer|null",
+     "most_replayed list",
+     "most_replayed[] object",
+     "most_replayed[].end_seconds number",
+     "most_replayed[].rank integer",
+     "most_replayed[].score number minimum=0.0 maximum=1.0",
+     "most_replayed[].start_seconds number",
+     "published_at null|string(date-time)",
+     "published_date null|string(date)",
+     "tags list",
+     "tags[] string",
+     "title string",
+     "video_id string",
+     "view_count integer|null"
+    ]
+   }
+  },
+  "video.related": {
+   "1": {
+    "shape": [
+     "items list",
+     "items[] object",
+     "items[].channel null|string",
+     "items[].duration_text null|string",
+     "items[].title null|string",
+     "items[].video_id string",
+     "items[].view_count_text null|string",
+     "renderer_shape null|string",
+     "video_id string"
+    ]
+   }
+  },
+  "video.sponsor_segments": {
+   "1": {
+    "shape": [
+     "segments list",
+     "segments[] object",
+     "segments[].action_type null|string",
+     "segments[].category string",
+     "segments[].end_seconds number",
+     "segments[].is_locked boolean",
+     "segments[].start_seconds number",
+     "segments[].votes integer|null",
+     "source string",
+     "video_id string"
+    ]
+   }
+  },
+  "video.transcript": {
+   "1": {
+    "shape": [
+     "full_text string",
+     "is_automatic boolean",
+     "language string",
+     "name null|string",
+     "segments list",
+     "segments[] object",
+     "segments[].duration_seconds number",
+     "segments[].start_seconds number",
+     "segments[].text string"
+    ]
+   }
+  }
+ }
+}

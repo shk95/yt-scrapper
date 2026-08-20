@@ -34,6 +34,7 @@ Full endpoint reference: [`docs/api.md`](docs/api.md).
 | `channel.about` | join date, country, links, **exact total view count**, description, tags, avatar | mostly absent |
 | `channel.community` | community posts | absent |
 | `channel.videos` · `playlist.items` · `search.videos` | listings — fan out to per-item collection with `--then` | possible, and it spends quota |
+| `trending.videos` | what YouTube itself calls popular, in its own order | the chart endpoint, which is what this uses |
 
 <!-- kinds:end -->
 
@@ -50,9 +51,9 @@ Comments are available and cost more quota than bulk collection can afford.
 
 ```sh
 git config core.hooksPath .githooks   # a fresh clone arrives with hooks off
-tool/doctor.sh                        # toolchain, SQLite, hooks
+tool/doctor.sh                        # toolchain, PostgreSQL reachability, hooks
 uv sync --extra dev
-just check                            # format + lint + the offline suite
+just check                            # format + lint + the test suite (needs Docker)
 
 uv run tubedepth key create --label local   # the secret is printed once
 uv run tubedepth serve --port 8080 &        # the API, on 127.0.0.1 by default
@@ -87,15 +88,58 @@ route to the internet.
 
 ## Deployment
 
-Two systemd **user** units live in `deploy/`. Neither needs root, and neither
-can quietly acquire it.
+systemd **user** units live in `deploy/`. None needs root, and none can quietly
+acquire it. Two of them are the service itself:
 
 ```sh
-cp deploy/tubedepth-*.service ~/.config/systemd/user/
+mkdir -p ~/.config/tubedepth
+echo 'TUBEDEPTH_DATABASE_URL=postgresql+psycopg://tubedepth_runtime:...@host/db' \
+  > ~/.config/tubedepth/worker.env
+cp ~/.config/tubedepth/worker.env ~/.config/tubedepth/database.env   # api.service reads this one
+chmod 0600 ~/.config/tubedepth/worker.env ~/.config/tubedepth/database.env
+
+cp deploy/tubedepth-api.service deploy/tubedepth-worker.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now tubedepth-api tubedepth-worker
 loginctl enable-linger $USER    # or a reboot looks exactly like a crash
 ```
+
+There is no SQLite fallback: every unit refuses to start without a working
+`TUBEDEPTH_DATABASE_URL`. `deploy/postgres-bootstrap.sql` is what provisions
+the roles and schema that URL points at, and `docs/shared-postgres.md` is the
+regulation behind it.
+
+The third is optional and off by default: `tubedepth-watch.timer` runs
+`tubedepth watch` every hour, which queues a whole watch list forced past the
+freshness window so that each pass records a new observation. That is what
+turns `GET /v1/artifacts` from a cache into a history you can differentiate —
+and it only accumulates in real time, so it is worth starting before anything
+needs it.
+
+```sh
+mkdir -p ~/.config/tubedepth
+cp deploy/watchlist.example.txt ~/.config/tubedepth/watchlist.txt
+$EDITOR ~/.config/tubedepth/watchlist.txt        # one typed directive per line
+cp deploy/tubedepth-watch.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now tubedepth-watch.timer
+```
+
+The list is typed — `video`, `channel`, `search` or `trending`, then the
+target — so one schedule collects a fixed set of videos, a channel's uploads, a
+trend keyword and a region's chart at once. A directive that is not one of the
+four is refused naming the line, because a typo that quietly collects nothing
+is what a watch list is worst at showing you. Where there is no timer — compose
+— `tubedepth watch --every 3600` stays resident instead.
+
+**Size the list deliberately, and note the four types do not cost the same.**
+A `video` line is one forced collection per firing, out of the same per-address
+budget everything else draws on; thirty of them hourly is about one percent of
+the measured throughput. A `channel`, `search` or `trending` line fans out to a
+`video.metadata` job per video it finds, up to `TUBEDEPTH_LISTING_LIMIT`
+(default 100) — **one such line can be a hundred collections, not one.**
+`deploy/watchlist.example.txt` has the arithmetic. The behaviour of this system
+under sustained load well above that has not been measured.
 
 Splitting the API from the worker is not a matter of taste. yt-dlp extraction
 blocks and holds memory; run them together and one comment harvest sets the p99
@@ -105,6 +149,49 @@ The API binds to **loopback** by default. Authentication here is a header,
 which is not a substitute for TLS, so put a reverse proxy in front before
 exposing it.
 
+## Run it with Docker
+
+One image, four services in `deploy/docker-compose.yml`: `migrate` runs once,
+and `api`, `worker` and `watch` wait for it to complete successfully. They
+differ only by their `command:`, because the image is
+`ENTRYPOINT ["tubedepth"]`.
+
+```sh
+cp deploy/.env.example deploy/.env
+$EDITOR deploy/.env               # the two database URLs, and the local passwords
+just compose-up                   # --profile local, so it brings up a PostgreSQL too
+curl -s localhost:8080/healthz
+just compose-down
+```
+
+The database is the external fleet one by default. `--profile local` — what
+`just compose-up` passes — adds a PostgreSQL of its own, bootstrapped by
+`deploy/postgres-bootstrap.sql` itself rather than a containerised copy of it,
+so what you verify against is the shape production has.
+
+Every credential lives in `deploy/.env`. A compose file is committed and a
+database URL embeds a password, so `deploy/docker-compose.yml` interpolates all
+of them and carries no secret literal; a test asserts it.
+
+Three things there are not accidents. The image carries **no `HEALTHCHECK`** —
+it would be wrong for the worker and the watcher, which answer no port, and for
+`migrate`, a one-shot that is supposed to exit — so the API's healthcheck is in
+the compose file, on the one service that serves `/healthz`. The API runs with
+`--host 0.0.0.0` there while the systemd unit binds loopback: in a container
+nothing is reachable until a port is published, and the `ports:` line is where
+that decision is made. And `api` and `worker` share one env block through a
+YAML anchor rather than by review, because the listing, comment and trending
+caps are part of the cache key — two processes that disagree about them compute
+different keys, and the API then answers for a question the worker never
+collected.
+
+The payload store is a named volume shared by `api` and `worker`: payload bytes
+are gzipped files on disk, not database rows, and the API serves what the
+worker wrote.
+
+No registry publishing. The image is built where it runs — `just compose-up`
+builds it, and CI builds it on every push to check that it still can.
+
 ## Documentation
 
 | | |
@@ -112,12 +199,13 @@ exposing it.
 | [`docs/api.md`](docs/api.md) | REST reference — every endpoint, error code and the webhook contract |
 | [`docs/status.md`](docs/status.md) | where things stand, and the decisions behind them |
 | [`docs/troubleshooting.md`](docs/troubleshooting.md) | errors that have already cost someone an afternoon — grep it, do not read it |
+| [`docs/shared-postgres.md`](docs/shared-postgres.md) | the rules for the PostgreSQL instance this shares with the other scrapers |
 | [`CHANGELOG.md`](CHANGELOG.md) | what changed in each release |
 | [`docs/releasing.md`](docs/releasing.md) | how a release is cut |
 | [`AGENTS.md`](AGENTS.md) | how to work in this repository |
 
-`README.md`, `docs/api.md` and `CHANGELOG.md` are the originals; the `.ko.md`
-files beside them are translations. Everything else is Korean.
+`README.md`, `docs/api.md`, `CHANGELOG.md` and `AGENTS.md` are the originals;
+the `.ko.md` files beside them are translations. Everything else is Korean.
 
 ## Versioning
 
@@ -168,8 +256,8 @@ What this project **cannot** do, and what has **not been checked**.
 - **Related videos, channel About and community posts depend on parsing
   InnerTube renderers**, whose names change without notice —
   `compactVideoRenderer` has already become `lockupViewModel`. The dates in
-  `tests/fixtures/innertube/` are when each surface last worked. A
-  `parse_mismatch` in a response's `degradations` means one of them has broken.
+  `tests/fixtures/innertube/` are when each surface last worked. An
+  `ExtractionError` in a response's `degradations` means one of them has broken.
   The fixture regressions in CI prove **our code has not regressed**; they
   prove nothing about what YouTube is sending today. That is what `just
   contract` is for.
@@ -183,16 +271,16 @@ What this project **cannot** do, and what has **not been checked**.
   turn the VPN off and use a residential line. YouTube's bot checks target
   datacenter ranges, and every commercial VPN exit is in one. The machine this
   was developed on **has a residential IP that currently works, and a VPN exit
-  probably would not.** Hence `TUBEDEPTH_EGRESS_ALLOW_VPN_FOR_YOUTUBE`
-  defaulting to `0`. Turning it on is a *measurement*, not a fix.
+  probably would not.** No configuration turns this on, because nothing has
+  been built to turn on; when something is, treating it as a *measurement*
+  rather than a fix is the point.
 - **The proxy pool has no measured case behind it.** The original quantitative
   argument was Return YouTube Dislike's documented daily cap; **removing that
   source removed the argument with it.** The one remaining third party is
   SponsorBlock, whose limits are undisclosed. Nothing has been measured that
   more exits would definitely improve. Measure it before building the pool.
 - **Only residential or mobile proxies actually raise YouTube throughput**, at
-  roughly $5–15/GB. `ExternalProxyEgress` makes that a configuration change
-  rather than a code change.
+  roughly $5–15/GB. `ProxiedEgress` is the seam for it.
 - **Check your ProtonVPN concurrent-connection quota.** Each wireproxy process
   takes a slot, so a pool competes with your phone and laptop. The free plan is
   unsuitable.
@@ -202,7 +290,7 @@ What this project **cannot** do, and what has **not been checked**.
 | kind | thousands per hour? |
 | --- | --- |
 | SponsorBlock · cache hits | yes — cache hits are the only axis fully under our control |
-| video metadata · related · search | measured 8,417/hour (40 jobs, concurrency 8). Sustained load unmeasured |
+| video metadata · related · search | **~3,100/hour sustained** (474 jobs, 0 failed, 430 s, concurrency 8). A 40-job burst reaches 8,417/hour, which is what a burst measures |
 | whole comment threads | **no.** 1,000 comments = 50+ requests = 1–3 minutes, and those requests eat the IP budget metadata collection needs |
 
 **Where this stands legally.** YouTube's terms prohibit automated access
@@ -219,12 +307,19 @@ estimates was removed on purpose — the reasons are in
 
 **Checked and unchecked.** Verified by hand on this machine during planning: 78
 yt-dlp keys, caption json3 retrieval, 20 comments in 6.7s, SponsorBlock 200 and
-404 both, InnerTube `/next` and `/browse` reachable, SQLite 3.46.1, wireproxy
-1.1.3 available, four parallel metadata extractions in 3.11s. **Not yet
-checked**: the bot-check threshold under sustained load, what triggers a PO
-token, **a request that actually leaves through a VPN egress** (no config
-exists, so nothing has ever gone out through a proxy), how AIMD converges under
-real load, and long multi-worker operation.
+404 both, InnerTube `/next` and `/browse` reachable, PostgreSQL reachable
+(SQLite 3.46.1 back when that was still the backend), wireproxy 1.1.3
+available, four parallel metadata extractions in 3.11s.
+
+Since then, under sustained load: 474 jobs, none failed, the AIMD window at its
+ceiling and the quarantine streak at zero — so the controller settles rather
+than oscillates at this rate, and no bot check was reached. **Still not
+checked**: where the bot-check threshold actually is, what triggers a PO token,
+**a request that leaves through a VPN egress** (no config exists, so nothing has
+ever gone out through a proxy), and long multi-worker operation. What remains
+unverified is tracked as issues labelled
+[`verification`](https://github.com/slopindustries/yt-scrapper/issues?q=is%3Aissue+is%3Aopen+label%3Averification)
+rather than only described here.
 
 ## License
 

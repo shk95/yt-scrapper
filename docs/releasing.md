@@ -21,6 +21,17 @@
 잡히므로, 올리지 않으면 낡은 payload가 새 모양인 척하며 캐시 히트로 나간다. 이것이 릴리스에서
 가장 놓치기 쉬운 항목이다.
 
+**그리고 올렸다면, 직전 버전을 `src/tubedepth/schema_versions.py`의 `PREVIOUS_VERSIONS`에
+한 줄 추가한다.** 소스는 자기가 지금 무엇인지만 알고 fingerprint는 SHA-256이라 되돌려주지
+않으므로, 그 목록이 없으면 그 버전으로 쓰인 payload는 **어떤 방법으로도** 그 버전에 귀속시킬 수
+없게 된다. 지금 이 사실을 아는 유일한 순간이 여기다.
+
+**이제 CI가 그 절반을 강제한다.** payload 모델의 모양이 바뀌었는데 `schema_version`이 그대로면
+`tests/test_payload_shapes.py`가 어느 kind의 어느 줄이 바뀌었는지 대고 실패한다. bump한 뒤
+`just record-payload-shapes`로 lock에 추가한다 — bump하지 않은 채 기록하려 하면 거부한다.
+초록이라는 것은 *기록되지 않은 모양 변경이 없다*는 뜻이지 *bump가 필요 없었다*는 뜻이 아니다.
+필드 모양은 그대로인데 그 필드의 의미가 바뀌는 변경은 기계가 잡지 못한다.
+
 ## 절차
 
 `dev`가 초록이고 `master`에 머지할 준비가 된 상태에서 시작한다.

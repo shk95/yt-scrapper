@@ -61,6 +61,23 @@
   .bars div { flex: 1; background: var(--accent); opacity: .75; min-height: 1px; border-radius: 1px 1px 0 0; }
   .filters { display: flex; gap: 8px; flex-wrap: wrap; padding: 12px 16px 0; }
   .pill { font-size: 12px; color: var(--dim); }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .row label { font-size: 12px; color: var(--dim); display: flex; gap: 5px; align-items: center; }
+  button.act {
+    font-size: 11px; padding: 1px 7px; border-radius: 5px; color: var(--dim);
+  }
+  button.act:hover { color: var(--ink); }
+  td.actions { white-space: nowrap; }
+  .said { padding: 8px 16px; font-size: 12.5px; border-top: 1px solid var(--line); }
+  .said.bad { color: var(--bad); }
+  #viewer { display: none; }
+  #viewer.open { display: block; }
+  #viewer pre {
+    margin: 0; max-height: 55vh; overflow: auto; font-size: 12px; line-height: 1.45;
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace; white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .digest { cursor: pointer; text-decoration: underline dotted; }
 </style>
 
 <header>
@@ -74,13 +91,45 @@
 
 <main>
   <section>
-    <h2>Queue</h2>
+    <h2>Collect <span class="pill">queues a job; the worker does the work</span></h2>
+    <div class="body">
+      <div class="row">
+        <select id="new-kind"></select>
+        <input id="new-target" placeholder="one target, or several separated by comma or newline" size="42">
+        <label><input id="new-refresh" type="checkbox"> force past the freshness window</label>
+        <button id="submit">collect</button>
+      </div>
+    </div>
+    <div class="said" id="said" hidden></div>
+  </section>
+
+  <section id="viewer">
+    <h2>
+      <span id="viewer-title"></span>
+      <div class="grow"></div>
+      <button id="viewer-close">close</button>
+    </h2>
+    <div class="body"><pre id="viewer-body"></pre></div>
+  </section>
+
+  <section>
+    <h2>
+      Queue
+      <span class="pill" id="control-said"></span>
+      <div class="grow"></div>
+      <button id="pause"></button>
+    </h2>
     <div class="body"><div class="counts" id="counts"></div></div>
   </section>
 
   <section>
     <h2>Sources <span class="pill">what each kind has been doing</span></h2>
     <div class="body"><table id="health"></table></div>
+  </section>
+
+  <section>
+    <h2>Routes <span class="pill">what the rate controller currently allows</span></h2>
+    <div class="body"><table id="lanes"></table></div>
   </section>
 
   <section>
@@ -123,12 +172,41 @@ for (const id of ["table", "kind", "state", "range"]) {
   $(id).onchange = () => { cursor = null; rows = []; loadRecords(); };
 }
 
-async function api(path) {
-  const response = await fetch(path, { headers: { "X-API-Key": key() } });
+async function api(path, { method = "GET", body } = {}) {
+  const response = await fetch(path, {
+    method,
+    headers: body
+      ? { "X-API-Key": key(), "Content-Type": "application/json" }
+      : { "X-API-Key": key() },
+    body: body ? JSON.stringify(body) : undefined,
+  });
   if (response.status === 401) throw new Error("no key, or the key was rejected");
-  if (!response.ok) throw new Error(`${path} answered ${response.status}`);
-  return response.json();
+  const text = await response.text();
+  let parsed = null;
+  try { parsed = text ? JSON.parse(text) : null; } catch { parsed = null; }
+  if (!response.ok) {
+    // The API answers every error in one shape, so the message it wrote for a
+    // person is the one to show. Falling back to the status code alone turns
+    // "the video has no caption track" into "422".
+    const said = parsed && parsed.error ? parsed.error.message : `${path} answered ${response.status}`;
+    throw new Error(said);
+  }
+  return { status: response.status, body: parsed };
 }
+
+function say(message, bad) {
+  $("said").hidden = false;
+  $("said").className = bad ? "said bad" : "said";
+  $("said").textContent = message;
+}
+
+function show(title, value) {
+  $("viewer-title").textContent = title;
+  $("viewer-body").textContent = JSON.stringify(value, null, 2);
+  $("viewer").classList.add("open");
+  $("viewer").scrollIntoView({ block: "nearest" });
+}
+$("viewer-close").onclick = () => $("viewer").classList.remove("open");
 
 const ago = (iso) => {
   if (!iso) return "—";
@@ -142,6 +220,30 @@ const bytes = (n) => n == null ? "—"
   : n < 1024 ? `${n} B` : n < 1048576 ? `${(n / 1024).toFixed(1)} KiB` : `${(n / 1048576).toFixed(1)} MiB`;
 const escape = (value) => String(value ?? "").replace(/[<>&"]/g, (c) =>
   ({ "<": "&lt;", ">": "&gt;", "&": "&amp;", '"': "&quot;" }[c]));
+
+let paused = false;
+
+async function loadControl() {
+  const control = (await api("/v1/control")).body;
+  paused = control.paused;
+  $("pause").textContent = paused ? "resume" : "pause";
+  // Say what pausing does and does not do, where the button is. It stops the
+  // worker claiming; it does not stop an extraction already in flight, which
+  // keeps spending requests until it finishes.
+  $("control-said").textContent = paused
+    ? `claiming nothing${control.reason ? " — " + control.reason : ""}; work already running still finishes`
+    : "";
+}
+
+$("pause").onclick = async () => {
+  try {
+    const reason = paused ? null : (prompt("why? (optional — helps whoever lifts it)") || null);
+    await api("/v1/control", { method: "PATCH", body: { paused: !paused, reason } });
+    await load();
+  } catch (error) {
+    say(error.message, true);
+  }
+};
 
 async function loadHealth() {
   const health = await api("/healthz");
@@ -157,12 +259,33 @@ async function loadHealth() {
       <td class="status ${source.status}">${source.status}</td>
       <td>${source.consecutive_failures || ""}</td>
       <td>${ago(source.last_success_at)}</td>
-      <td class="err">${escape(source.last_error_code || "")}</td>
+      <td class="err" title="${escape(source.last_error_message || "")}">${escape(source.last_error_code || "")}${
+        source.last_error_message ? ": " + escape(source.last_error_message.slice(0, 90)) : ""}</td>
     </tr>`).join("");
 
+  // A quarantined route and an empty queue look identical from here unless
+  // this says otherwise, which is the whole reason the worker writes it down.
+  $("lanes").innerHTML = health.lanes.length
+    ? "<tr><th>egress</th><th>lane</th><th>window</th><th>in flight</th><th>state</th><th>seen</th></tr>" +
+      health.lanes.map((lane) => {
+        const held = lane.quarantined_until && new Date(lane.quarantined_until) > new Date();
+        return `<tr>
+          <td class="mono">${escape(lane.egress)}</td>
+          <td class="mono">${escape(lane.lane)}</td>
+          <td>${lane.window.toFixed(2)}</td>
+          <td>${lane.in_flight}</td>
+          <td class="status ${held ? "blocked" : "healthy"}">${held
+            ? "quarantined, " + ago(lane.quarantined_until).replace(" ago", " left")
+            : "open"}${lane.quarantine_streak ? ` (streak ${lane.quarantine_streak})` : ""}</td>
+          <td>${ago(lane.observed_at)}</td>
+        </tr>`;
+      }).join("")
+    : '<tr><td class="note">no route has been used yet</td></tr>';
+
   if (!$("kind").dataset.filled) {
-    $("kind").innerHTML = '<option value="">any kind</option>' +
-      health.sources.map((source) => `<option>${escape(source.kind)}</option>`).join("");
+    const options = health.sources.map((source) => `<option>${escape(source.kind)}</option>`).join("");
+    $("kind").innerHTML = '<option value="">any kind</option>' + options;
+    $("new-kind").innerHTML = options;
     $("kind").dataset.filled = "1";
   }
 }
@@ -206,9 +329,9 @@ async function loadRecords() {
   if (!rows.length) { $("records").innerHTML = '<tr><td class="note">nothing in this range</td></tr>'; return; }
 
   $("records").innerHTML = table === "jobs"
-    ? "<tr><th>id</th><th>kind</th><th>target</th><th>state</th><th>try</th><th>size</th><th>created</th><th>error</th></tr>" +
+    ? "<tr><th>id</th><th>kind</th><th>target</th><th>state</th><th>try</th><th>size</th><th>created</th><th>error</th><th></th></tr>" +
       rows.map((job) => `<tr>
-        <td class="mono">${escape(job.job_id.slice(0, 8))}</td>
+        <td class="mono" title="${escape(job.job_id)}${job.api_key_id ? "\nsubmitted by key " + escape(job.api_key_id) : ""}${job.claimed_by ? "\nheld by " + escape(job.claimed_by) : ""}">${escape(job.job_id.slice(0, 8))}</td>
         <td class="mono">${escape(job.kind)}</td>
         <td class="mono">${escape(job.target)}</td>
         <td class="status ${job.state}">${job.state}</td>
@@ -216,20 +339,141 @@ async function loadRecords() {
         <td>${bytes(job.payload_bytes)}</td>
         <td>${ago(job.created_at)}</td>
         <td class="err">${escape(job.error_code || "")}${job.error_message ? ": " + escape(job.error_message.slice(0, 70)) : ""}</td>
+        <td class="actions">${actionsFor(job)}</td>
       </tr>`).join("")
-    : "<tr><th>kind</th><th>target</th><th>size</th><th>collected</th><th>fresh until</th><th class='mono'>digest</th></tr>" +
+    : "<tr><th>kind</th><th>target</th><th>schema</th><th>size</th><th>collected</th><th>fresh until</th><th class='mono'>digest</th></tr>" +
       rows.map((artifact) => `<tr>
         <td class="mono">${escape(artifact.kind)}</td>
         <td class="mono">${escape(artifact.target)}</td>
+        <td class="mono">${escape(artifact.schema_version || "—")}</td>
         <td>${bytes(artifact.byte_count)}</td>
         <td>${ago(artifact.fetched_at)}</td>
         <td>${new Date(artifact.fresh_until) > new Date() ? ago(artifact.fresh_until).replace(" ago", " left") : "stale"}</td>
-        <td class="mono">${escape(artifact.digest.slice(0, 12))}</td>
+        <td class="mono digest" data-digest="${escape(artifact.digest)}" title="read this observation">${escape(artifact.digest.slice(0, 12))}</td>
       </tr>`).join("");
+}
+
+async function submit(kind, target, refresh) {
+  try {
+    const answer = await api("/v1/jobs", { method: "POST", body: { kind, target, refresh } });
+    if (answer.status === 200) {
+      // Not an optimisation detail to hide: a fresh artifact already existed,
+      // so this cost no job at all. Showing it is what stops someone
+      // wondering why nothing appeared in the queue.
+      say(`${kind} for ${target} was already held; showing what is stored`);
+      show(`${kind} — ${target} (already held)`, answer.body);
+    } else {
+      say(`queued ${answer.body.job_id.slice(0, 8)}  ${kind}  ${answer.body.target}`);
+    }
+    await load();
+  } catch (error) {
+    say(error.message, true);
+  }
+}
+
+async function submitMany(kind, targets, refresh) {
+  try {
+    // One request rather than one per target: a key is allowed sixty a minute,
+    // so a hundred-target sweep sent one at a time stalls before it is half
+    // done. The batch refuses all of them if one is malformed, which is why
+    // nothing here reports a partial success.
+    const answer = await api("/v1/jobs/batch", {
+      method: "POST",
+      body: { kind, targets, refresh },
+    });
+    const { queued, held } = answer.body;
+    say(`queued ${queued.length} of ${targets.length}`
+      + (held.length ? `; ${held.length} already held` : ""));
+    if (held.length) {
+      // The batch answers with a digest per held target rather than a payload,
+      // so the useful thing to do with them is offer to read one.
+      $("said").innerHTML += " — " + held.map((one) =>
+        `<span class="digest" data-digest="${escape(one.digest)}">${escape(one.target)}</span>`
+      ).join(", ");
+    }
+    await load();
+  } catch (error) {
+    say(error.message, true);
+  }
+}
+
+$("submit").onclick = () => {
+  const targets = $("new-target").value.split(/[\n,]/).map((one) => one.trim()).filter(Boolean);
+  if (!targets.length) { say("name something to collect", true); return; }
+  const kind = $("new-kind").value;
+  const refresh = $("new-refresh").checked;
+  // A single target keeps the single-target route, because that one answers
+  // 200 with the stored payload when it is already held — which is worth
+  // showing, and which a batch deliberately does not do.
+  if (targets.length === 1) submit(kind, targets[0], refresh);
+  else submitMany(kind, targets, refresh);
+};
+$("new-target").onkeydown = (event) => { if (event.key === "Enter") $("submit").click(); };
+
+async function openDigest(digest) {
+  const answer = await api(`/v1/artifacts/${digest}`);
+  const held = answer.body;
+  const missing = held.current_fields.filter((one) => !held.payload_fields.includes(one));
+  show(
+    `${held.kind} — ${held.target} @ schema ${held.schema_version ?? "unrecorded"}`
+      + ` · ${held.observations} observation${held.observations === 1 ? "" : "s"}`
+      + (missing.length ? ` · absent: ${missing.join(", ")}` : ""),
+    held,
+  );
+}
+
+// Delegated, because the rows are replaced on every refresh.
+$("said").onclick = async (event) => {
+  const cell = event.target.closest("[data-digest]");
+  if (!cell) return;
+  try { await openDigest(cell.dataset.digest); } catch (error) { say(error.message, true); }
+};
+
+$("records").onclick = async (event) => {
+  const button = event.target.closest("[data-do]");
+  const cell = event.target.closest("[data-digest]");
+  try {
+    if (button) {
+      const { do: action, job, kind, target } = button.dataset;
+      if (action === "cancel") {
+        const answer = await api(`/v1/jobs/${job}`, { method: "DELETE" });
+        // Read the state that comes back: `running` means the request was
+        // recorded and the extraction is still spending requests.
+        say(answer.body.state === "cancelled"
+          ? `${job.slice(0, 8)} cancelled; it never ran`
+          : `${job.slice(0, 8)} is ${answer.body.state} — it will not be retried, but the work already in flight is still going`);
+        await load();
+      } else if (action === "result") {
+        const answer = await api(`/v1/jobs/${job}/result`);
+        show(`${kind} — ${target}`, answer.body);
+      } else if (action === "again") {
+        // A new job, not a resumed one: attempts start over. Forced, because
+        // asking again for something the cache still holds is a no-op.
+        await submit(kind, target, true);
+      }
+    } else if (cell) {
+      await openDigest(cell.dataset.digest);
+    }
+  } catch (error) {
+    say(error.message, true);
+  }
+};
+
+function actionsFor(job) {
+  const common = `data-job="${escape(job.job_id)}" data-kind="${escape(job.kind)}" data-target="${escape(job.target)}"`;
+  if (job.state === "queued" || job.state === "running") {
+    return `<button class="act" data-do="cancel" ${common}>cancel</button>`;
+  }
+  if (job.state === "succeeded") {
+    return `<button class="act" data-do="result" ${common}>result</button>`
+      + ` <button class="act" data-do="again" ${common}>again</button>`;
+  }
+  return `<button class="act" data-do="again" ${common}>again</button>`;
 }
 
 async function load() {
   try {
+    await loadControl();
     await loadHealth();
     cursor = null; rows = [];
     await loadRecords();

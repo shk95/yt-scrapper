@@ -1,0 +1,319 @@
+# The whole thing as containers: migrate once, then the API, the worker and
+# the watcher.
+#
+#   cp deploy/.env.example deploy/.env && $EDITOR deploy/.env
+#   docker compose -f deploy/docker-compose.yml up -d
+#
+# The database is assumed to be **external** — the fleet PostgreSQL this
+# service shares with the other scrapers (docs/shared-postgres.md). A local
+# one is behind `--profile local`, for verifying this file and for a laptop
+# with nothing else to point at:
+#
+#   docker compose -f deploy/docker-compose.yml --profile local up -d
+#
+# One image for all four services (see the Dockerfile); they differ only by
+# their `command:`.
+
+name: tubedepth
+
+# --------------------------------------------------------------------------
+# The env block api, worker and watch all share.
+#
+# A YAML anchor rather than three hand-kept copies, and that is a correctness
+# requirement rather than tidiness. TUBEDEPTH_LISTING_LIMIT,
+# TUBEDEPTH_COMMENT_LIMIT and TUBEDEPTH_TRENDING_LIMIT are read exactly once
+# per process, inside `@cache def default_registry()`
+# (src/tubedepth/sources/__init__.py), and they flow into
+# `cache_parameters_of(source)` → `fingerprint(parameters=...)`
+# (collection.py, fingerprints.py). Two processes with different values
+# compute different SHA-256 cache keys: the worker records answers under one
+# key and the API looks them up under another, so the API answers a question
+# the worker never collected — with data collected at the old cap, silently.
+# The systemd units carry the same warning and rely on a human to obey it;
+# here the two blocks are the same object, so they cannot drift.
+#
+# The defaults below are the code's own defaults (listings.DEFAULT_LIMIT=100,
+# comments.DEFAULT_LIMIT=200, trending.DEFAULT_LIMIT=200), written out so that
+# what is in effect is readable here rather than only in the source.
+#
+# TUBEDEPTH_DATABASE_URL embeds a password, so it is interpolated from the
+# environment (`deploy/.env`) and never written here. Nothing in this file is
+# a secret literal.
+x-runtime-environment: &runtime-environment
+  # The runtime role: DML only, no DDL. `migrate` uses a different credential
+  # below — see docs/shared-postgres.md rule 1.
+  TUBEDEPTH_DATABASE_URL: ${TUBEDEPTH_DATABASE_URL:?set it in deploy/.env — the tubedepth_runtime URL}
+  TUBEDEPTH_DATA_DIR: /var/lib/tubedepth
+  TUBEDEPTH_LISTING_LIMIT: ${TUBEDEPTH_LISTING_LIMIT:-100}
+  TUBEDEPTH_COMMENT_LIMIT: ${TUBEDEPTH_COMMENT_LIMIT:-200}
+  TUBEDEPTH_TRENDING_LIMIT: ${TUBEDEPTH_TRENDING_LIMIT:-200}
+  # Only `trending.videos` needs it — it reads the official Data API and
+  # spends Google's quota rather than the per-address budget. Empty is the
+  # safe default: the source refuses that kind as a configuration error and
+  # nothing else is affected (sources/trending.py).
+  TUBEDEPTH_DATA_API_KEY: ${TUBEDEPTH_DATA_API_KEY:-}
+
+services:
+  # ------------------------------------------------------------------------
+  # A PostgreSQL to point at when there is no fleet one. `--profile local`
+  # only: leaving it out of the default set is what keeps `up` from quietly
+  # standing up a second database beside the real one.
+  # ------------------------------------------------------------------------
+  postgres:
+    profiles: [local]
+    # The major the deployment runs, same as CI and tool/checks/test. A
+    # migration is checked against a version or it is not checked.
+    image: postgres:18-alpine
+    environment:
+      POSTGRES_USER: ${TUBEDEPTH_LOCAL_SUPERUSER:-fleet}
+      POSTGRES_PASSWORD: ${TUBEDEPTH_LOCAL_SUPERUSER_PASSWORD:?set it in deploy/.env}
+      POSTGRES_DB: ${TUBEDEPTH_LOCAL_DATABASE:-fleet}
+      # Read by the initdb wrapper below, which is the only thing that needs
+      # them; the application never logs in as either of these two roles at
+      # bootstrap time.
+      TUBEDEPTH_MIGRATOR_PASSWORD: ${TUBEDEPTH_LOCAL_MIGRATOR_PASSWORD:?set it in deploy/.env}
+      TUBEDEPTH_RUNTIME_PASSWORD: ${TUBEDEPTH_LOCAL_RUNTIME_PASSWORD:?set it in deploy/.env}
+    volumes:
+      # The same file a real deployment runs, so what this stack is checked
+      # against is the shape production has — roles, the search_path that
+      # decides where alembic_version lands, the session timeouts, and the
+      # connection limit.
+      #
+      # Mounted *outside* /docker-entrypoint-initdb.d on purpose. initdb runs
+      # `.sql` files there with plain `psql -f` and no `-v` variables, and this
+      # file requires three (`:password`, `:runtime_password`, `:database`), so
+      # dropped in directly it fails on the first `PASSWORD :password`. The
+      # wrapper in postgres-initdb/ supplies them. Keeping the SQL itself out
+      # of the initdb directory is what keeps it the single copy rather than a
+      # containerised variant of it.
+      - ./postgres-bootstrap.sql:/opt/tubedepth/postgres-bootstrap.sql:ro
+      - ./postgres-initdb:/docker-entrypoint-initdb.d:ro
+      # `/var/lib/postgresql`, not the `/var/lib/postgresql/data` every
+      # pre-18 example uses. The 18+ images store the cluster in a
+      # major-version-named subdirectory so `pg_upgrade --link` does not cross
+      # a mount boundary, and they refuse to start — "there appears to be
+      # PostgreSQL data in /var/lib/postgresql/data (unused mount/volume)" —
+      # when the old path is mounted instead.
+      - postgres-data:/var/lib/postgresql
+    healthcheck:
+      # `migrate` waits on this. The entrypoint runs a temporary local-only
+      # server during initdb, so a check that passes early would let migrate
+      # connect to a database the bootstrap has not finished creating.
+      test:
+        [
+          "CMD-SHELL",
+          "pg_isready -U ${TUBEDEPTH_LOCAL_SUPERUSER:-fleet} -d ${TUBEDEPTH_LOCAL_DATABASE:-fleet}",
+        ]
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 10s
+    # No published port. The three services that need it reach it over the
+    # compose network by name, and publishing it would collide with whatever
+    # PostgreSQL is already on this host.
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------------
+  # The one reviewed path a schema change takes. Runs to completion and exits.
+  # ------------------------------------------------------------------------
+  migrate:
+    image: ${TUBEDEPTH_IMAGE:-tubedepth:dev}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    command: migrate
+    environment:
+      # The **migrator** credential, not the runtime one: `tubedepth migrate`
+      # runs alembic, which does `SET ROLE tubedepth_owner` and issues DDL.
+      # The runtime role has DML only and would fail on the first CREATE.
+      TUBEDEPTH_DATABASE_URL: ${TUBEDEPTH_MIGRATOR_DATABASE_URL:?set it in deploy/.env — the tubedepth_migrator URL}
+      TUBEDEPTH_DATA_DIR: /var/lib/tubedepth
+    volumes:
+      - tubedepth-data:/var/lib/tubedepth
+    depends_on:
+      postgres:
+        condition: service_healthy
+        # `required: false` because `postgres` is in the `local` profile and
+        # this service is not. Without it, an `up` with no profile fails on a
+        # dependency that was never meant to exist — the external fleet
+        # database is the default, and there is nothing here to wait for.
+        required: false
+    # A one-shot. It exits 0, and everything else waits for that.
+    restart: "no"
+
+  # ------------------------------------------------------------------------
+  # The HTTP API and dashboard.
+  # ------------------------------------------------------------------------
+  api:
+    image: ${TUBEDEPTH_IMAGE:-tubedepth:dev}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    # `--host 0.0.0.0`, which the systemd unit deliberately does not do.
+    # `serve` defaults to 127.0.0.1 (cli.py) — the right default for a process
+    # on a host, and useless in a container, where loopback is the container's
+    # own and nothing outside can reach it. What makes it safe here is that a
+    # container's network is private until a port is published, and the
+    # `ports:` line below is where that decision is made, explicitly and in
+    # one place. On a host there is no such gate, which is why
+    # tests/test_deployment_units.py asserts `--host 127.0.0.1` for the
+    # `*.service` files and says so. Authentication here is still a header,
+    # not TLS: put a reverse proxy in front before publishing this anywhere
+    # but a private network.
+    command: serve --host 0.0.0.0 --port 8080
+    environment: *runtime-environment
+    ports:
+      - "${TUBEDEPTH_API_PORT:-8080}:8080"
+    volumes:
+      # The payload store. Payload bytes are gzipped files on disk at
+      # $TUBEDEPTH_DATA_DIR/payloads/<kind>/<xx>/<sha256>.json.gz
+      # (payload_store.py), not database rows — the API serves bytes the
+      # worker wrote, so the two must see the same directory or every
+      # `GET /v1/artifacts/{digest}` is a 404 against an index that says the
+      # artifact exists.
+      - tubedepth-data:/var/lib/tubedepth
+    depends_on:
+      migrate:
+        # Not `service_started`. A schema change goes through `migrate` and
+        # nowhere else (#14, docs/shared-postgres.md §6) — the boot path
+        # issues no DDL, so an API that starts before the migration finishes
+        # does not create what it is missing, it fails naming the fix. Waiting
+        # for a *successful* completion is also what stops a failed migration
+        # from being followed by a running-but-wrong stack.
+        condition: service_completed_successfully
+    healthcheck:
+      # The image carries no HEALTHCHECK on purpose (see the Dockerfile): it
+      # would be wrong for the worker, the watcher and the one-shot. Here it
+      # applies to the one service that answers a port.
+      #
+      # /healthz is unauthenticated on purpose (api/application.py) — something
+      # has to be reachable before you have a key, or a broken deploy cannot be
+      # diagnosed from outside. Checked with python because this image is a
+      # slim base with no curl and no wget.
+      test:
+        [
+          "CMD",
+          "python",
+          "-c",
+          "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8080/healthz').read()",
+        ]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------------
+  # The worker: claims jobs, collects, retries, reaps, sweeps, calls back.
+  # ------------------------------------------------------------------------
+  worker:
+    image: ${TUBEDEPTH_IMAGE:-tubedepth:dev}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    # `--poll` is not optional here. Its default is 0.0, which drains the
+    # queue once and exits — and with `restart: unless-stopped` below, an
+    # exiting worker becomes a poll loop made of container starts: a full
+    # interpreter launch and a fresh set of database connections every few
+    # seconds, almost always to find nothing (the measurements are in the
+    # worker unit's comment). With it the process stays up and an idle tick is
+    # one query.
+    #
+    # `--concurrency` on the command line rather than TUBEDEPTH_CONCURRENCY in
+    # the env block, for two reasons: it keeps the api and worker env blocks
+    # identical (they are the same anchor, and one extra key would make them
+    # different objects), and it puts the number on a line
+    # `test_the_connection_budget_agrees_everywhere_it_is_declared` can read —
+    # that test now parses `--concurrency N` out of this `command:` and
+    # refuses to pass unless it equals the worker unit's
+    # TUBEDEPTH_CONCURRENCY.
+    #
+    # **6 is not a free parameter.** A worker at concurrency C holds up to 2C
+    # write connections (one claim thread and one lease-renewal thread per
+    # unit) plus the read engine's 2+2, so total = 2C + 13; the fleet granted
+    # this service 32 (service-db.json, postgres-bootstrap.sql's CONNECTION
+    # LIMIT, the worker unit, database.py's comment). Change it in all five or
+    # in none — and the test is what makes that a failure rather than a
+    # discovery.
+    command: work --poll 5 --concurrency 6
+    environment: *runtime-environment
+    volumes:
+      # Same volume as the API, and this is the writer.
+      - tubedepth-data:/var/lib/tubedepth
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # The worker handles SIGTERM and SIGINT (`_stopping_on_signals` in
+    # cli.py): the current job finishes and its lease is released, instead of
+    # being abandoned to wait out the full lease before another worker may
+    # take it. Compose sends SIGTERM and then SIGKILL after this window, so a
+    # short grace period would throw away exactly the shutdown that handler
+    # exists to provide. 120s matches TimeoutStopSec in
+    # deploy/tubedepth-worker.service, sized against a comment or transcript
+    # harvest in flight.
+    stop_grace_period: 120s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------------
+  # The watcher: one pass of the watch list every interval, forced.
+  # ------------------------------------------------------------------------
+  watch:
+    image: ${TUBEDEPTH_IMAGE:-tubedepth:dev}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    # `--every` exists for exactly this: compose has no timers. On a host,
+    # `deploy/tubedepth-watch.timer` runs the one-shot form hourly and
+    # survives a suspend via `Persistent=true`; here there is no scheduler, so
+    # the process stays resident and re-reads the list on every pass — an edit
+    # to the watch list needs no restart.
+    #
+    # The list is a required positional argument (envvar TUBEDEPTH_WATCHLIST),
+    # not an option with a default, because the failure worth designing
+    # against is a watcher that quietly watches nothing. Bind-mounted
+    # read-only from the host; point TUBEDEPTH_WATCHLIST_FILE at your own list
+    # rather than editing the committed example. A list that parses to nothing
+    # is refused as well (`_watch_pass`), so a file whose lines have all been
+    # commented out exits non-zero and this `restart:` makes it a visible
+    # restart loop — which is the intent: a watcher reporting success every
+    # hour while watching nothing is the failure the command is shaped
+    # against.
+    #
+    # **This costs connections `service-db.json` does not budget for.** That
+    # manifest decomposes the 32 as api 8 + worker 2C+4 + migration 1 +
+    # service_spare 7, with `workers_and_schedulers: 0` — true while the only
+    # scheduler was a systemd one-shot that lived for milliseconds. Resident,
+    # this container goes through the same `_database()` as everything else, so
+    # it builds a write engine (2+2) and a read engine (2+2) and keeps their
+    # idle connections for the life of the container: about 2 in steady state
+    # (one pass takes one write session, and the placement check takes one
+    # read), 8 at the pool ceiling. It comes out of `service_spare`, which is
+    # why the numbers still add up and why this is a comment rather than an
+    # edit to the manifest. See docs/status.md.
+    command: watch /etc/tubedepth/watchlist.txt --every 3600
+    environment: *runtime-environment
+    volumes:
+      - ${TUBEDEPTH_WATCHLIST_FILE:-./watchlist.example.txt}:/etc/tubedepth/watchlist.txt:ro
+      # It does **not** need the payload bytes — `watch` only queues rows, and
+      # writes nothing under the store. It gets the volume anyway because it
+      # shares the env anchor above, so TUBEDEPTH_DATA_DIR names the same path
+      # in this container; mounting it keeps that path the directory it claims
+      # to be instead of an empty one that merely looks like it.
+      - tubedepth-data:/var/lib/tubedepth
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+    # Also handled by `_stopping_on_signals`, but a pass is milliseconds of
+    # queueing rather than a collection, so it needs far less room than the
+    # worker.
+    stop_grace_period: 30s
+    restart: unless-stopped
+
+volumes:
+  # Named, not a bind mount: the store is written by a non-root user inside
+  # the container (uid 10001), and a named volume inherits the image's
+  # ownership of /var/lib/tubedepth on first use, while a host bind mount
+  # arrives owned by whoever created the directory.
+  tubedepth-data:
+  # `local` profile only in practice — nothing else in this file writes to it.
+  postgres-data:

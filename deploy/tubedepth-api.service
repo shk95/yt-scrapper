@@ -20,7 +20,37 @@ Wants=network-online.target
 [Service]
 Type=exec
 WorkingDirectory=%h/github_prj/yt-scrapper
+# systemd gives a user service a minimal PATH of its own — the shell's is not
+# inherited — and uv lives in a nix profile under $HOME on this host, because
+# there is no passwordless sudo here (see AGENTS.md). Without this line
+# `/usr/bin/env uv` resolves to nothing and the unit exits 127 the first time
+# it is enabled.
+Environment=PATH=%h/.nix-profile/bin:/usr/local/bin:/usr/bin:/bin
 Environment=TUBEDEPTH_DATA_DIR=%h/github_prj/yt-scrapper/var
+# Required since the PostgreSQL cutover (#15) — tubedepth has no SQLite
+# fallback, and every command this unit runs refuses to start without
+# TUBEDEPTH_DATABASE_URL. A URL is a credential (it embeds a password), so it
+# belongs in an EnvironmentFile with mode 0600 rather than directly in this
+# file, which is world-readable in the unit directory:
+#
+#   mkdir -p ~/.config/tubedepth
+#   echo 'TUBEDEPTH_DATABASE_URL=postgresql+psycopg://tubedepth_runtime:...@host/db' \
+#     > ~/.config/tubedepth/database.env
+#   chmod 0600 ~/.config/tubedepth/database.env
+EnvironmentFile=%h/.config/tubedepth/database.env
+# How many items a listing kind collects, and how many comments a harvest
+# takes. Deployment-wide caps rather than per-request, and **set them the same
+# in the api unit and the worker unit**: each process reads them once, and if
+# the two disagree the API computes a different cache key than the worker
+# records — so it serves a listing collected at the old cap for a request the
+# worker would have collected at the new one. `GET /v1/sources` reports the
+# effective values in each, which is how they are compared.
+#
+# Not free. A bigger listing is one extraction to yt-dlp and many continuation
+# requests underneath, out of the same per-address budget everything else
+# draws on. Measure before making a big number the default.
+#Environment=TUBEDEPTH_LISTING_LIMIT=100
+#Environment=TUBEDEPTH_COMMENT_LIMIT=200
 # --frozen so a restart cannot silently resolve a newer dependency than the one
 # in uv.lock. A service that upgrades itself on restart is a service whose
 # version nobody can state, and yt-dlp is deliberately uncapped in
@@ -35,7 +65,10 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=read-only
-ReadWritePaths=%h/github_prj/yt-scrapper/var
+# uv writes while it runs, and ProtectHome=read-only covers all of it: its
+# cache under ~/.cache/uv, and a lock inside the project's .venv. Naming the
+# three paths keeps the sandbox strict; loosening ProtectHome would not.
+ReadWritePaths=%h/github_prj/yt-scrapper/var %h/github_prj/yt-scrapper/.venv %h/.cache/uv
 ProtectKernelTunables=true
 ProtectControlGroups=true
 RestrictSUIDSGID=true

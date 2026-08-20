@@ -10,12 +10,14 @@ renderer names YouTube does not version for anyone.
 from __future__ import annotations
 
 from datetime import timedelta
+from typing import Any
 
 from pydantic import BaseModel
 
 from ..egress.control import Lane
 from ..egress.transport import Egress
-from ..errors import ExtractionError
+from ..errors import ExtractionError, ValidationError
+from ..fixture_capture import redact_innertube_response
 from ..identifiers import TargetType
 from ..innertube.client import InnerTubeCaller, InnerTubeClient
 from ..innertube.parsers import (
@@ -58,6 +60,45 @@ def browse_id_for(client: InnerTubeCaller, target: str) -> str:
     return browse_id
 
 
+# The InnerTube surfaces there are committed fixtures for. Recording goes
+# through the same helpers the sources use, so a fixture is what production
+# receives rather than something shaped like it.
+RECORDABLE_SURFACES = ("next-related", "browse-channel-home", "browse-community")
+
+
+def record_surface(surface: str, target: str, *, caller: InnerTubeCaller) -> dict[str, Any]:
+    """One InnerTube response, redacted and ready to commit.
+
+    `redact_innertube_response` had no caller outside its own test, because
+    nothing could record an InnerTube fixture at all — `capture-fixture` drives
+    yt-dlp and applies the other rule. So the fixtures in the tree were made by
+    hand, and the redaction ran only if whoever made them remembered it. Its
+    own docstring records that this already failed once; the hygiene guard
+    catches a signed URL after it is in git history, where deleting the file
+    does not remove it.
+
+    `browse-channel-about` is deliberately not here. Its data sits behind a
+    continuation token read from a first response at runtime, so recording it
+    needs `ChannelAboutSource`'s own two-call flow rather than one request —
+    and a half-right fixture for the surface that has already broken once is
+    worse than none.
+    """
+    if surface == "next-related":
+        response = caller.call("next", {"videoId": target})
+    elif surface == "browse-channel-home":
+        response = caller.call("browse", {"browseId": browse_id_for(caller, target)})
+    elif surface == "browse-community":
+        response = caller.call(
+            "browse", {"browseId": browse_id_for(caller, target), "params": COMMUNITY_PARAMS}
+        )
+    else:
+        raise ValidationError(
+            f"no recording is defined for the InnerTube surface: {surface} "
+            f"(known: {', '.join(RECORDABLE_SURFACES)})"
+        )
+    return redact_innertube_response(response)
+
+
 class RelatedVideosSource:
     kind = "video.related"
     target_type = TargetType.VIDEO
@@ -97,6 +138,11 @@ class ChannelAboutSource:
     # 2: was the channel home tab read as if it were the about panel, which
     # returned a video's description as the channel's and nothing else at all.
     schema_version = "2"
+    # v1 read the home tab as the about panel, so its stored payloads hold a
+    # video's description where the channel's belongs. That is wrong rather
+    # than old: there is nothing in those bytes to lift, and serving them as
+    # history would launder a known-bad observation.
+    retracted_versions = frozenset({"1"})
     payload_model: type[BaseModel] = ChannelAbout
     # Join date, country and links effectively never change.
     default_freshness = timedelta(days=7)

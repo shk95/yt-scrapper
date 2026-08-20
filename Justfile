@@ -17,7 +17,9 @@ default:
 doctor:
     tool/doctor.sh
 
-# Formatting, static analysis and the offline test suite.
+# Formatting, static analysis and the test suite — offline of YouTube (no
+# socket to the real internet, tests/conftest.py enforces it), but needs
+# Docker: tool/checks/test brings up a throwaway PostgreSQL container.
 [group('repository')]
 check:
     tool/checks/format
@@ -50,19 +52,34 @@ test:
 contract:
     uv run pytest -m live
 
+# `just test` (and so `just check`) needs a real PostgreSQL server since
+# Task 7 (issue #15 — "the tests move too"): `database_url_for_tests` names a
+# schema on one for nearly every test in the suite now, not just the handful
+# that used to be marked `postgres`. `tool/checks/test` brings one up itself,
+# with `deploy/postgres-bootstrap.sql` — the same file a real deployment
+# runs, so what is checked is the shape production has — when nothing has
+# already named one, and tears it down again on exit.
+#
+# `just postgres` is kept as the explicit name several tests' skip messages
+# point to ("set TUBEDEPTH_TEST_POSTGRES_URL, or run `just postgres`"); it is
+# now the same recipe as `just test`.
+
+# Bring up a throwaway PostgreSQL, run the whole suite against it, remove it
+[group('repository')]
+postgres: test
+
 ############################################################################
 #
 #  running it
 #
 ############################################################################
 
-# API plus an in-process worker. For demos and development only; production
-# runs the two as separate units so a yt-dlp crash cannot take the API down.
-
-# Run the API with an in-process worker (development only)
-[group('run')]
-dev port="8080":
-    uv run tubedepth serve --with-worker --port {{port}}
+# The API and the worker are two processes here for the same reason they are
+# two units in production: yt-dlp extraction blocks and holds memory, and a
+# crash in it must not take the API with it. Run them in two terminals.
+#
+# There used to be a `dev` recipe here promising `serve --with-worker`. That
+# option has never existed, so the recipe has never run.
 
 [group('run')]
 serve port="8080":
@@ -70,33 +87,35 @@ serve port="8080":
 
 [group('run')]
 worker:
-    uv run tubedepth worker
+    uv run tubedepth work
 
-############################################################################
+# The same two processes plus the migration and the watcher, in containers.
 #
-#  egress pool
+# `--profile local` is what adds a PostgreSQL of its own; without it the stack
+# expects the external fleet one, which is the default deploy/docker-compose.yml
+# is written for. Copy `deploy/.env.example` to `deploy/.env` first — the
+# database URLs live there and nowhere else, because a compose file is
+# committed and a URL embeds a password.
 #
-############################################################################
+# `--build` because the image is tagged rather than pulled: without it a code
+# change is invisible and you spend the afternoon debugging the last build.
+# `--wait` blocks until `migrate` has exited 0 and the API's /healthz answers,
+# so a stack that did not come up is this command failing rather than a
+# `docker compose ps` somebody has to think to read.
 
-# The check that matters: an egress reporting the SAME public address as
-# `direct` has no tunnel and is silently leaking the origin IP.
+# Build the image and bring the whole stack up, on a PostgreSQL of its own
+[group('run')]
+compose-up:
+    docker compose -f deploy/docker-compose.yml --profile local up -d --build --wait
 
-# Show each egress's public address, country and health
-[group('egress')]
-egress-probe:
-    uv run tubedepth egress probe
+# Stops without removing the volumes. The payload store is one of them, and a
+# month of watching is not something to delete as a side effect of stopping a
+# stack — add `-v` yourself, at the moment you mean it.
 
-[group('egress')]
-egress-status:
-    uv run tubedepth egress status
-
-# Reads egress_attempt. This is the answer to "what does one IP actually
-# sustain against YouTube", which nobody can tell you in advance.
-
-# Report measured per-egress throughput and block rates
-[group('egress')]
-egress-report since="24h":
-    uv run tubedepth egress report --since {{since}}
+# Stop the stack, keeping the payload store and the database
+[group('run')]
+compose-down:
+    docker compose -f deploy/docker-compose.yml --profile local down
 
 ############################################################################
 #
@@ -108,10 +127,27 @@ egress-report since="24h":
 # the fixtures are pretty-printed and stripped of tracking noise, that diff is
 # a readable list of what YouTube changed.
 
-# Re-record the InnerTube and yt-dlp fixtures
+# Record one fixture at a time. There is still no way to re-record them all;
+# the InnerTube recipe below is what closed the other half of issue #10.
+
+# Record a yt-dlp fixture for one video
 [group('data')]
-fixtures-refresh:
-    uv run tubedepth capture-fixture --all
+fixture-capture target name:
+    uv run tubedepth capture-fixture {{target}} --name {{name}}
+
+# Run after a deliberate schema_version bump. Refuses to rewrite a shape
+# already recorded against the version that is still current — the only way to
+# make that check pass is the bump it is asking for.
+
+# Append the current payload shapes to the lock
+[group('repository')]
+record-payload-shapes:
+    uv run pytest tests/test_payload_shapes.py --record-payload-shapes
+
+# Record an InnerTube fixture: next-related, browse-channel-home, browse-community
+[group('data')]
+fixture-capture-innertube surface target name:
+    uv run tubedepth capture-fixture {{target}} --name {{name}} --innertube {{surface}}
 
 ############################################################################
 #

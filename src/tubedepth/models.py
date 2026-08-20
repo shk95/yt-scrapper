@@ -9,7 +9,7 @@ import enum
 import uuid
 from datetime import UTC, datetime
 
-from sqlalchemy import DateTime, Enum, Index, Integer, String, Text, TypeDecorator
+from sqlalchemy import DateTime, Enum, Float, Index, Integer, String, Text, TypeDecorator
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -25,13 +25,28 @@ class UtcDateTime(TypeDecorator[datetime]):
     """A datetime that is aware UTC on both sides of the database.
 
     SQLite has no datetime type and no timezone, so a value written as aware
-    UTC reads back naive. Everything here treats stored instants as aware —
-    the public contract says so — and a naive one does not raise on comparison,
-    it silently compares wrong. Putting the offset back on load is the only
-    place that can be fixed once rather than at every call site.
+    UTC reads back naive. The application no longer runs on SQLite (#15), but
+    `tubedepth transfer --from` still reads a real SQLite index through these
+    same mapped models — that is the one place this class's SQLite behaviour
+    still runs, and it is why the naive-value refusal below cannot be deleted
+    along with the rest of SQLite support. Everything here treats stored
+    instants as aware — the public contract says so — and a naive one does
+    not raise on comparison, it silently compares wrong. Putting the offset
+    back on load is the only place that can be fixed once rather than at
+    every call site.
+
+    `impl` carries `timezone=True` so autogenerate's type comparator agrees
+    with what `migrations/env.py`'s `render_item` renders and what the
+    database actually stores: `docs/shared-postgres.md` rule 9 requires
+    `timestamptz` for every instant, and on PostgreSQL a plain `DateTime()`
+    impl compares as `timestamp without time zone` against the reflected
+    `timestamptz` column, which is exactly the mismatch that makes autogenerate
+    propose a spurious `modify_type`. SQLite ignores the flag — it has no
+    timezone-aware storage either way — so this is a no-op on the SQLite
+    source `transfer` reads from.
     """
 
-    impl = DateTime
+    impl = DateTime(timezone=True)
     cache_ok = True
 
     def process_bind_param(self, value: datetime | None, dialect: object) -> datetime | None:
@@ -86,6 +101,14 @@ class Job(Base):
     # and stop, which is a legitimate thing to want: checking what a channel
     # holds should not cost a hundred extractions.
     follow_up_kind: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    # Whether this submission asked to collect even if a fresh artifact is
+    # held. On the row because the collection happens in another process
+    # minutes later: a flag consumed at the HTTP boundary is one the worker
+    # never sees, and `refresh` spent a release changing only which of 200 or
+    # 202 the API answered while the job it created was still served from the
+    # cache. Deliberately not indexed — the claim filters on state and
+    # scheduled_at and never asks this.
+    refresh: Mapped[bool] = mapped_column(default=False)
     # Which key submitted this. How a runaway client gets identified rather
     # than guessed at.
     api_key_id: Mapped[str | None] = mapped_column(String(32), nullable=True)
@@ -157,6 +180,18 @@ class Artifact(Base):
     kind: Mapped[str] = mapped_column(String(64), nullable=False)
     target: Mapped[str] = mapped_column(String(500), nullable=False)
     fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    # Which version of this kind's normalizer wrote the payload. The
+    # fingerprint already contains it and is a SHA-256, so it cannot be read
+    # back out — hold an old payload and there is no way to tell what shape it
+    # is in, which is what makes a bump sever history rather than age it.
+    #
+    # Nullable permanently, and not only because SQLite refuses `ADD COLUMN
+    # ... NOT NULL` without a default. Any default would be a claim: it would
+    # make every row that predates this column assert a version nobody
+    # recorded, and `channel.about` is already at "2" — so "1" would be wrong
+    # for exactly the rows whose contents are known to be wrong. Null means
+    # "written before this was recorded", which is what the backfill selects on.
+    schema_version: Mapped[str | None] = mapped_column(String(16), nullable=True)
 
     digest: Mapped[str] = mapped_column(String(64), nullable=False)
     byte_count: Mapped[int] = mapped_column(Integer, nullable=False)
@@ -195,6 +230,66 @@ class ApiKey(Base):
     created_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utcnow)
     last_used_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
     revoked_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+
+# One row, addressed by a fixed key. See WorkerControl.
+WORKER_CONTROL_ID = "worker"
+
+
+class WorkerControl(Base):
+    """What an operator has told the worker to do. One row.
+
+    The worker is a separate process from the API on purpose — a yt-dlp crash
+    must not take the API down — so nothing in the API can reach into its
+    memory to stop it. A row is the only channel the two share, and it is the
+    same channel `source_health` and `lane_health` already use, running the
+    other way.
+
+    A single row rather than a settings table: there is one worker, and a
+    schema that implies several would be a promise nothing here keeps.
+    """
+
+    __tablename__ = "worker_control"
+
+    # Fixed. The primary key exists so the row is addressable, not so there
+    # can be more than one of them.
+    identifier: Mapped[str] = mapped_column(String(32), primary_key=True, default="worker")
+    # Paused means "claim nothing", not "discard". Queued jobs stay queued and
+    # nothing is failed on the way in, so resuming is the whole of the undo.
+    paused: Mapped[bool] = mapped_column(default=False)
+    # Why, in the operator's words. A pause nobody can explain an hour later is
+    # a pause nobody dares lift.
+    reason: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    changed_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
+
+
+class LaneHealth(Base):
+    """One row per (egress, lane): what the rate controller currently believes.
+
+    Same argument as SourceHealth, one level along — the controller's state is
+    a dict in the worker's memory and dies with the process, while the question
+    "is this route being refused right now" is asked by the API and by whoever
+    is looking at the dashboard when collection has stopped.
+
+    Without this the only symptom of a quarantined lane is that nothing is
+    happening, which is indistinguishable from an empty queue.
+    """
+
+    __tablename__ = "lane_health"
+
+    egress: Mapped[str] = mapped_column(String(64), primary_key=True)
+    lane: Mapped[str] = mapped_column(String(32), primary_key=True)
+    # How many requests the controller will allow at once. It is a measured
+    # ceiling rather than a setting: it halves on a refusal and grows back.
+    window: Mapped[float] = mapped_column(Float, default=1.0)
+    in_flight: Mapped[int] = mapped_column(default=0)
+    quarantine_streak: Mapped[int] = mapped_column(default=0)
+    # Wall clock, converted at write time. The controller measures in
+    # `time.monotonic` because this host's wall clock jumps after the Windows
+    # host sleeps — but a reader needs a time it can compare to its own, and a
+    # monotonic reading from another process means nothing here.
+    quarantined_until: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    observed_at: Mapped[datetime] = mapped_column(UtcDateTime, default=utcnow)
 
 
 class SourceHealth(Base):

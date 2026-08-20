@@ -33,14 +33,14 @@ from .database import Database
 from .egress.control import RateController, Verdict, verdict_for_error
 from .egress.transport import DirectEgress, Egress
 from .errors import TubedepthError, UpstreamError
-from .health import SourceHealthService
-from .models import Job, JobState, utcnow
+from .health import LaneHealthService, SourceHealthService
+from .models import WORKER_CONTROL_ID, Job, JobState, WorkerControl, utcnow
 from .payload_store import PayloadStore
 from .repositories import JobRepository
 from .retrying import backoff_for_attempt, is_retryable
 from .schemas import VideoListing
 from .sources import SourceRegistry, default_registry
-from .sources.registry import SourceCost
+from .sources.registry import SourceCost, attempts_for
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime, YtdlpRuntime
 from .webhooks import WebhookSender
 
@@ -86,12 +86,22 @@ class Worker:
         self._controller = controller or RateController()
         self._concurrency = max(1, concurrency)
         self._lease = lease
+        # Replaced by `serve`'s own event for the duration of a run. Held
+        # rather than passed to `_wait` so that the wait has one argument and
+        # is a seam a test can stand in for; an unset event here also makes
+        # `_wait` a plain sleep for anyone calling it outside `serve`.
+        self._stop = threading.Event()
+        # How many drains this process has run. Not a metric — the API reports
+        # nothing about it — but a resident worker has no restart count any
+        # more, and this is what a test can watch to know the loop is turning.
+        self.drains = 0
         self._permit_wait = permit_wait.total_seconds()
         # Recorded as work happens rather than derived from the job table on
         # demand: "has this source failed three times in a row" is a question
         # about consecutive attempts, and reconstructing that from rows means
         # scanning them in order every time anyone asks.
         self._health = health or SourceHealthService(database=database)
+        self._lanes = LaneHealthService(database=database)
         # Absent by default, and silence is the safer default: an unsigned
         # callback is one a receiver cannot tell from anyone else who learned
         # the URL, and a callback URL travels in a job submission rather than
@@ -131,13 +141,29 @@ class Worker:
             return 0
         return self._webhooks.deliver_pending()
 
+    def paused(self) -> bool:
+        """Whether an operator has told this worker to stop claiming.
+
+        Read at the top of a drain and again inside the claim loop, rather than
+        cached: the row is what an operator changes, and a copy of it is a
+        thing that can be out of step with what they set.
+
+        This used to say the unit's ten-second restart was what made a pause
+        take effect. It no longer restarts — see `serve` — so a pause now takes
+        effect at the top of the next drain, or partway through a long one,
+        which is sooner than it was.
+        """
+        with self._database.session(readonly=True) as session:
+            control = session.get(WorkerControl, WORKER_CONTROL_ID)
+            return bool(control and control.paused)
+
     def reap(self) -> int:
         """Return jobs whose worker stopped reporting. Safe to call often."""
         with self._database.session() as session:
             return JobRepository(session).reap_expired_leases()
 
-    def drain(self) -> int:
-        """Run until the queue is empty. Returns how many jobs ran.
+    def drain(self, *, limit: int | None = None) -> int:
+        """Run until the queue is empty, or until `limit` jobs have run.
 
         Reaps first: a previous run killed mid-job left rows in `running` that
         nothing else will ever release, and starting without collecting them
@@ -147,27 +173,61 @@ class Worker:
         down when a previous run finished is retried; on exit, so jobs this run
         finished are announced without waiting for the next one — which for a
         `--once` invocation would be never.
+
+        `limit` is what makes that last sentence true. `--once` used to call
+        `run_once` directly, which is the primitive and does none of this
+        bookkeeping — so the one invocation the paragraph above is about was
+        the one invocation that skipped it, and a job it finished was never
+        announced at all. One path with a bound rather than two paths, because
+        two paths are how they came to disagree.
         """
+        # Above the pause check on purpose. Pausing means claim nothing; it
+        # does not mean stop talking. A job that succeeded moments before is
+        # owed its callback, and a receiver waiting on one cannot tell "the
+        # operator paused collection" from "my job has not finished". Rows a
+        # killed worker left in `running` are not the operator's doing either.
         self.deliver_webhooks()
         reaped = self.reap()
         if reaped:
             logger.info("returned %s job(s) whose lease had expired", reaped)
 
+        if self.paused():
+            logger.info("worker is paused; claiming nothing")
+            return 0
+
         if self._concurrency == 1:
             completed = 0
-            while self.run_once():
+            while (limit is None or completed < limit) and not self.paused() and self.run_once():
                 completed += 1
             self.deliver_webhooks()
             return completed
 
         completed = 0
+        # Reserved rather than completed, and taken before the claim. Checking
+        # the count and then claiming lets every thread pass the check at once
+        # and overshoot the bound by the width of the pool — which for
+        # `--once` means eight jobs where one was asked for.
+        reserved = 0
         counted = threading.Lock()
 
         def pump() -> None:
-            nonlocal completed
+            nonlocal completed, reserved
             while True:
+                # Re-read rather than trusting the check at the top. A drain
+                # was a handful of jobs when that was written; a batch is up to
+                # 500 targets and one listing fans out to the whole cap, so
+                # "it takes effect on the next restart" had come to mean "not
+                # until the sweep it is trying to stop has finished".
+                if self.paused():
+                    return
+                with counted:
+                    if limit is not None and reserved >= limit:
+                        return
+                    reserved += 1
                 claimed = self._claim()
                 if claimed is None:
+                    with counted:
+                        reserved -= 1
                     return
                 self._execute(*claimed)
                 with counted:
@@ -179,17 +239,108 @@ class Worker:
         self.deliver_webhooks()
         return completed
 
+    # -- staying up ------------------------------------------------------
+
+    def serve(self, *, poll: float, stop: threading.Event) -> int:
+        """Drain, wait, drain again, until `stop` is set. Returns the total.
+
+        This replaces a polling loop that was made of process restarts. The
+        unit ran `tubedepth work`, which drained and exited, and
+        `Restart=always` with `RestartSec=10s` brought it back — so an idle
+        queue cost a full interpreter start, a `uv` resolve and a yt-dlp import
+        every ten seconds. Measured on this host: ~520 ms of CPU and a 68 MB
+        peak per launch, 589 launches, almost all of them finding nothing.
+
+        The waste is the smaller half. Every launch is also a fresh set of
+        database connections, and this project is moving to a PostgreSQL
+        instance it shares with the other scrapers, where connections are a
+        fleet-wide budget rather than a local detail — see
+        `docs/shared-postgres.md`. A process that reconnects six times a minute
+        forever is a bad neighbour there in a way it never was against a file.
+
+        `Restart=always` stays in the unit and now means what it says: a
+        restart is for a worker that died, not for one that finished.
+
+        Nothing here supersedes `drain`. It is still the unit of work — it
+        reaps, delivers callbacks, honours the pause row, and returns when the
+        queue is empty — and `--once` still runs exactly one of them. This adds
+        a reason to go round again.
+        """
+        self._stop = stop
+        total = 0
+        while not stop.is_set():
+            try:
+                completed = self.drain()
+            except Exception:
+                # Deliberately everything. Under the restart loop an unhandled
+                # exception was a ten-second gap and a fresh process; staying
+                # up would turn the same exception into collection silently
+                # stopping until somebody noticed. Logged and retried on the
+                # next tick is the outcome the restart gave, without it.
+                logger.exception("a drain failed; retrying on the next tick")
+                completed = 0
+            else:
+                total += completed
+            self.drains += 1
+            if completed:
+                # A listing fans out to a job per video, so a drain that did
+                # work usually left the queue fuller than it found it. Waiting
+                # here would add `poll` seconds per level of fan-out.
+                continue
+            if self._wait(poll):
+                break
+        return total
+
+    def _wait(self, seconds: float) -> bool:
+        """Wait out the poll interval, or stop early. True if it stopped.
+
+        The stop event's own wait rather than `time.sleep`, so a SIGINT is
+        acted on when it arrives instead of at the end of the interval. The
+        unit allows 120 seconds for a stop, so sleeping would still shut down —
+        but every stop would cost the full interval, and an operator watching
+        `systemctl stop` cannot tell that from a hang.
+        """
+        return self._stop.wait(seconds)
+
     # -- the gates -------------------------------------------------------
 
-    def _claim(self) -> tuple[str, str, str, str | None] | None:
+    def _claim(self) -> tuple[str, str, str, str | None, bool] | None:
         """Take a job and reserve its cost slot, atomically.
 
         Both under one lock because checking the reservation and then taking it
         is a race: two threads can each read two expensive jobs in flight
         against a cap of two and both proceed, which makes the reservation
         advisory rather than enforced — and it shows up only under load, which
-        is the only time it matters. Serialising the claim costs nothing:
-        SQLite serialises writers regardless.
+        is the only time it matters.
+        `tests/test_worker.py::test_disabling_the_claim_lock_lets_two_threads_exceed_the_reservation`
+        forces exactly that race with the real lock swapped for a no-op, and
+        the cap breaks every time.
+
+        This is a real cost on PostgreSQL, not a free one. It used to be
+        described as free — "SQLite serialises writers regardless" — which was
+        true only because SQLite's own write lock meant nothing was lost by
+        adding a second one around it. PostgreSQL claims run concurrently
+        under READ COMMITTED (`JobRepository.claim`'s guarded UPDATE plus
+        rowcount check is what makes that safe on its own — see `Database`'s
+        docstring), so this lock is what gives that back up: every worker
+        thread's `_claim()`, database round trip included, now runs one at a
+        time, for as long as the process holds this lock rather than as long
+        as SQLite's writer lock held it regardless.
+
+        Paid anyway, on the current evidence: `docs/status.md`'s measured
+        runs found the AIMD window, not the claim, as the throughput limiter
+        — a claim is one indexed SELECT plus one guarded UPDATE, small next to
+        the seconds a collection spends waiting on yt-dlp or the network. That
+        has not been measured specifically *with this lock removed* on
+        PostgreSQL, though, so "small cost, worth the correctness" is the
+        current judgement call, not a proven one. If a future measurement
+        shows claim serialisation actually limiting throughput, the fix is to
+        narrow this lock to just the reservation check-then-increment and take
+        the database round trip outside it — which reopens the exact race
+        described above unless the reservation itself moves into the
+        database (a `lane_health`-style counter, checked and incremented in
+        one guarded statement) so two threads can no longer race a
+        Python-side dict at all.
         """
         with self._lock:
             kinds = self._admissible_kinds_unlocked()
@@ -201,7 +352,7 @@ class Worker:
                 )
                 if job is None:
                     return None
-                claimed = (job.identifier, job.kind, job.target, job.follow_up_kind)
+                claimed = (job.identifier, job.kind, job.target, job.follow_up_kind, job.refresh)
                 cost = self._registry.get(job.kind).cost if self._knows(job.kind) else None
             if cost is not None:
                 self._in_flight_by_cost[cost] = self._in_flight_by_cost.get(cost, 0) + 1
@@ -230,7 +381,9 @@ class Worker:
             return None
         return [kind for kind in self._registry.kinds() if self._registry.get(kind).cost in allowed]
 
-    def _execute(self, identifier: str, kind: str, target: str, follow_up: str | None) -> None:
+    def _execute(
+        self, identifier: str, kind: str, target: str, follow_up: str | None, refresh: bool
+    ) -> None:
         try:
             source = self._registry.get(kind)
         except TubedepthError as error:
@@ -255,7 +408,7 @@ class Worker:
             verdict = Verdict.NEUTRAL
             try:
                 with self._holding_lease(identifier):
-                    result, digest, byte_count = self._collect(kind, target)
+                    result, digest, byte_count = self._collect(kind, target, refresh=refresh)
                 verdict = Verdict.OK
             except TubedepthError as error:
                 verdict = verdict_for_error(error)
@@ -278,6 +431,25 @@ class Worker:
                 return
             finally:
                 self._controller.release(self._egress.name, source.lane, verdict)
+                # Written on the same tick as source health and for the same
+                # reason: the controller's state is a dict in this process and
+                # dies with it, while "is this route being refused" is asked
+                # from the API. Without it a quarantined lane is indis-
+                # tinguishable from an empty queue.
+                try:
+                    state, monotonic = self._controller.observed(self._egress.name, source.lane)
+                    self._lanes.observe(
+                        self._egress.name, source.lane.value, state=state, monotonic=monotonic
+                    )
+                except Exception:
+                    # This is a database write in a `finally`, on the success
+                    # path of every job. If it raised — `database is locked`
+                    # under contention is the plausible one — it would replace
+                    # the normal control flow and the job would never be
+                    # settled: payload on disk, artifact row committed, row
+                    # left `running` until the reaper takes it and burns an
+                    # attempt. Telemetry is worth strictly less than that.
+                    logger.warning("could not record lane health", exc_info=True)
         finally:
             self._leave(source.cost)
 
@@ -363,14 +535,16 @@ class Worker:
 
     # -- persistence -----------------------------------------------------
 
-    def _collect(self, kind: str, target: str) -> tuple[BaseModel | None, str, int]:
+    def _collect(
+        self, kind: str, target: str, *, refresh: bool = False
+    ) -> tuple[BaseModel | None, str, int]:
         """Delegate to the one collection path.
 
         The worker used to have its own copy of this, which meant the CLI
         consulted the cache and the queue did not — and the queue is the side
         running a hundred jobs unattended.
         """
-        collected = self._collection.collect(kind, target)
+        collected = self._collection.collect(kind, target, refresh=refresh)
         if collected.from_cache:
             logger.info("job for %s %s served from cache", kind, target)
         return collected.result, collected.payload.digest, collected.payload.byte_count
@@ -380,11 +554,27 @@ class Worker:
 
         The follow-up kind is validated against the registry first, so a typo
         costs nothing rather than queueing a hundred jobs that can only fail.
+
+        A forced listing does not force its follow-ups, and that is now
+        decided rather than merely undecided (#20). `tubedepth watch` forces
+        `refresh=True` on the listing job itself, so the enumeration is re-run
+        every pass and a channel's new videos appear; it deliberately does not
+        propagate the flag, so the per-video follow-ups stay cache-governed.
+        Propagating would multiply one flag into a collection per video on
+        every sweep — up to TUBEDEPTH_LISTING_LIMIT of them per line — out of
+        the one per-address budget everything else draws on, to re-collect
+        videos whose freshness window has not run out.
         """
-        self._registry.get(kind)
+        source = self._registry.get(kind)
         with self._database.session() as session:
             for video in listing.videos:
-                session.add(Job(kind=kind, target=video.video_id))
+                session.add(
+                    Job(
+                        kind=kind,
+                        target=video.video_id,
+                        max_attempts=attempts_for(source),
+                    )
+                )
         return len(listing.videos)
 
     def _fail_or_retry(self, identifier: str, kind: str, error: TubedepthError) -> None:

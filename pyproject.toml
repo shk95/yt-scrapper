@@ -32,6 +32,11 @@ dependencies = [
   # friction you do not want at the moment extraction has stopped working.
   # The lock file still pins an exact version, so builds stay reproducible.
   "yt-dlp>=2026.7",
+  # PostgreSQL is the only backend since the cutover (#15, docs/status.md) —
+  # `Database` refuses any other dialect for the application's own connection.
+  # This used to be the `postgres` extra so a SQLite-only checkout could skip
+  # the compiled driver; there is no SQLite-only checkout left to serve.
+  "psycopg[binary]>=3.2,<4",
 ]
 
 [project.optional-dependencies]
@@ -62,7 +67,14 @@ target-version = "py312"
 # gets edited to match current conventions stops being evidence of what was
 # actually decided. ruff formats Python blocks inside Markdown, so it has to be
 # told.
-extend-exclude = ["docs/plan.md"]
+#
+# `docs/shared-postgres.md` is excluded for a related but distinct reason: it is
+# a verbatim copy of a fleet-wide regulation several repositories hold. The point
+# of a copy is that it can be replaced wholesale when the regulation is amended,
+# and a local reformat makes every future replacement a diff to reconcile. How
+# *this* repository applies the regulation is written in docs/status.md instead,
+# which is where a local edit belongs.
+extend-exclude = ["docs/plan.md", "docs/shared-postgres.md"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "SIM"]
@@ -78,10 +90,23 @@ testpaths = ["tests"]
 # project talks to YouTube, and a suite that actually does so is red on any
 # datacenter address for reasons unrelated to the change under test. A check
 # that is red for unrelated reasons is one people learn to ignore.
+#
+# `and not postgres` used to sit here too, deselecting the suite's only
+# server-backed tests by default. Task 7 (issue #15 — "the tests move too")
+# moved `database_url_for_tests` itself onto a real PostgreSQL server, which
+# means every test through the `database` fixture needs one now, not just the
+# handful marked `postgres` — deselecting the marker would deselect almost
+# the whole suite. `tool/checks/test` (and so `just check`) now needs Docker;
+# `tool/checks/prerequisite` says so.
 addopts = "-q -m 'not live'"
 asyncio_mode = "auto"
 markers = [
   "live: reaches YouTube or a third-party service; never runs in CI. Use `just contract`.",
+  # No longer a selection filter (every test needs the server now) — kept as
+  # a label for the tests that check PostgreSQL's own structure (roles,
+  # privileges, `alembic_version` placement) rather than merely running
+  # against it, so `pytest -m postgres` can still single those out.
+  "postgres: exercises PostgreSQL structure directly (roles, privileges, migrations), not just as a backing store.",
 ]
 
 [tool.coverage.run]

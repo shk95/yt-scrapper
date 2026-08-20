@@ -17,7 +17,7 @@ import threading
 import time
 from collections.abc import Callable, Iterator
 from contextlib import contextmanager
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from enum import StrEnum
 
 from ..errors import RateLimitedError, UpstreamError
@@ -28,6 +28,11 @@ class Lane(StrEnum):
 
     YOUTUBE = "youtube"
     SPONSORBLOCK = "sponsorblock"
+    # Google's API quota is a different budget from YouTube's tolerance for an
+    # address: 10,000 units a day, spent a unit at a time, and untouched by
+    # anything the other lanes do. Sharing a lane would make a quarantine on
+    # one throttle the other for no reason in either direction.
+    YOUTUBE_DATA_API = "youtube_data_api"
 
 
 class Verdict(StrEnum):
@@ -110,6 +115,17 @@ class RateController:
             state = LaneState(minimum_interval=self.minimum_interval_seconds)
             self._states[(egress, lane)] = state
         return state
+
+    def observed(self, egress: str, lane: Lane) -> tuple[LaneState, float]:
+        """A copy of one lane's state, and the clock reading it goes with.
+
+        Both together, because the deadlines in that state are `time.monotonic`
+        readings and a difference against a *later* reading would understate
+        the quarantine. Anyone converting them to a wall clock needs the same
+        instant the state was taken at.
+        """
+        with self._lock:
+            return replace(self._state(egress, lane)), self.clock()
 
     def window(self, egress: str, lane: Lane) -> float:
         return self._state(egress, lane).window

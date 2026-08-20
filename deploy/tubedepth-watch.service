@@ -1,0 +1,77 @@
+# One pass of the watch list: queue everything it names, forced.
+#
+# Started by tubedepth-watch.timer rather than enabled directly. It queues
+# work and exits; the worker is what collects, so this unit is finished in
+# milliseconds and does no extraction of its own.
+#
+# BEFORE ENABLING, write the watch list — this unit fails without it, on
+# purpose, rather than watching nothing quietly:
+#
+#   mkdir -p ~/.config/tubedepth
+#   $EDITOR ~/.config/tubedepth/watchlist.txt   # one typed directive per line
+#
+# The list is typed: `video`, `channel`, `search` or `trending`, then the
+# target. `deploy/watchlist.example.txt` shows the format and the arithmetic
+# for sizing it — a `channel`, `search` or `trending` line fans out to a job
+# per video it finds, so one of them is up to TUBEDEPTH_LISTING_LIMIT
+# collections rather than one. Then:
+#
+#   cp deploy/tubedepth-watch.* ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now tubedepth-watch.timer
+#
+# Why one-shot and not `tubedepth watch --every`: systemd already has a
+# scheduler, and a resident process would be a second, worse one — it would
+# miss a firing across a suspend, where `Persistent=true` below does not.
+# `--every` is for the environments with no timer, compose among them.
+#
+# Why forced: `watch` forces every job it queues, with no per-line flag.
+# video.metadata is fresh for six hours, so an hourly sweep without it is
+# answered from the cache and records no observation; a listing not forced is
+# not re-enumerated, so a channel's new videos never appear. The point of
+# watching is the second observation, so forcing is the feature. The per-video
+# follow-ups a listing fans out to stay cache-governed — the flag is
+# deliberately not propagated through `--then`.
+
+[Unit]
+Description=tubedepth watch: queue one pass of the watch list, forced
+Documentation=file://%h/github_prj/yt-scrapper/docs/api.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/github_prj/yt-scrapper
+# systemd gives a user service a minimal PATH of its own — the shell's is not
+# inherited — and uv lives in a nix profile under $HOME on this host, because
+# there is no passwordless sudo here (see AGENTS.md). Without this line
+# `/usr/bin/env uv` resolves to nothing and the unit exits 127 the first time
+# it is enabled.
+Environment=PATH=%h/.nix-profile/bin:/usr/local/bin:/usr/bin:/bin
+Environment=TUBEDEPTH_DATA_DIR=%h/github_prj/yt-scrapper/var
+# Required since the PostgreSQL cutover (#15) — this unit's `watch` opens the
+# database like every other command, and there is no SQLite fallback.
+# Same file the api/worker units use; see tubedepth-worker.service for how to
+# create it.
+#
+# A `trending` line in the watch list also needs TUBEDEPTH_DATA_API_KEY here:
+# the chart comes from the official Data API, and without a key the job fails
+# with a ConfigurationError. Every other directive works without one.
+EnvironmentFile=%h/.config/tubedepth/worker.env
+ExecStart=/usr/bin/env uv run --frozen tubedepth watch %h/.config/tubedepth/watchlist.txt
+
+# Not restarted. A pass that failed is not worth retrying in a tight loop —
+# the next hour is soon enough, and a watch list that has gone missing should
+# show up as a repeating failure rather than a spin.
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# uv writes while it runs, and ProtectHome=read-only covers all of it: its
+# cache under ~/.cache/uv, and a lock inside the project's .venv. Naming the
+# three paths keeps the sandbox strict; loosening ProtectHome would not.
+ReadWritePaths=%h/github_prj/yt-scrapper/var %h/github_prj/yt-scrapper/.venv %h/.cache/uv
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

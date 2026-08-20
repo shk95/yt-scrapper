@@ -8,14 +8,22 @@ one file to edit, not one per source.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Mapping
+from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 
 from yt_dlp import YoutubeDL
 from yt_dlp.utils import DownloadError
 
 from ..egress.transport import Egress
-from ..errors import RateLimitedError, TubedepthError, UnavailableError, UpstreamError
+from ..errors import (
+    ConfigurationError,
+    RateLimitedError,
+    TubedepthError,
+    UnavailableError,
+    UpstreamError,
+)
 
 # What yt-dlp says when YouTube wants proof we are a person. It is the only
 # message here that is about the address rather than the video, and the whole
@@ -93,6 +101,26 @@ class LibraryYtdlpRuntime:
         "retries": 3,
     }
 
+    def __init__(self, *, cookies_file: Path | str | None = None) -> None:
+        """Optionally carry a cookie jar into every extraction.
+
+        `docs/troubleshooting.md` names this as the first rung of the ladder
+        out of a bot check, above `--impersonate` and well above a different
+        egress — which on this host means a datacenter address the README
+        expects to make the YouTube lane worse. The variable was documented
+        and read by nothing, so the rung was missing and the ladder led
+        straight to the rung that hurts.
+
+        A path that is not there is refused rather than dropped. Ignoring a
+        typo would behave exactly like the version that read nothing at all,
+        and leave the operator concluding from absent evidence that cookies do
+        not help.
+        """
+        configured = cookies_file or os.environ.get("TUBEDEPTH_COOKIES_FILE")
+        self._cookies_file = Path(configured) if configured else None
+        if self._cookies_file is not None and not self._cookies_file.is_file():
+            raise ConfigurationError(f"no cookie jar at: {self._cookies_file}")
+
     def _run(self, target: str, options: dict[str, Any]) -> Any:
         """The one call that touches yt-dlp. Separated so a test can replace it."""
         with YoutubeDL(options) as downloader:  # type: ignore[arg-type]
@@ -110,7 +138,8 @@ class LibraryYtdlpRuntime:
         # Order matters: the source's options come last so a source can raise
         # a limit the base set caps, and the egress sits in the middle because
         # no source may override which address it leaves from.
-        merged = self.BASE_OPTIONS | egress.ytdlp_options() | dict(options or {})
+        cookies = {"cookiefile": str(self._cookies_file)} if self._cookies_file else {}
+        merged = self.BASE_OPTIONS | cookies | egress.ytdlp_options() | dict(options or {})
         try:
             info = self._run(target, merged)
         except DownloadError as error:

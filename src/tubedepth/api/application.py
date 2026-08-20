@@ -8,8 +8,9 @@ drifting into two different answers for the same question.
 from __future__ import annotations
 
 import base64
+import json
 import logging
-from collections.abc import Iterator
+from collections.abc import Iterator, Mapping, Sequence
 
 # Imported for pydantic rather than for the type checker. With
 # `from __future__ import annotations` every annotation is a string, and a
@@ -20,7 +21,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Annotated, Any
 
-from fastapi import APIRouter, Depends, FastAPI, Request, Response, Security, status
+from fastapi import APIRouter, Depends, FastAPI, Query, Request, Response, Security, status
+from fastapi.exceptions import RequestValidationError
 from fastapi.responses import HTMLResponse, JSONResponse, PlainTextResponse
 from fastapi.security import APIKeyHeader
 from pydantic import BaseModel, Field, HttpUrl
@@ -31,22 +33,26 @@ from .. import __version__
 from ..collection import CollectionService
 from ..database import Database
 from ..errors import (
+    ConfigurationError,
     ConflictError,
     ExtractionError,
     NotFoundError,
     RateLimitedError,
+    RetractedError,
     TubedepthError,
     UnauthenticatedError,
+    UnavailableError,
     UpstreamError,
     ValidationError,
 )
 from ..health import SourceHealthService
 from ..identifiers import normalize_target
-from ..models import Artifact, Job
+from ..models import WORKER_CONTROL_ID, Artifact, Job, LaneHealth, WorkerControl, utcnow
 from ..payload_store import PayloadStore
 from ..repositories import JobRepository, JobState
 from ..services.keys import ApiKeyService, VerifiedKey
 from ..sources import SourceRegistry, default_registry
+from ..sources.registry import attempts_for, retracted_versions_of
 
 logger = logging.getLogger(__name__)
 
@@ -64,14 +70,52 @@ STATUS_BY_ERROR: tuple[tuple[type[TubedepthError], int, str], ...] = (
     # is a secret shown once.
     (ValidationError, 422, "invalid_request"),
     (NotFoundError, status.HTTP_404_NOT_FOUND, "not_found"),
+    # 404 rather than the catch-all 500: a private, deleted, members-only or
+    # region-blocked video is a fact about the video, not a bug in this
+    # service, and answering `internal_error` sends an operator into our
+    # tracebacks for something no code change here fixes. Kept apart from
+    # `not_found` because "you may not see this" and "there is no such thing"
+    # are different answers to give a client.
+    (UnavailableError, status.HTTP_404_NOT_FOUND, "unavailable"),
     (ConflictError, status.HTTP_409_CONFLICT, "conflict"),
+    # 410 rather than 404: the observation happened and was withdrawn, and a
+    # 404 would tell a reader building a history that it never happened.
+    (RetractedError, status.HTTP_410_GONE, "retracted"),
     # 502 rather than 500: the upstream answered, our parser did not understand
     # it. A 500 sends an operator into our tracebacks; a 502 sends them to the
     # renderer names in the message.
     (ExtractionError, status.HTTP_502_BAD_GATEWAY, "parse_mismatch"),
     (UpstreamError, status.HTTP_502_BAD_GATEWAY, "upstream_error"),
+    # 503 rather than the catch-all 500: our own misconfiguration is not a bug
+    # in the code, and "fix the configuration and retry" is the whole of the
+    # instruction. Since #16 a `search_path` that does not lead with this
+    # project's schema raises this from `Database` itself, so the most likely
+    # cause of a 503 here is a role whose search_path was never set — an
+    # operator reading `internal_error` would go looking for our traceback
+    # instead. An unset `TUBEDEPTH_DATA_API_KEY` is the same shape of answer.
+    (ConfigurationError, status.HTTP_503_SERVICE_UNAVAILABLE, "not_configured"),
     (TubedepthError, status.HTTP_500_INTERNAL_SERVER_ERROR, "internal_error"),
 )
+
+
+def _describe_rejected_request(reported: Sequence[Any]) -> str:
+    """FastAPI's `errors()` list rendered as one line a person can read.
+
+    Each entry is a dict carrying a `loc` tuple, a message, and the offending
+    input. Passing the structure through would put pydantic's internal error
+    types and a copy of the request body into a field this API documents as
+    written for a person; naming the place and the reason is the part a caller
+    can act on.
+    """
+    lines: list[str] = []
+    for detail in reported:
+        if not isinstance(detail, Mapping):
+            lines.append(str(detail))
+            continue
+        where = ".".join(str(part) for part in detail.get("loc", ()))
+        reason = str(detail.get("msg", "is not valid"))
+        lines.append(f"{where}: {reason}" if where else reason)
+    return "; ".join(lines) or "the request could not be understood"
 
 
 class JobSubmission(BaseModel):
@@ -93,9 +137,39 @@ class JobView(BaseModel):
     attempt_count: int
     error_code: str | None = None
     error_message: str | None = None
+    # Which key submitted this, and which worker holds it. Both were written on
+    # every job and readable from nowhere, so "identify the runaway client" and
+    # "which worker is stuck on this" meant opening the database by hand.
+    api_key_id: str | None = None
+    claimed_by: str | None = None
     payload_bytes: int | None = None
     created_at: datetime | None = None
     finished_at: datetime | None = None
+
+
+MAXIMUM_BATCH = 500
+
+
+class BatchSubmission(BaseModel):
+    kind: str
+    targets: list[str]
+    refresh: bool = False
+    webhook_url: HttpUrl | None = None
+
+
+class HeldView(BaseModel):
+    """A target the batch did not have to queue, and where its answer is."""
+
+    target: str
+    digest: str
+
+
+class BatchView(BaseModel):
+    queued: list[JobView]
+    # Reported rather than returned. A hundred cached payloads is megabytes,
+    # and the caller asked to collect these, not to download them — the digest
+    # is what `GET /v1/artifacts/{digest}` needs to hand any of them over.
+    held: list[HeldView]
 
 
 class SourceHealthView(BaseModel):
@@ -114,6 +188,11 @@ class SourceHealthView(BaseModel):
     last_success_at: datetime | None = None
     last_failure_at: datetime | None = None
     last_error_code: str | None = None
+    # The actionable half. The code says what kind of failure; the message
+    # names the renderer that changed, which is what a `broken` source needs
+    # someone to look at. It was recorded from the day this table existed and
+    # read by nothing.
+    last_error_message: str | None = None
 
 
 class JobListView(BaseModel):
@@ -131,15 +210,85 @@ class JobListView(BaseModel):
 class ArtifactView(BaseModel):
     kind: str
     target: str
+    # Which normalizer wrote these bytes. Null for anything collected before
+    # the column existed; the fingerprint holds the version and is a SHA-256,
+    # so it cannot be recovered from the row itself.
+    schema_version: str | None = None
     digest: str
     byte_count: int
     fetched_at: datetime
     fresh_until: datetime
 
 
+class ArtifactPayloadView(BaseModel):
+    """One stored observation, verbatim, with what a reader needs to interpret it.
+
+    The bytes are returned exactly as they were collected — no model is in this
+    path, so an old payload the current normalizer could not parse still comes
+    back rather than raising. That is the whole point of a history route: the
+    thing worth keeping is the original observation.
+    """
+
+    digest: str
+    kind: str
+    target: str
+    # How many observations recorded these exact bytes, and when the first of
+    # them was. A digest is not one observation: the store is content-addressed,
+    # so a video whose counts have not moved records a new row against the same
+    # digest — half the rows in a store a watch list has been running against.
+    # Answering with only the newest `fetched_at` misdates every older
+    # duplicate, and the span is the more useful fact anyway: nothing changed
+    # between these two times.
+    observations: int
+    first_fetched_at: datetime | None
+    fetched_at: datetime
+    schema_version: str | None
+    current_schema_version: str | None
+    # Computed from the bytes and from the model, rather than declared. A field
+    # the older version never collected is simply absent here, which is a
+    # stronger and truer statement than a null — and a hand-maintained list of
+    # "what v1 lacked" would drift against data nobody can re-derive.
+    payload_fields: list[str]
+    current_fields: list[str]
+    payload: Any
+
+
 class ArtifactListView(BaseModel):
     artifacts: list[ArtifactView]
     cursor: str | None = None
+
+
+class LaneHealthView(BaseModel):
+    """What the rate controller currently allows on one route.
+
+    `window` is a measured ceiling rather than a setting — it halves when the
+    upstream refuses and grows back — so a window well under one is the number
+    that explains why a queue is draining slowly.
+    """
+
+    egress: str
+    lane: str
+    window: float
+    in_flight: int
+    quarantine_streak: int
+    # Null when the lane is open. Present means nothing on this route will be
+    # attempted until then, which from outside is indistinguishable from an
+    # empty queue unless something says so.
+    quarantined_until: datetime | None = None
+    observed_at: datetime | None = None
+
+
+class ControlView(BaseModel):
+    paused: bool
+    reason: str | None = None
+    changed_at: datetime | None = None
+
+
+class ControlChange(BaseModel):
+    paused: bool
+    # Optional, and worth filling in. A pause nobody can explain an hour later
+    # is a pause nobody dares lift.
+    reason: str | None = None
 
 
 class HealthView(BaseModel):
@@ -148,6 +297,7 @@ class HealthView(BaseModel):
     queued: int = Field(default=0)
     running: int = Field(default=0)
     sources: list[SourceHealthView] = Field(default_factory=list)
+    lanes: list[LaneHealthView] = Field(default_factory=list)
 
 
 # Dependencies live at module level, not inside the factory.
@@ -198,6 +348,8 @@ def _job_view(job: Job) -> JobView:
         attempt_count=job.attempt_count,
         error_code=job.error_code,
         error_message=job.error_message,
+        api_key_id=job.api_key_id,
+        claimed_by=job.claimed_by,
         payload_bytes=job.payload_bytes,
         created_at=job.created_at,
         finished_at=job.finished_at,
@@ -278,6 +430,31 @@ def create_application(
             content={"error": {"code": label, "message": str(error)}},
         )
 
+    @application.exception_handler(RequestValidationError)
+    async def handle_rejected_request(request: Request, error: Exception) -> JSONResponse:
+        """The framework's own 422, in the shape the reference promises.
+
+        Everything this code raises reaches the handler above and comes out as
+        `{"error": {"code": ..., "message": ...}}`. Everything FastAPI rejects
+        before a handler runs — a malformed body, an unparseable `since=`, a
+        `limit` outside its bounds — came out as `{"detail": [...]}` instead,
+        so a client needed two branches for one class of failure and the
+        reference's "every error is the same shape" was false for the errors a
+        client is most likely to provoke.
+
+        `invalid_request` rather than a new label: it is what `ValidationError`
+        already maps to above, and a cursor this API did not issue — the same
+        failure, caught one layer deeper — has always answered with it.
+        """
+        assert isinstance(error, RequestValidationError)
+        message = _describe_rejected_request(error.errors())
+        logger.warning("%s %s -> invalid_request: %s", request.method, request.url.path, message)
+        # 422 as a literal for the reason STATUS_BY_ERROR gives above.
+        return JSONResponse(
+            status_code=422,
+            content={"error": {"code": "invalid_request", "message": message}},
+        )
+
     @application.get("/", response_class=HTMLResponse, include_in_schema=False)
     def dashboard() -> HTMLResponse:
         """The operator page: an empty shell that calls the same `/v1` routes.
@@ -309,11 +486,26 @@ def create_application(
         # read by things that restart processes, and one broken parser is not a
         # reason to cycle an API whose other nine kinds are still collecting.
         # The bad news travels in the detail, where a person reads it.
+        lanes = open_session.scalars(
+            select(LaneHealth).order_by(LaneHealth.egress, LaneHealth.lane)
+        ).all()
         return HealthView(
             status="ok",
             version=__version__,
             queued=counts[JobState.QUEUED],
             running=counts[JobState.RUNNING],
+            lanes=[
+                LaneHealthView(
+                    egress=row.egress,
+                    lane=row.lane,
+                    window=row.window,
+                    in_flight=row.in_flight,
+                    quarantine_streak=row.quarantine_streak,
+                    quarantined_until=row.quarantined_until,
+                    observed_at=row.observed_at,
+                )
+                for row in lanes
+            ],
             sources=[
                 SourceHealthView(
                     kind=entry.kind,
@@ -322,6 +514,7 @@ def create_application(
                     last_success_at=entry.last_success_at,
                     last_failure_at=entry.last_failure_at,
                     last_error_code=entry.last_error_code,
+                    last_error_message=entry.last_error_message,
                 )
                 for entry in SourceHealthService(database=database).snapshot().values()
             ],
@@ -331,6 +524,50 @@ def create_application(
     # added later is protected by construction and a forgotten decorator cannot
     # open a hole. A test walks the routes and asserts it.
     versioned = APIRouter(prefix="/v1", dependencies=[Depends(require_api_key)])
+
+    @versioned.get("/control", response_model=ControlView)
+    def read_control(
+        open_session: Annotated[Session, Depends(get_reading_session)],
+    ) -> ControlView:
+        """Whether the worker has been told to stop claiming.
+
+        No row means nobody has ever paused this, which is not an error and is
+        reported as running.
+        """
+        control = open_session.get(WorkerControl, WORKER_CONTROL_ID)
+        if control is None:
+            return ControlView(paused=False)
+        return ControlView(
+            paused=control.paused, reason=control.reason, changed_at=control.changed_at
+        )
+
+    @versioned.patch("/control", response_model=ControlView)
+    def change_control(
+        change: ControlChange,
+        open_session: Annotated[Session, Depends(get_session)],
+    ) -> ControlView:
+        """Pause or resume the worker.
+
+        The API and the worker are separate processes on purpose, so this
+        cannot reach in and stop anything. It writes the row the worker reads
+        at the top of each drain, and `tubedepth work` drains and exits with
+        the unit restarting it every ten seconds — so a pause takes effect
+        within about that, and a job already running finishes.
+
+        Paused means claim nothing. Queued jobs stay queued and nothing is
+        failed on the way in, so resuming is the whole of the undo.
+        """
+        control = open_session.get(WorkerControl, WORKER_CONTROL_ID) or WorkerControl(
+            identifier=WORKER_CONTROL_ID
+        )
+        control.paused = change.paused
+        control.reason = change.reason
+        control.changed_at = utcnow()
+        open_session.add(control)
+        open_session.flush()
+        return ControlView(
+            paused=control.paused, reason=control.reason, changed_at=control.changed_at
+        )
 
     @versioned.get("/sources")
     def list_sources(
@@ -368,6 +605,11 @@ def create_application(
             kind=submission.kind,
             target=target,
             api_key_id=api_key.identifier,
+            refresh=submission.refresh,
+            # How many tries a kind is worth is a property of what collecting
+            # it costs, which the registry knows and a submitter does not — so
+            # it is not a field on the submission.
+            max_attempts=attempts_for(source),
             webhook_url=str(submission.webhook_url) if submission.webhook_url else None,
         )
         open_session.add(job)
@@ -382,6 +624,74 @@ def create_application(
             attempt_count=job.attempt_count,
         )
 
+    @versioned.post("/jobs/batch", response_model=BatchView, status_code=202)
+    def submit_batch(
+        submission: BatchSubmission,
+        open_session: Annotated[Session, Depends(get_session)],
+        api_key: Annotated[VerifiedKey, Depends(require_api_key)],
+        registry: Annotated[SourceRegistry, Depends(get_registry)],
+        payloads: Annotated[PayloadStore, Depends(get_payloads)],
+        database: Annotated[Database, Depends(get_database)],
+    ) -> BatchView:
+        """Queue one kind for many targets, at the cost of one request.
+
+        A key is allowed sixty requests a minute, so a hundred-video sweep
+        submitted one at a time is rate-limited before it is half done. That is
+        the difference between an API that can express a sweep and one that can
+        run it.
+
+        **All or nothing.** Every target is normalised before anything is
+        queued, so one bad id refuses the batch instead of queueing the other
+        ninety-nine and answering 202 — a partial sweep is the worst outcome
+        here, because the caller believes it ran and the gap surfaces later as
+        an absence nobody is looking for.
+
+        Unlike `POST /v1/jobs` this never returns a payload. A target already
+        held is named with its digest, which is what
+        `GET /v1/artifacts/{digest}` needs; returning a hundred bodies would
+        make a submission a bulk download.
+        """
+        source = registry.get(submission.kind)
+        if not submission.targets:
+            raise ValidationError("a batch names at least one target")
+        if len(submission.targets) > MAXIMUM_BATCH:
+            raise ValidationError(
+                f"a batch is at most {MAXIMUM_BATCH} targets, and this one names "
+                f"{len(submission.targets)}"
+            )
+        # Normalised first, all of them, before a single row is added.
+        targets = [normalize_target(source.target_type, target) for target in submission.targets]
+
+        collection = CollectionService(payloads=payloads, database=database, registry=registry)
+        queued: list[JobView] = []
+        held: list[HeldView] = []
+        for target in targets:
+            if not submission.refresh:
+                cached = collection.cached(submission.kind, target)
+                if cached is not None:
+                    held.append(HeldView(target=target, digest=cached.payload.digest))
+                    continue
+            job = Job(
+                kind=submission.kind,
+                target=target,
+                api_key_id=api_key.identifier,
+                refresh=submission.refresh,
+                max_attempts=attempts_for(source),
+                webhook_url=str(submission.webhook_url) if submission.webhook_url else None,
+            )
+            open_session.add(job)
+            open_session.flush()
+            queued.append(
+                JobView(
+                    job_id=job.identifier,
+                    kind=job.kind,
+                    target=job.target,
+                    state=job.state.value,
+                    attempt_count=job.attempt_count,
+                )
+            )
+        return BatchView(queued=queued, held=held)
+
     @versioned.get("/jobs", response_model=JobListView)
     def list_jobs(
         open_session: Annotated[Session, Depends(get_reading_session)],
@@ -390,7 +700,12 @@ def create_application(
         target: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
-        limit: int = 50,
+        # Declared rather than clamped. A silent clamp turns `limit=100000`
+        # into 500 and `limit=0` into 1 without saying so, and a bare
+        # `limit: int` advertises an unbounded integer in the OpenAPI
+        # document — so the schema promised something the code refused to do.
+        # MAXIMUM_PAGE is module-level, so it is the one number here too.
+        limit: int = Query(default=50, ge=1, le=MAXIMUM_PAGE),
         cursor: str | None = None,
     ) -> JobListView:
         """A page of the job ledger, newest first.
@@ -417,9 +732,10 @@ def create_application(
             query = query.where(Job.created_at <= until)
         if cursor:
             moment, identifier = _decode_cursor(cursor)
-            # Keyset comparison spelled out rather than as a row value: SQLite
-            # supports the tuple form but the typed API wants columns on both
-            # sides, and the expanded form is what every planner optimises.
+            # Keyset comparison spelled out rather than as a row value:
+            # SQLAlchemy's typed API wants columns on both sides of the
+            # comparison, not a row constructor, and the expanded form is
+            # what every planner optimises regardless of dialect.
             query = query.where(
                 or_(
                     Job.created_at < moment,
@@ -427,10 +743,9 @@ def create_application(
                 )
             )
 
-        page = max(1, min(limit, MAXIMUM_PAGE))
-        rows = list(open_session.scalars(query.limit(page + 1)).all())
-        more = rows[page:]
-        rows = rows[:page]
+        rows = list(open_session.scalars(query.limit(limit + 1)).all())
+        more = rows[limit:]
+        rows = rows[:limit]
         return JobListView(
             jobs=[_job_view(job) for job in rows],
             cursor=_encode_cursor(rows[-1].created_at, rows[-1].identifier) if more else None,
@@ -443,7 +758,7 @@ def create_application(
         target: str | None = None,
         since: datetime | None = None,
         until: datetime | None = None,
-        limit: int = 50,
+        limit: int = Query(default=50, ge=1, le=MAXIMUM_PAGE),
         cursor: str | None = None,
     ) -> ArtifactListView:
         """What was actually collected, as opposed to what was asked for.
@@ -470,15 +785,15 @@ def create_application(
                 )
             )
 
-        page = max(1, min(limit, MAXIMUM_PAGE))
-        rows = list(open_session.scalars(query.limit(page + 1)).all())
-        more = rows[page:]
-        rows = rows[:page]
+        rows = list(open_session.scalars(query.limit(limit + 1)).all())
+        more = rows[limit:]
+        rows = rows[:limit]
         return ArtifactListView(
             artifacts=[
                 ArtifactView(
                     kind=artifact.kind,
                     target=artifact.target,
+                    schema_version=artifact.schema_version,
                     digest=artifact.digest,
                     byte_count=artifact.byte_count,
                     fetched_at=artifact.fetched_at,
@@ -487,6 +802,93 @@ def create_application(
                 for artifact in rows
             ],
             cursor=_encode_cursor(rows[-1].fetched_at, rows[-1].identifier) if more else None,
+        )
+
+    @versioned.get("/artifacts/{digest}", response_model=ArtifactPayloadView)
+    def read_artifact(
+        digest: str,
+        open_session: Annotated[Session, Depends(get_reading_session)],
+        payloads: Annotated[PayloadStore, Depends(get_payloads)],
+        registry: Annotated[SourceRegistry, Depends(get_registry)],
+    ) -> ArtifactPayloadView:
+        """One observation from the history, addressed by its content.
+
+        `GET /v1/artifacts` has always handed out digests and nothing could
+        dereference them — reaching an old payload meant having kept the job id
+        that produced it, and retention deletes artifacts without touching job
+        rows, so those two age apart.
+
+        The bytes come back verbatim. No model is in this path, deliberately:
+        a payload written by an older normalizer that the current one would
+        reject still reads, because the original observation is the thing worth
+        keeping and re-parsing it with today's shape is how history gets lost.
+        """
+        observed = list(
+            open_session.scalars(
+                select(Artifact)
+                .where(Artifact.digest == digest)
+                .order_by(Artifact.fetched_at.desc())
+            ).all()
+        )
+        artifact = observed[0] if observed else None
+        if artifact is None:
+            raise NotFoundError(f"no artifact stored with digest: {digest}")
+
+        # A retired kind keeps its history: it has no source to ask, so nothing
+        # is retracted and nothing is claimed about the current shape.
+        try:
+            source = registry.get(artifact.kind)
+        except TubedepthError:
+            source = None
+
+        retracted = retracted_versions_of(source) if source is not None else frozenset()
+        if retracted and artifact.schema_version is None:
+            # Not "fine", "not known". A kind that has withdrawn a version has
+            # rows that predate the column holding NULL, and reading NULL as
+            # safe is how a known-bad observation gets served with a 200 — the
+            # exact thing the withdrawal exists to refuse. 409 rather than 410,
+            # because we are not claiming it *is* retracted: we are saying the
+            # question cannot be answered until something answers it.
+            raise ConflictError(
+                f"the schema version of {digest} was never recorded, and {artifact.kind} has "
+                "withdrawn a version — run `tubedepth backfill-schema-versions` and ask again"
+            )
+        if artifact.schema_version in retracted:
+            raise RetractedError(
+                f"the {artifact.kind} observation at {digest} was collected by "
+                f"schema version {artifact.schema_version}, which is retracted: its payloads "
+                "are wrong rather than merely old"
+            )
+
+        try:
+            body = json.loads(payloads.read(artifact.digest))
+        except FileNotFoundError as error:
+            # Two explanations, and this route can check neither: retention
+            # removed the bytes, or the index and the payload store are not the
+            # pair they were built as — a cutover that moved
+            # TUBEDEPTH_DATABASE_URL and left TUBEDEPTH_DATA_DIR behind. It
+            # used to assert the first one unconditionally, which sends whoever
+            # is on call to look for a retention bug that is not there while
+            # every payload in the store is unreachable for the other reason.
+            raise NotFoundError(
+                f"the {artifact.kind} index has a row for {digest} but the payload store has "
+                f"no bytes for it — either it aged out of retention, or TUBEDEPTH_DATA_DIR is "
+                f"not the store this index was built against "
+                f"(observed {artifact.fetched_at:%Y-%m-%d %H:%M} UTC)"
+            ) from error
+
+        return ArtifactPayloadView(
+            digest=artifact.digest,
+            kind=artifact.kind,
+            target=artifact.target,
+            observations=len(observed),
+            first_fetched_at=observed[-1].fetched_at,
+            fetched_at=artifact.fetched_at,
+            schema_version=artifact.schema_version,
+            current_schema_version=source.schema_version if source is not None else None,
+            payload_fields=sorted(body) if isinstance(body, dict) else [],
+            current_fields=sorted(source.payload_model.model_fields) if source is not None else [],
+            payload=body,
         )
 
     @versioned.get("/jobs/{job_id}", response_model=JobView)
@@ -531,9 +933,21 @@ def create_application(
             # those apart is the difference between "wait" and "you asked for
             # something that does not exist".
             raise ConflictError(f"job has not finished: {job_id} is {job.state.value}")
-        return PlainTextResponse(
-            payloads.read(job.payload_digest).decode(), media_type="application/json"
-        )
+        try:
+            body = payloads.read(job.payload_digest).decode()
+        except FileNotFoundError as error:
+            # Retention deletes artifacts and never touches job rows, so this
+            # is the ordinary end state of every job older than the retention
+            # window rather than a corner case. Letting it raise reaches
+            # FastAPI's default handler as a 500, which sends whoever is on
+            # call into our tracebacks to find that retention did exactly what
+            # it is configured to do. 404 is the honest answer: the job is
+            # real, what it collected is not here, and it is not coming back.
+            raise NotFoundError(
+                f"the result of {job_id} is no longer stored: it was collected and has "
+                "since aged out of retention"
+            ) from error
+        return PlainTextResponse(body, media_type="application/json")
 
     application.include_router(versioned)
     return application

@@ -13,6 +13,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 
 from pydantic import BaseModel
+from pydantic import ValidationError as PydanticValidationError
 
 from .database import Database
 from .egress.transport import DirectEgress, Egress
@@ -23,6 +24,7 @@ from .payload_store import PayloadStore, StoredPayload
 from .repositories import ArtifactRepository
 from .schemas import Degradation, VideoBundle
 from .sources import SourceRegistry, default_registry
+from .sources.registry import DataSource, cache_parameters_of
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime, YtdlpRuntime
 
 logger = logging.getLogger(__name__)
@@ -63,10 +65,36 @@ class CollectionService:
     def kinds(self) -> list[str]:
         return self._registry.kinds()
 
+    def _question(self, source: DataSource, target: str) -> str:
+        """The cache key for one question, computed in exactly one place.
+
+        `collect` and `cached` are the same lookup asked from two processes —
+        the worker and the API — and a key built twice is a key that can be
+        built two ways. When they disagree the API stops matching anything the
+        worker writes, *and* keeps matching every row from before the change
+        and serving it as a 200: both failures the fingerprints docstring
+        names, at once.
+
+        Note `default_registry()` is @cache'd, so what a source declares is
+        frozen per process, and `tubedepth serve` and `tubedepth work` are
+        separate processes. Three of these caps are environment variables now
+        (`TUBEDEPTH_LISTING_LIMIT`, `_COMMENT_LIMIT`, `_TRENDING_LIMIT`), so two
+        units with different environments compute different keys and the API
+        answers for a question the worker did not collect. That is why
+        `GET /v1/sources` reports the values actually in effect and both unit
+        files carry the variables together — see `default_registry`.
+        """
+        return fingerprint(
+            kind=source.kind,
+            target=target,
+            schema_version=source.schema_version,
+            parameters=cache_parameters_of(source),
+        )
+
     def collect(self, kind: str, target: str, *, refresh: bool = False) -> Collected:
         source = self._registry.get(kind)
         normalized = normalize_target(source.target_type, target)
-        question = fingerprint(kind=kind, target=normalized, schema_version=source.schema_version)
+        question = self._question(source, normalized)
 
         if not refresh:
             cached = self._cached(question, kind, normalized)
@@ -79,7 +107,9 @@ class CollectionService:
         else:
             result = source.collect(normalized, self._egress, self._runtime)
         stored = self._payloads.put(kind, result.model_dump_json(indent=1).encode())
-        self._record(question, kind, normalized, stored, source.default_freshness)
+        self._record(
+            question, kind, normalized, stored, source.default_freshness, source.schema_version
+        )
         return Collected(
             kind=kind, target=normalized, payload=stored, result=result, from_cache=False
         )
@@ -121,8 +151,7 @@ class CollectionService:
     def cached(self, kind: str, target: str) -> Collected | None:
         """A fresh answer if one is held, without collecting. Never fetches."""
         source = self._registry.get(kind)
-        question = fingerprint(kind=kind, target=target, schema_version=source.schema_version)
-        return self._cached(question, kind, target)
+        return self._cached(self._question(source, target), kind, target)
 
     # -- the cache -------------------------------------------------------
 
@@ -135,7 +164,18 @@ class CollectionService:
         """
         if self._database is None:
             return None
-        with self._database.session() as session:
+        # A reader, and it has to say so. `readonly=True` uses a separate
+        # engine with no write path (`Database`'s docstring) rather than a
+        # flag on the same one, so a lookup here structurally cannot take a
+        # row lock it has no business holding — on SQLite this discipline
+        # started life as the fix for a real deadlock (`decisions/002`: every
+        # non-readonly session opened BEGIN IMMEDIATE, so a pure lookup
+        # serialised against the worker, and once `POST /v1/jobs/batch` called
+        # this from inside its own write transaction, the second target
+        # deadlocked against a lock it was already holding). PostgreSQL has no
+        # such lock to collide with, but the same separation is what makes
+        # `readonly=True` a guarantee here instead of a hint nothing enforces.
+        with self._database.session(readonly=True) as session:
             artifact = ArtifactRepository(session).fresh(question)
             if artifact is None:
                 return None
@@ -148,8 +188,31 @@ class CollectionService:
         # cache still has to produce the videos it holds, and a cache that
         # cannot reproduce the parsed value makes every consumer refetch —
         # which turns a repeat sweep from cheap into a silent no-op.
-        model = self._registry.get(kind).payload_model
-        result = model.model_validate_json(self._payloads.read(digest))
+        source = self._registry.get(kind)
+        try:
+            result = source.payload_model.model_validate_json(self._payloads.read(digest))
+        except PydanticValidationError:
+            # A model changed and its `schema_version` did not, so the cache
+            # holds bytes the current shape rejects. This is the only place in
+            # the codebase that parses a stored payload with a model, and
+            # letting it raise reaches FastAPI's default handler: `POST
+            # /v1/jobs` answers 500 for every target that has a cached
+            # artifact, which is most of them.
+            #
+            # A stored payload the current model cannot read is not an answer
+            # to the current question, so it is a miss. The cost becomes
+            # requests until someone bumps, rather than an API that is down —
+            # and the warning plus the payload-shape check in CI are what make
+            # the cause loud instead of the symptom.
+            logger.warning(
+                "stored payload for %s %s (%s) does not fit schema version %s; "
+                "treating it as a cache miss — a bump was probably missed",
+                kind,
+                target,
+                digest[:12],
+                source.schema_version,
+            )
+            return None
         return Collected(
             kind=kind,
             target=target,
@@ -165,6 +228,7 @@ class CollectionService:
         target: str,
         stored: StoredPayload,
         freshness: object,
+        schema_version: str,
     ) -> None:
         if self._database is None:
             return
@@ -176,4 +240,5 @@ class CollectionService:
                 digest=stored.digest,
                 byte_count=stored.byte_count,
                 freshness=freshness,  # type: ignore[arg-type]
+                schema_version=schema_version,
             )

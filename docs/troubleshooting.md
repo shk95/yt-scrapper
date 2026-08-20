@@ -57,6 +57,12 @@ would break on every recording and on every video YouTube still answers fully.
 
 ## SQLite
 
+**Historical.** The application ran on SQLite until the PostgreSQL cutover
+(#15); `Database` refuses a SQLite URL now, except as `tubedepth transfer
+--from`'s source. Kept rather than deleted: these cost someone an afternoon
+each, and the reasoning survives even though the entry point that could
+trigger them no longer does.
+
 ### `database is locked`
 
 Two causes, and they need different fixes.
@@ -76,17 +82,120 @@ writing inside a transaction it opened by reading.
 
 ## Third-party services
 
+## `duplicate column name: …` from `tubedepth migrate`
+
+Alembic is behind the schema: the column is already in the database, but
+`alembic_version` does not know it. The boot path issues no DDL any more
+(#14) — nothing opens the database and quietly adds a column any more — so
+this is no longer something a running deployment causes on its own between a
+model change and the migration. It still happens to a database that was
+opened by the *old* code before #14 shipped, back when every boot repaired
+missing columns and left `alembic_version` untouched, or to a database that
+predates migrations entirely and was built with `Database.create_schema()`
+outside `tubedepth migrate`.
+
+Check what is real before doing anything:
+
+```sh
+uv run python -c "
+import sqlite3; c = sqlite3.connect('var/tubedepth.db')
+print(c.execute('SELECT * FROM alembic_version').fetchone())
+print(sorted(r[0] for r in c.execute(\"SELECT name FROM sqlite_master WHERE type='table'\")))"
+uv run alembic heads
+```
+
+If the schema already matches the head — the tables and columns are all there,
+which is what the startup repair does — then the fix is to record that rather
+than to replay it:
+
+```sh
+uv run tubedepth migrate --stamp
+```
+
+**Do not stamp a database whose schema does not actually match.** Stamping is a
+claim that the migrations have run, and a wrong claim is silently believed
+forever after. If only *some* of the head's changes are present, `--stamp` to
+the last revision that is genuinely applied and upgrade from there.
+
+`--stamp` exists for the one-time case of a database that predates migrations;
+this is the same shape arriving a different way.
+
+## `stored payload for … does not fit schema version …`
+
+A payload model changed and its source's `schema_version` did not, so the cache
+holds bytes the current shape rejects.
+
+Nothing is broken and nothing is lost — the collection path treats it as a miss
+and re-collects, which is the correct answer to a question the stored bytes no
+longer answer. What it costs is requests against the one per-address budget,
+one per affected target, until the version is bumped.
+
+The fix is the bump. `just check` will already be failing with
+`… changed shape without a bump`, naming the kind and the line; bump the
+version in that source module and run `just record-payload-shapes`.
+
+Before that check existed this failed differently and much worse: the
+`ValidationError` reached FastAPI's default handler, so `POST /v1/jobs`
+answered 500 for every target that had a cached artifact.
+
+## `this connection's search_path leads with …, not 'tubedepth'`
+
+`_database()` refuses to proceed before touching a table (#16). The
+connection's `search_path` does not lead with this service's schema, which
+means unqualified names — every table this codebase creates, including
+`alembic_version` — would resolve into whatever schema does lead, most often
+`public`, the one three other services on the shared PostgreSQL instance also
+use. Nothing about that fails on its own: it works until someone else's
+migration, or a `pg_dump -n tubedepth`, meets the tables sitting where they
+should not be.
+
+The cause is always the same: `deploy/postgres-bootstrap.sql`'s
+`ALTER ROLE ... IN DATABASE ... SET search_path = tubedepth, pg_catalog` was
+never run against this host, or was run against the wrong role or the wrong
+database. This is the gap CI cannot see — CI always bootstraps from that file,
+a host set up by hand may not have.
+
+The fix is to run the bootstrap file's `ALTER ROLE` statement for the role
+this deployment logs in as, against the database it connects to, then
+reconnect — a session already open when the `ALTER ROLE` runs keeps its old
+`search_path` until it reconnects:
+
+```sql
+ALTER ROLE tubedepth_runtime IN DATABASE <the database name>
+  SET search_path = tubedepth, pg_catalog;
+```
+
+## `no schema at …` from any command
+
+A fresh `--data-dir`, or one pointed at a database nothing has migrated yet.
+`_database()` — what every CLI entry point opens the database through —
+checks that the schema exists before handing it to the command, and refuses
+rather than letting the first query fail deeper down with `no such table`
+(#14: the boot path issues no DDL, so it cannot silently build one for you
+either).
+
+The fix is what the message says:
+
+```sh
+uv run tubedepth migrate --data-dir <the same --data-dir>
+```
+
 ## `table jobs has no column named api_key_id`
 
 The database file predates the column. `create_all` never alters a table it
-already finds, so a schema change lands in new databases only and the old one
-fails at the first INSERT rather than at startup.
+already finds, so a schema change lands in new databases only, and the old one
+fails at the first INSERT that touches the missing column rather than at
+startup.
 
-`create_schema()` now repairs this itself for nullable columns — run any command
-that opens the database (`tubedepth jobs`, `tubedepth work`) and the column is
-added. A column that is required and has no default cannot be filled in for
-existing rows; that case refuses by name instead, and the fix is to migrate the
-file by hand or delete it if it holds nothing worth keeping.
+Nothing repairs this at open time (#14) — the boot path issues no DDL, so no
+command run against the file adds the column for you any more. The fix is
+`tubedepth migrate`: every column any model has ever gained is one of the
+revisions it runs in order, so running it against this file brings it to the
+schema the code expects.
+
+If `tubedepth migrate` itself then fails with `duplicate column name`, that
+means the file already has the column from before #14 shipped — see that
+entry above, and use `--stamp` rather than running the migration again.
 
 ## `no caption track in the video's own language: <tag>`
 
@@ -132,10 +241,18 @@ than the video, and it is deliberately raised as a `RateLimitedError` so the
 rate controller quarantines that lane instead of treating it as a bad video.
 
 Before doing anything else, upgrade: `just update-ytdlp`. That fixes this more
-often than any other step. After that the ladder is cookies
-(`TUBEDEPTH_COOKIES_FILE`), then `--impersonate`, then a different egress. Do
-not raise concurrency to make up the lost throughput — that is the input that
-produced the check.
+often than any other step. After that, export a cookie jar in Netscape format
+and point `TUBEDEPTH_COOKIES_FILE` at it; the worker carries it into every
+extraction, and refuses to start if the path is wrong rather than quietly
+sending nothing. Use an account you can afford to lose — a jar is a session.
+
+`--impersonate` is the rung after that and **is not implemented**: it needs a
+`curl_cffi` dependency nobody has taken. This line used to name it as though
+it were available, alongside the cookie variable that nothing read.
+
+A different egress is last and on this host is probably backwards — see the
+proxy section of the README. Do not raise concurrency to make up the lost
+throughput either; that is the input that produced the check.
 
 ## `video cannot be watched from here: <id>`
 

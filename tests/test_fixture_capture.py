@@ -11,6 +11,8 @@ from __future__ import annotations
 import json
 from typing import Any
 
+import pytest
+
 from tubedepth.fixture_capture import (
     REDACTED_AVATAR_URL,
     REDACTED_CAPTION_URL,
@@ -145,3 +147,53 @@ def test_an_innertube_response_has_its_signed_media_urls_replaced() -> None:
     assert "googlevideo" not in json.dumps(redacted)
     assert "trackingParams" not in redacted
     assert redacted["contents"]["title"] == "kept"
+
+
+def test_recording_an_innertube_surface_strips_what_must_not_be_committed() -> None:
+    """`redact_innertube_response` had no caller outside this file.
+
+    Nothing could record an InnerTube fixture at all — `capture-fixture` drives
+    yt-dlp and applies the other rule — so the four in the tree were made by
+    hand, and the redaction ran only if whoever made them remembered to call it
+    from a REPL. Its own docstring records that this already failed once, and
+    `tests/test_repository_hygiene.py` catches it after the credential is in
+    git history, where deleting the file does not remove it.
+    """
+    from tubedepth.sources.innertube_sources import record_surface
+
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeCaller:
+        def call(self, endpoint: str, body: dict[str, object]) -> dict[str, object]:
+            calls.append((endpoint, dict(body)))
+            return {
+                "responseContext": {"visitorData": "Cgt2aXNpdG9yLWlk"},
+                "streamingData": {
+                    "formats": [{"url": "https://rr3---sn-abc.googlevideo.com/videoplayback?sig=x"}]
+                },
+                "contents": {"title": "kept"},
+            }
+
+    recorded = record_surface("next-related", "dQw4w9WgXcQ", caller=FakeCaller())  # type: ignore[arg-type]
+
+    assert calls == [("next", {"videoId": "dQw4w9WgXcQ"})], (
+        "the recorded request was not the one the source makes"
+    )
+    assert "responseContext" not in recorded
+    assert "googlevideo.com" not in json.dumps(recorded)
+    assert recorded["contents"] == {"title": "kept"}
+
+
+def test_a_surface_nobody_records_is_refused_by_name() -> None:
+    """`channel.about` is the one that is deliberately absent — its data sits
+    behind a continuation read from a first response, so it needs the source's
+    own two-call flow rather than one request."""
+    from tubedepth.errors import ValidationError
+    from tubedepth.sources.innertube_sources import record_surface
+
+    class FakeCaller:
+        def call(self, endpoint: str, body: dict[str, object]) -> dict[str, object]:
+            raise AssertionError("no request should be made for a surface we do not record")
+
+    with pytest.raises(ValidationError, match="browse-channel-about"):
+        record_surface("browse-channel-about", "@someone", caller=FakeCaller())  # type: ignore[arg-type]

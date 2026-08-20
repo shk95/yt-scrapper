@@ -84,6 +84,9 @@ class CommentsSource:
     def __init__(self, *, sort: str = "top", limit: int = DEFAULT_LIMIT) -> None:
         self._sort = sort
         self._limit = limit
+        # Both are in the cache key: a harvest sorted by `top` and capped at 200
+        # is not an answer to a request for `new`.
+        self.cache_parameters = {"sort": sort, "limit": limit}
 
     def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> CommentHarvest:
         dump = runtime.extract(

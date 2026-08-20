@@ -1,0 +1,32 @@
+# The schedule behind tubedepth-watch.service.
+#
+# Hourly, because that is the resolution a view-count series needs to show a
+# video moving while it still matters, and because thirty videos an hour is
+# around one percent of the measured throughput ceiling — small enough not to
+# compete with ordinary collection. Both halves of that arithmetic are in
+# docs/status.md; change the watch list size and the cadence together, and
+# remember that a `channel`, `search` or `trending` line is worth up to
+# TUBEDEPTH_LISTING_LIMIT video lines rather than one.
+#
+# Install it with the service beside it; see tubedepth-watch.service.
+
+[Unit]
+Description=Queue the watch list hourly
+
+[Timer]
+# Not at boot exactly: the worker and the API start at the same moment, and a
+# pass queued before the worker is up just sits there looking like a stall.
+OnBootSec=5min
+OnUnitActiveSec=1h
+
+# Fire once for a window that was missed rather than not at all. This machine
+# is a laptop that suspends, so without this an overnight gap is simply absent
+# from the series instead of being a longer interval between two samples.
+Persistent=true
+
+# Not on the hour. Every instance of this timer asking YouTube for the same
+# thing at :00 is a pattern, and the cost of avoiding it is nothing.
+RandomizedDelaySec=5min
+
+[Install]
+WantedBy=timers.target

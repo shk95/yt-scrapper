@@ -3,7 +3,7 @@
 Rewritten freely as the project moves. Anything that must survive a rewrite —
 an error and its fix — belongs in [`troubleshooting.md`](troubleshooting.md).
 
-Last updated: 2026-08-19.
+Last updated: 2026-08-20.
 
 ---
 
@@ -95,6 +95,43 @@ stayed there. Nothing about YouTube changed during those four minutes. Seven
 videos in the batch had captions turned off, and each of those failures was
 reported to the controller as throttling, doubling the lane's minimum interval
 — 1s, 2s, 4s, 8s, 16s. The tail rate was our own ceiling.
+
+**One channel end to end, measured 2026-08-20.** The first sustained run — 474
+`video.metadata` jobs fanned out from one listing, concurrency 8, alongside the
+hourly sampler:
+
+| | |
+| --- | --- |
+| jobs | 474, **0 failed** |
+| of those, actually collected | 374 (100 were cache hits the sampler already held) |
+| wall clock | 430 s |
+| collection throughput | **~3,100 jobs/h** |
+| lane at the end | window **6.0 — the ceiling** — quarantine streak 0 |
+
+Three things came out of it, and two were surprises.
+
+*Sustained load is not slower than a short sweep.* Every earlier figure here
+came from forty-job runs; this is the first one long enough to be called
+sustained, and the window sat at its ceiling throughout with the lane never
+quarantined. YouTube did not push back at all. Anywhere this file says
+behaviour under sustained load is unmeasured, it now is — for one channel, at
+this size.
+
+*That is only sayable because the lane is now recorded.* Before the same day,
+the controller's state lived in the worker's memory and "it never quarantined"
+would have been a guess. It is in `lane_health`.
+
+*The cap was not the constraint.* The Data API reports 697 videos for the
+channel; `channel.videos` returned **474** with the per-listing cap at 700, so
+it did not bind. The difference is the `/videos` tab itself, which is what
+issue #2 said would happen and deliberately kept as a separate question —
+Shorts and past streams are not in that tab at any cap. Raising the limit
+widens *how many*, never *what*.
+
+*No geo-blocks, and that is not an answer.* Zero failures carried a country
+marker. One Korean beauty channel is a narrow corpus for that question —
+region blocking concentrates in music, sport and broadcast clips — so this is
+not the measurement milestone 1 asks for, and that milestone stays open.
 
 Sweep 3 had **eight** caption-less videos out of twenty, twice the proportion,
 and did not slow down at all. That is the confirmation: the collapse was the
@@ -304,6 +341,35 @@ its row in `running`.
 
 ---
 
+## What is actually running here
+
+Recorded 2026-08-20, because the deployment has diverged from `deploy/` in one
+way that nothing else would tell you.
+
+| unit | state |
+| --- | --- |
+| `tubedepth-worker` | enabled and running |
+| `tubedepth-sample.timer` | enabled, hourly — **the unit pair `deploy/` no longer has.** #20 replaced it with `tubedepth-watch.{service,timer}` and deleted the sampler pair; cutting this host over is [#24](https://github.com/slopindustries/yt-scrapper/issues/24) |
+| `tubedepth-api` | **not installed** — the dashboard and every `/v1` route are reachable only by running `tubedepth serve` by hand |
+
+**The installed worker unit carries `TUBEDEPTH_LISTING_LIMIT=700`; the copy in
+`deploy/` has it commented out.** That was set to sweep one 697-video channel
+in full. If the API unit is installed later it **must carry the same value** —
+`serve` and `work` each read it once, and a disagreement makes the API compute
+a different cache key than the worker records, so it stops matching what the
+worker writes while still matching rows from before the change.
+
+The installed sampler's watch list is `~/.config/tubedepth/watchlist.txt`: 100
+bare video ids from `@director_pihyunjung`, enumerated 2026-08-20. It is
+operator data and deliberately outside the repository. **It is still in the
+bare-id format**, which `tubedepth watch` does not read — converting it is part
+of #24, not of #20.
+
+Store as of that day: 1,556 artifacts, 1,938 jobs, two active API keys. The
+oldest artifact is about a day old, so **nothing has reached the thirty-day
+retention age yet** — the first prune that actually deletes anything has not
+happened, and the shared-blob fix landed before it can.
+
 ## This machine
 
 Prefer `tool/doctor.sh` over reading this section — the script reports what is
@@ -317,6 +383,504 @@ Direct egress is a residential KT line in KR.
 ---
 
 ## Decisions that are expensive to reverse
+
+### PostgreSQL is where this is going, and why
+
+**Decided 2026-08-20, corrected 2026-08-20.** The other scrapers in this
+fleet already run on PostgreSQL, and the intended shape is **one shared
+PostgreSQL server (cluster) with one database per service** — not one shared
+database with a schema and a role per service. Confirmed against reality:
+trend-radar's manifest declares `database: trend_radar`, `schema:
+trend_radar` — its own database on the same server. (An earlier version of
+this section had this backwards, describing the shared unit as "one physical
+database with logical boundaries per service"; that was wrong and this
+paragraph replaces it rather than sitting alongside it.)
+
+*The reason is not performance, and pretending otherwise would set the wrong
+priorities.* The rate controller is the binding constraint here, not the
+database: the first sustained run held its window at the ceiling with the
+quarantine streak at zero, so a faster claim buys nothing today. What decides
+it is that **SQLite cannot participate in that architecture at all**, for
+three reasons that all hold regardless of whether the shared unit is a
+database or a server:
+
+*No shared connection budget, no central role management.* A file has neither
+`max_connections` nor roles, and both are exactly what the rest of the fleet
+coordinates through — this is rule 4, and it is the one rule that still
+crosses the per-service-database boundary, because roles and
+`max_connections` are cluster-global (see "규정 적용" below).
+
+*No shared operational story.* Backup, restore, monitoring are all things
+every other service gets by being a database on the fleet's server, and a
+file is not. With several scrapers, the one that is different is the one
+whose backup gets forgotten and whose restore nobody remembers. That tax does
+not shrink with scale.
+
+*The write-lock class of bug.* `decisions/002` records it twice and this
+repository produced a third instance on 2026-08-20 — `POST /v1/jobs/batch`
+held a write session and called a cache lookup that opened the write engine,
+deadlocking a request against a lock it was already holding. Every new route
+on SQLite carries that landmine. This one was never about the
+shared-database-vs-shared-server question at all — a file deadlocks against
+itself regardless of what anything else on the network looks like — but it
+is real and it is exactly the kind of thing PostgreSQL does not do.
+
+**The rules for the shared server are in [`shared-postgres.md`](shared-postgres.md).**
+Two of them can damage another service — autogenerate dropping tables it cannot
+see the models for, and `alembic_version` collisions — so they are not optional.
+
+**Scope, measured.** What is actually bound to SQLite: `database.py` (two
+engines, four PRAGMAs, the `BEGIN IMMEDIATE` hook, `_repair_existing_tables`),
+`migrations/env.py` (default URL, `render_as_batch`), the URL in `cli.py`, and
+three test modules using raw `sqlite3`. Roughly 150 lines.
+
+**The claim is already portable**, which is the part that lowers the risk most.
+`JobRepository.claim` is a SELECT followed by an UPDATE guarded on
+`state == QUEUED` with a rowcount check. Under PostgreSQL's READ COMMITTED two
+workers can pick the same candidate, but the second UPDATE re-evaluates against
+the committed row version and matches nothing. `FOR UPDATE SKIP LOCKED` is an
+optimisation, not a correction.
+
+**Cutover, not dual dialect** — supporting both doubles the test surface
+forever to preserve a property (runs with no server) that fleet consistency has
+made unwanted. And **the tests move too**: "production on PostgreSQL, tests on
+SQLite" is how a dialect bug ships, which is exactly what the deadlock above
+was. Docker is available on this host (see AGENTS.md), so a compose file and a
+CI service container are the whole cost.
+
+### The order this is being done in
+
+The boundary in this list is **v1.0.0**: the point where real operation is
+possible and the PostgreSQL migration is complete. dev merges to master there
+and the merge is tagged. Release means code complete — this host's actual
+cutover is post-release ops, tracked as [#24](https://github.com/slopindustries/yt-scrapper/issues/24).
+
+On GitHub this is two dimensions rather than one. **Milestones say what a body
+of work is for; the `pre-1.0` and `post-1.0` labels say which side of the tag
+it falls on.** A theme and a deadline are different questions, and collapsing
+them would mean either splitting the trend work in half or pretending the
+release gate is a theme.
+
+Before the tag, in order:
+
+1. ~~**Check it runs here**~~ — done 2026-08-20, and it found two things. See
+   below.
+2. ~~**Stop reconnecting six times a minute**~~ — done. The worker was a poll
+   loop made of process restarts, which is a local inefficiency against a file
+   and a fleet-budget problem against a shared instance. See `Worker.serve`.
+3. ~~**[#14](https://github.com/slopindustries/yt-scrapper/issues/14)** — no
+   DDL on the boot path.~~ Done.
+4. ~~**[#15](https://github.com/slopindustries/yt-scrapper/issues/15)**, the
+   cutover, deciding
+   [#16](https://github.com/slopindustries/yt-scrapper/issues/16) along the way
+   rather than after it — both shaped by the fleet regulation (see "규정
+   적용" below).~~ Done 2026-08-20 (Task 8): `Database` refuses a non-PostgreSQL
+   URL, `settings.database_url` has no fallback, and the SQLite branch is
+   gone from every path except `tubedepth transfer --from`'s source. #16's
+   `verify_placement()`-before-`is_migrated()` ordering landed in an earlier
+   task and is unchanged here.
+5. **The [release gate](https://github.com/slopindustries/yt-scrapper/milestone/4)** — the three conditions the owner
+   set, in order: **[#20](https://github.com/slopindustries/yt-scrapper/issues/20)** a `watch` subcommand collecting by
+   channel, search keyword and trending region; **[#21](https://github.com/slopindustries/yt-scrapper/issues/21)** the
+   API docs made a perfect, mechanically-enforced match; **[#22](https://github.com/slopindustries/yt-scrapper/issues/22)**
+   a Docker image with a compose example; then **[#23](https://github.com/slopindustries/yt-scrapper/issues/23)**, the cut.
+
+After the tag:
+
+6. **[#24](https://github.com/slopindustries/yt-scrapper/issues/24)** — cut this host over: postgres URL, watch units
+   replacing the sampler, watchlist format migration. Regulation §14's
+   extraction test is a pass condition of that issue rather than a formality.
+7. **[#13](https://github.com/slopindustries/yt-scrapper/issues/13)** (a
+   bundle's parts bypass every lane but its own). Independent of the database
+   and currently dormant — nothing runs bundles, since what this host has on
+   a schedule collects `video.metadata` only. It wakes the moment anything does.
+8. **[#3](https://github.com/slopindustries/yt-scrapper/issues/3) route A**,
+   the delta layer, where the accumulated history pays. Then
+   [#25](https://github.com/slopindustries/yt-scrapper/issues/25) — reading a target's history is one request per
+   artifact, which is the read route A is worst served by — and #17, #18, #1
+   as the verification backlog.
+
+#13 sits after the migration rather than before it because it is dormant while
+SQLite-shaped decisions keep accruing — 2026-08-20 alone added four, one of
+them the deadlock.
+
+
+### index와 payload store는 한 쌍이고, 코드가 그것을 강제한다
+
+**결정 2026-08-20.** artifact 테이블은 index이고 바이트는
+`TUBEDEPTH_DATA_DIR/payloads`의 파일이다. 둘은 따로 이동할 수 있고, 컷오버(#15,
+#24)는 정확히 그 이동을 절반씩 한다 — DB URL은 PostgreSQL로 옮기고 payload는
+디스크에 남긴다. 그 중간 상태에서 `prune`을 한 번 돌리면 store 전체가 사라진다.
+
+`RetentionService._sweep_orphans`는 **부재로 판단한다**: artifact 행이 가리키지
+않는 payload는 쓰레기다. index에 행이 **하나도 없을 때** 그 추론은 조용히
+뒤집힌다. 모든 파일이 orphan이 되고, 로그에는 "swept N payload file(s)"라는
+정상 동작처럼 보이는 줄이 남는다. 그리고 sweep은 되돌릴 수 없다.
+
+그래서 `prune`은 그 상태를 **거부한다**. 비대칭이 기본값을 정한다 — 거부는
+운영자에게 명령 하나를 물리고, 잘못 추측하면 재수집으로 복구되지 않는 시계열
+전체를 잃는다(3주 전 조회수는 어디에도 없다). `tubedepth collect`는 데이터베이스를
+받지 않아 index 없이 payload만 남기므로 index가 정말로 없는 host도 존재한다.
+그쪽은 `--sweep-without-an-index`로 스스로를 선언한다 — 둘을 구분할 수 있는 것은
+운영자뿐이기 때문에 자동 판정이 아니라 명시적 플래그다.
+
+같은 이유로 `GET /v1/artifacts/{digest}`는 없는 바이트를 retention 탓으로
+단정하지 않는다. 이전 메시지는 30일 정책 아래 이틀 된 관측에도 "aged out of
+retention"이라고 말했고, 그것은 on-call을 존재하지 않는 retention 버그를 찾으러
+보내는 문구다.
+
+### 규정 적용 — 이 저장소의 PostgreSQL 규정을 이 저장소가 지키는 방법
+
+2026-08-20에 [`docs/shared-postgres.md`](shared-postgres.md)가 **이 저장소
+자신의 확장된 규정으로 교체**되었다(이전 내용은 이 저장소가 직접 쓴 10개
+규칙이었고, 새 규정은 그 상위집합이다). 같은 날 이 문서는 한동안 "함대 공통
+규정의 사본"이라고 자신을 소개했는데, 그런 사본도 그것을 조율하는 함대
+수준의 개정 절차도 실제로는 존재하지 않았다 — 이 서버의 다른 서비스인
+trend-radar는 이 규정을 전혀 가지고 있지 않고 자기 계약을 별도 문서로 쓴다.
+그 잘못된 전제 때문에 실제로 시간이 든 적이 있다(이 저장소만 답할 수 있는
+질문을 "함대의 답"을 기다리며 미룬 세션 하나). 그래서 이 규정은 이제
+사본이 아니라 이 저장소가 직접 정하고 개정하는 문서라고 명시적으로 선언한다
+— 개정은 함대 어딘가가 아니라 `docs/shared-postgres.md`를 고치는 커밋으로
+한다. 저장소별 적용 방식은 규정 본문이 아니라 여기 이 절에 적는다는 구분은
+그대로 유지한다.
+
+**Alembic 전략 선언 (규정 2의 예외 조항 사용).** 규정의 기본은 명시적 schema
+qualification(`MetaData(schema=…)` + `include_schemas=True` + allowlist +
+`version_table_schema`)이다. 이 저장소는 **search_path 전략**을 쓴다: 모델과
+migration은 schema-unqualified이고, migration 세션이 `search_path`를
+명시적으로 잡는다. 이유는 둘이다 — (1) 기존 5개 revision이 unqualified로
+작성되어 있고 qualification 소급은 이미 적용된 체인을 다시 쓰는 일이다,
+(2) SQLite가 테스트 백엔드로 남는데 SQLite에는 schema 개념이 달라
+qualification이 `schema_translate_map` 기계를 요구한다. 규정이 요구하는
+**동등 안전성 증명**은 `tests/test_postgres_migrations.py`의 foreign-schema
+sentinel 테스트다: `foreign_sentinel.must_survive`가 있는 database에서
+autogenerate를 돌려 sentinel이 diff에 나타나지 않음을 CI가 매번 확인한다.
+이 증명이 깨지는 날 전략을 규정 기본형으로 바꾼다.
+
+또한 이 저장소는 그 조합의 실패를 실측으로 안다: `search_path` 밑에서
+`version_table_schema`를 **함께** 쓰면 리플렉션이 schema `None`을 보고해
+`drop_table('alembic_version')`이 생성된다 (아래 "Measured 2026-08-20" 절).
+규정 기본형에서는 `include_schemas=True`라 리플렉션이 실제 schema 이름을
+보고하므로 이 버그가 없다 — 두 전략은 섞으면 안 되고, 이 저장소는 섞지 않는다.
+
+**Migrator의 `search_path`는 규정 예시와 다르다 (#15에서 확정, 의도적).** 규정 1의
+예시는 migrator의 `search_path`를 `pg_catalog`만으로 둔다(fail-closed) — 규정
+기본형처럼 migration이 대상 schema를 명시적으로 qualify한다면 그것이 맞다. 이
+저장소는 위에서 선언한 대로 search_path 전략을 쓰고, 기존 5개 revision이 모두
+schema-unqualified이므로 migrator의 `search_path`가 `tubedepth`를 포함하지 않으면
+모든 revision이 `public`에 테이블을 만든다. 그래서 `deploy/postgres-bootstrap.sql`은
+migrator와 runtime 둘 다 `search_path = tubedepth, pg_catalog`로 둔다. `docs/shared-postgres.md`의
+예시는 규정 기본형(명시적 schema qualification)을 쓰는 서비스를 위한 fail-closed 예시를
+그대로 둔다 — 다른 서비스가 그대로 채택할 수 있어야 하는 것은 그 예시 쪽이지, 이 저장소가
+예외 조항을 쓴 사정이 아니다. 그래서 이 차이를 규정 문서에 반영해 고치지 않는다 — 이
+문단이 그 대신이다.
+
+**규칙별 상태.**
+
+| 규정 | 이 저장소 | 어디서 |
+| --- | --- | --- |
+| 0 schema+owner | `tubedepth` schema; 3-role 분리 **적용됨(#15)** — `tubedepth_owner`가 schema와 그 안의 모든 객체를 소유. 각 서비스가 자기 database를 갖는 정정된 구조에서는 이 격리가 엄밀히는 불필요하다(database 하나에 서비스 하나뿐이므로 다른 서비스와 나눌 schema가 없다) — 그래도 **의도적으로 유지한다**: 비용이 없고, 언젠가 여러 서비스가 database 하나로 통합되거나 배포가 잘못된 database를 가리키는 날 값을 한다 | `deploy/postgres-bootstrap.sql` |
+| 1 owner/migrator/runtime | **적용됨(#15).** `tubedepth_owner`(NOLOGIN) / `tubedepth_migrator`(배포 전용, `GRANT tubedepth_owner`) / `tubedepth_runtime`(DML만) 3-role 분리. `migrations/env.py`가 postgres에서 `SET ROLE tubedepth_owner`; runtime의 부정 테스트 4종과 소유권 감사가 `tests/test_postgres_privileges.py` | `deploy/postgres-bootstrap.sql`, `migrations/env.py` |
+| 2 autogenerate 격리 | search_path 전략 + sentinel 증명 (위 선언, 테스트는 #15에서 실제로 작성됨). 서비스당 database 하나뿐인 정정된 구조에서는 다른 서비스의 모델을 볼 일 자체가 없어 무해하게 불필요하지만, sentinel 테스트와 `search_path` 전략은 **그대로 둔다** — 비용이 없고, `verify_placement()`와 함께 잘못된 schema뿐 아니라 잘못된 database에 연결된 경우도 잡아낸다 | `tests/test_postgres_migrations.py` |
+| 3 version table 격리 | `tubedepth.alembic_version`, 테스트가 위치를 단언. 같은 이유로 database-per-service 아래서는 불필요하지만 무해하므로 유지 | 같은 파일 |
+| 4 connection budget | **적용됨(#15, Task 7-8; 전체 브랜치 리뷰로 2026-08-20 재조정; #26으로 증액 요청, 같은 날 승인).** `Database`의 write engine은 `--concurrency`로 크기가 정해진다(`pool_size=max_overflow=TUBEDEPTH_CONCURRENCY`): `Worker.drain`이 concurrency당 claim thread 하나와 lease 갱신 thread 하나를 돌리고 둘 다 write engine에서 세션을 얻으므로, concurrency 8이면 순간적으로 최대 16개 세션이 4-연결 pool을 다툴 수 있다는 것을 실측으로 확인(16개 동시 세션 요청을 pool_size=2/max_overflow=2에 걸어 측정 — 4개씩 배치로 직렬화되고 뒤 배치일수록 앞 배치의 세션 점유 시간만큼 대기가 쌓임을 확인). AIMD 레이트 컨트롤러가 실측한 유효 상한은 6(위 §를 보라 — 6을 넘으면 병목이 이 서비스 쪽이 아니라 YouTube 쪽이다), 그리고 6은 기존 20 예산 안에 들어가지 않았다(2×6+4=16짜리 worker write만으로도 API 8과 합쳐 24). 그래서 이 서비스는 20→32 증액을 함대에 **요청했고**(#26), **승인받았다** — 실측 근거: 운영 중인 공유 서버에서 `max_connections=100`, `superuser_reserved_connections=3`, `reserved_connections=0`(가용 97); 서버의 다른 선언자는 trend-radar 하나뿐이고 그 자신의 저장소 루트 `service-db.json`이 12를 선언; tubedepth가 32를 쓰면 44 claimed, 53 spare. manifest 상한과 `tubedepth_runtime`의 `CONNECTION LIMIT`을 20에서 32로 올리고, `TUBEDEPTH_CONCURRENCY` 배포 기본값을 2에서 6으로 올렸다: API 8(write 4 + read 4) + worker 16(write 6×2=12 + read 4, read는 `Worker.reap`만 쓰므로 concurrency와 무관하게 기본값 유지) = 24, +migration 1, +rolling-overlap 0 = 25 ≤ 32, 여유 7. 이 값은 AIMD가 실측한 유효 상한 그 자체이지 임의로 고른 숫자가 아니다. **32를 더 올릴 근거는 없다** — 이번 요청이 상한이었고, 그 이상은 다시 함대에 요청할 사안이다. 항별 공식의 전체 산수는 아래 "규정 4의 항별 공식" 절 참고 | `src/tubedepth/database.py`, `src/tubedepth/cli.py`, `service-db.json`, `deploy/postgres-bootstrap.sql`, `deploy/tubedepth-worker.service` |
+| 5 timeout | **적용됨(#15).** `tubedepth_runtime`에 `statement_timeout`(15s), `lock_timeout`(3s, statement보다 짧게), `idle_in_transaction_session_timeout`(30s), `transaction_timeout`(60s, PG17+이므로 무조건 설정)을 role-scoped로 부여. 워커는 이미 network 호출을 transaction 밖에서 한다. 예외 하나: `tubedepth transfer`의 rollback 방향(PostgreSQL 소스 → SQLite 대상)은 `artifacts`를 한 번의 `SELECT`로 읽는데, 실제 크기의 테이블에서는 15s를 넘는다 — role의 기본값을 올리는 대신 그 read의 트랜잭션에서만 `SET LOCAL statement_timeout = '5min'`을 실행(`transfer.py`의 `_copy_table`), 다른 세션에는 영향을 주지 않는다 | `deploy/postgres-bootstrap.sql`, `src/tubedepth/transfer.py` |
+| 6 startup DDL 금지 | **적용됨.** `_database()`가 더는 `create_schema()`를 호출하지 않는다; 스키마 경로는 `tubedepth migrate` 하나뿐 | #14 |
+| 7 외부 object 일관성 | payload는 content-addressed(불변 key), write-then-record 순서로 이미 규정 형태 — 같은 digest는 절대 다른 bytes로 다시 쓰지 않는다. grace period와 reconciliation은 #17에 병합. (manifest에서 옮긴 사실: 복구 단위는 database 더하기 `TUBEDEPTH_DATA_DIR/payloads` 디렉터리 **세트**이지, database 혼자가 아니다 — 백업 절차가 지켜야 하는 경계) | `payload_store.py`, #17 |
+| 8 extension 중앙 관리 | 필요 extension 없음, `service-db.json`이 선언 | `service-db.json` |
+| 9 timestamptz | **적용됨(#15).** 확인 결과 `sa.DateTime()`은 실제로 postgres에서 `timestamp without time zone`으로 렌더되고 있었다(16개 컬럼 전부, `information_schema.columns` 실측). `render_item`이 `sa.DateTime(timezone=True)`를 내보내도록 고치고, 기존 16개 `UtcDateTime` 컬럼을 `ALTER ... TYPE timestamptz USING ... AT TIME ZONE 'UTC'`로 옮기는 손으로 쓴 revision을 추가; `UtcDateTime.impl`도 `DateTime(timezone=True)`로 맞춰 autogenerate no-diff 유지 | `migrations/env.py`, `migrations/versions/20260820_55a24ac7a270_instants_are_timestamptz.py`, `tests/test_postgres_migrations.py` |
+| 10–13 cross-service 금지 (FK, 공유 테이블, cross-service SQL, cross-schema transaction) | 정정된 구조(서비스당 자기 database)에서는 금지가 아니라 **구조적으로 불가능**하다 — cross-database query는 `dblink`나 `postgres_fdw`가 필요하고, 둘 다 extension인데 규정 8이 서비스 migration의 `CREATE EXTENSION`을 금지한다. manifest가 빈 의존성을 선언하고, 규정의 감사 query가 gate로 남는다. (manifest에서 옮긴 사실: `cross_service_dependencies`가 언젠가 채워지더라도, 다른 서비스의 식별자는 cross-schema FK나 JOIN이 아니라 그 서비스의 API로 검증된 평범한 값으로만 저장한다는 것이 이 항목이 비어 있는 채로 유지되는 이유다) | `service-db.json` |
+| 14 extraction test | **호스트 전환(post-release ops issue)의 통과 조건으로 편입.** 서비스당 자기 database인 정정된 구조에서는 이 테스트가 더 쉬워진다 — 이미 서비스 하나 = database 하나이므로 추출이 `pg_dump` 한 번이다 | ops issue |
+
+### 규정 4의 항별 공식
+
+`deploy/service-manifest.yaml`(YAML)이 저장소 루트의 `service-db.json`(JSON,
+trend-radar가 쓰는 형식을 그대로 채택 — `manifest_version`, role별 breakdown이
+있는 `connection_budget`)으로 옮겨가면서, 원래 YAML 주석에 있던 항별 산수 전체를
+여기로 옮겼다 — JSON에는 숫자만 남는다(주석을 못 다는 형식이라서).
+
+일반형:
+
+```
+service budget = max concurrent instances × per-instance pool ceiling
+                + worker/scheduler/batch-only connections
+                + service migration connections
+```
+
+정상 상태(steady state) — API 프로세스 1개 + worker 프로세스 1개, 각각 write engine과
+read engine을 하나씩 쥔다(`database.py`의 `Database`, 두 engine을 분리한 이유는 그
+docstring 참고). 두 프로세스는 더 이상 대칭이 아니다 — worker의 write engine pool은
+고정 기본값이 아니라 `TUBEDEPTH_CONCURRENCY`로 크기가 정해진다(`cli.work`,
+`database.py`의 `_write_pool_kwargs`):
+
+```
+API:    write engine (2+2=4) + read engine (2+2=4)                =  8
+worker: write engine (concurrency+concurrency) + read engine (4)
+        = TUBEDEPTH_CONCURRENCY × 2 + 4
+        = 6 × 2 + 4 (deploy/tubedepth-worker.service의 기본값 6)   = 16
+steady-state total = 8 + 16                                       = 24
+```
+
+worker의 write engine 항이 concurrency를 필요로 하는 이유: `Worker.drain`이
+concurrency당 claim thread 하나와 lease 갱신 thread 하나를 돌리고(`worker.py`의
+`pump`와 `_holding_lease`) 둘 다 write engine에서 세션을 얻으므로, 순간적으로 최대
+2 × concurrency개의 동시 요구가 write engine에 걸린다 — pool을 넘는 요구가 batch로
+직렬화되는 것을 실측으로 확인한 결과이지, thread 수에서 추론만 한 것이 아니다. read
+engine은 한 번에 세션 하나만 쓰므로(`Worker.reap`) 기본 상한을 유지한다.
+
+worker/scheduler/batch-only 연결 — worker는 이미 위 두 프로세스 중 하나로 카운트됐고,
+이 서비스는 별도의 scheduler나 batch 프로세스를 돌리지 않으므로 이 항은 0.
+
+service migration 연결 — `tubedepth migrate`(`migrations/env.py`)가
+`poolclass=pool.NullPool`로 배포 중에만 정확히 연결 하나를 연다. +1.
+
+rolling-deploy overlap — 이 서비스는 그냥 systemd user unit이고(`Restart=on-failure`
+/`always`, blue-green이나 rolling 전략이 아님) 옛 인스턴스와 새 인스턴스가 이
+database에 동시에 붙는 일이 없다. +0 — 생략하지 않고 적어 두는 이유는, 이 배포
+형태를 바꾸는 사람이 steady-state 항을 조용히 두 배로 만들지 않고 이 줄을 갱신할
+의무를 지도록 하기 위해서다.
+
+`C = TUBEDEPTH_CONCURRENCY`로 접으면 이 서비스가 실제로 따르는 공식은
+`total = 2C + 13`(API의 고정 8, worker의 고정 read측 4, +migration 1, +overlap 0,
+그리고 worker의 write측 2C):
+
+```
+total = 2 × 6 + 13 = 25
+```
+
+25 ≤ 32 — 이 32는 `deploy/postgres-bootstrap.sql`이 `tubedepth_runtime`에 거는
+`CONNECTION LIMIT`이기도 해서, 이 산수가 틀리면 database 자신이 잡아낸다(산수만
+믿는 게 아니다). 남는 7이 규정 4가 요구하는 운영상 안전 여유다. 32는 함대가 이
+서비스에 승인한 상한이지(#26), 이 서비스 자신의 pool 산수가 올릴 수 있는 숫자가
+아니다 — 그 이상은 다시 함대에 요청할 사안이다.
+
+`service-db.json`의 `connection_budget`은 이 산수의 **숫자만** 담는다 —
+`api`(write_pool_size 2, write_max_overflow 2, read_pool_size 2,
+read_max_overflow 2), `worker`(write_pool_size 6, write_max_overflow 6,
+read_pool_size 2, read_max_overflow 2), `workers_and_schedulers`(0),
+`migration`(1), `rolling_deploy_overlap`(0), `service_spare`(7), `total`(32).
+이 절의 항 이름과 JSON의 필드 이름은 1:1로 대응한다 — 다음에 API 인스턴스 수나
+rolling-deploy 전략을 바꾸는 사람은 이 절을 고치고 JSON의 대응 필드를 갱신하면
+된다.
+
+**#14 — 부팅 경로에서 DDL 제거.** `Database.create_schema()`는 `Base.metadata.create_all`만
+호출한다. 예전에는 여기서 컬럼·인덱스 보수(`_repair_existing_tables`)까지 했는데, 이는
+migration 도구가 없던 시절 실제로 반복되던 drift — 파일이 이미 있는데 모델에 컬럼이
+추가된 경우 — 를 막던 장치였다. 지금은 `tests/test_migrations.py`가 migrate-from-nothing과
+create-from-models이 일치함을 확인하는 5개 revision이 있어서, 그 보수가 하던 일은 migration
+체인이 그대로 이어받는다. 보수를 남겨 두는 쪽의 비용이 더 컸다 — 컬럼을 추가하는 부팅이
+`alembic_version`은 그대로 두고 지나가서, 다음 `alembic upgrade`가 이미 있는 컬럼을 다시
+만들려다 `docs/troubleshooting.md`의 `duplicate column name`으로 죽는다. 그래서 `create_schema()`는
+남기되(테스트와 새 `--data-dir`가 쓴다) `cli._database()`에서는 뺐다 — 스키마를 바꿀 수 있는
+경로는 이제 `tubedepth migrate` 하나뿐이다.
+
+**Task 6 — 데이터 이동은 `pg_dump`가 아니라 model 기반이다.** #15의 "Data across:
+six tables"와 #24의 "여섯 테이블"이 이동에 관한 명세 전부였고, 이동 전용 도구도
+검증도 이 저장소에 없었다 — `tests/test_migrations.py`와
+`tests/test_postgres_migrations.py`는 DDL만 확인한다. `tubedepth.transfer.transfer()`가
+그 도구다: `Base.metadata.sorted_tables`를 돌며 각 행을 ORM으로 읽어 대상에 컬럼
+단위로 재구성한다. `pg_dump`로 SQLite 파일을 그대로 복원했다면 SQLite가 저장한
+naive datetime 문자열이 `timestamptz` 컬럼에 변환 없이 그대로 얹혔을 것이다 —
+`UtcDateTime.process_bind_param`이 naive 값을 거부하는 것은 애플리케이션 경로에서만
+그렇고, dump-and-restore는 그 경로를 통째로 건너뛴다. round-trip 테스트
+(`tests/test_transfer.py::test_a_sqlite_index_round_trips_through_postgresql`)가
+바로 이 실패를 잡도록 짜여 있다 — 개수가 아니라 모든 컬럼을 값으로 비교해서,
+naive/aware 불일치나 enum이 이름으로 도착하는 것 같은 type 실패를 숫자 하나로
+가리지 않는다.
+
+`transfer`는 `tubedepth_runtime`으로 대상에 연결해서 써야 한다. `tubedepth_migrator`는
+NOINHERIT이고(규정 1) `tubedepth`의 테이블에 직접 권한이 없다 — `migrations/env.py`의
+명시적 `SET ROLE tubedepth_owner`를 통해서만 owner로 행동한다. migrator credential로
+곧장 `INSERT`를 시도하면 `permission denied for schema tubedepth`로 거부되는 것을
+실측으로 확인했다(2026-08-20, `docker run postgres:18-alpine` + `deploy/postgres-bootstrap.sql`).
+runtime은 정확히 `SELECT, INSERT, UPDATE, DELETE`만 직접 grant 받은 role이라(같은
+파일) transfer가 필요로 하는 권한과 정확히 일치한다. 대상이 이미 행을 가지고 있으면
+거부한다 — `artifacts`는 `fingerprint`에 unique 제약이 의도적으로 없어서, 부분
+재실행이 관측을 조용히 중복시킬 수 있기 때문이다. payload store는 옮기지 않고
+`transfer.py`는 `PayloadStore`를 import조차 하지 않는다 — 규정 7의 "복구 세트는
+index와 object가 함께"라는 원칙에서, 이 도구는 절반만 옮기는 도구라는 뜻이다.
+
+**Task 7 — 테스트 스위트가 PostgreSQL 위에서 돈다.** #15가 말하는 "the tests
+move too"다: `tests/conftest.py`의 `database_url_for_tests`가 이제 테스트마다
+`TUBEDEPTH_TEST_POSTGRES_URL`(migrator) 서버에 schema 하나(`request.node.nodeid`를
+정규화 + 63자 제한에 대비한 sha1 접미사)를 만들고 그 schema를 가리키는 URL을
+`yield`한 뒤 테스트가 끝나면 지운다 — schema 하나가 이 seam의 유일한 산출물이라,
+59곳에 흩어졌던 `Database(tmp_path / "tubedepth.db")`를 한 곳으로 모은 Task 2의
+의도가 dialect가 바뀐 뒤에도 유지된다. 처음 구현은 `str(url)`로 URL을 만들었는데
+`sqlalchemy.engine.URL.__str__`이 기본으로 비밀번호를 `***`로 가려서 모든 연결이
+인증에서 죽었다 — 실제로 그 실패를 관찰하고 `url.render_as_string(hide_password=False)`로
+고쳤다.
+
+`tests/test_job_queue.py`의 두 lock 테스트(`sqlite3.connect(timeout=0)` +
+`OperationalError match="locked"`)는 SQLite 파일 lock 고유의 검증이라 PostgreSQL에
+대응이 없다 — MVCC라 그런 상황 자체가 없다. 포팅하지 않고, 그 테스트들이 실제로
+지키던 성질 둘로 다시 썼다: (1) `test_two_concurrent_claims_never_return_the_same_job`은
+`before_cursor_execute` 훅으로 한 worker의 UPDATE를 다른 worker가 SELECT+UPDATE+COMMIT을
+완전히 끝낼 때까지 강제로 멈춰 실제 interleaving을 만든다 — `JobRepository.claim`의
+rowcount 검사를 무력화하면 두 worker가 모두 claim에 성공해 실패하는 것으로 확인했다.
+(2) `test_a_readonly_session_does_not_block_a_concurrent_writer`는 readonly 세션이
+transaction을 연 채로 같은 job을 다른 세션이 claim하는 데 2초 이상 걸리지 않음을
+검증한다 — readonly 세션이 `LOCK TABLE ... IN ACCESS EXCLUSIVE MODE`를 잡도록
+일부러 망가뜨리면 10초 timeout까지 걸려 실패하는 것으로 확인했다. 두 검증 모두
+되돌리기 전에 실측했다.
+
+`tests/conftest.py`의 socket guard(`refuse_outbound_network`)는 marker 기반 예외
+(`live`/`postgres`)에서 주소 기반 allow-list(`127.0.0.1`/`::1`/`localhost`)로
+바뀌었다 — 이제 스위트 대부분이 실제 PostgreSQL 소켓을 열기 때문에, `postgres`
+marker가 붙은 소수만 예외 처리해서는 나머지가 전부 막힌다. `pyproject.toml`의
+`addopts`에서 `and not postgres`를 뺐다 — `postgres` marker는 더 이상 선택 필터가
+아니고(전체가 서버를 필요로 함), role/권한/`alembic_version` 위치 같은 PostgreSQL
+구조 자체를 검사하는 파일들의 이름표로만 남았다. `tool/checks/test`가 이제 서버가
+없으면 `just postgres`와 같은 방식으로 throwaway container를 직접 띄우고 정리한다
+(`tool/checks/postgres`는 그래서 사라졌고, CI도 `verify`/`postgres` 두 job을
+하나로 합쳤다).
+
+**Task 8 — 컷오버가 끝난다: SQLite가 없어진다.** #15 "a cutover, not a
+dual-dialect period"가 뜻하던 것은 여기서다. `Database`는 PostgreSQL이 아닌
+URL을 `ConfigurationError`로 거부한다 — 단 하나 의도된 예외는
+`allow_sqlite_source=True`이고, `tubedepth transfer --from`만 이것을 쓴다.
+실제 컷오버가 데이터를 옮겨오는 곳이 SQLite이므로, 이 지원은 애플리케이션이
+더 이상 SQLite에서 실행되지 않는데도 남는다 — 지운 것은 "SQLite로 서비스를
+운영한다"이지 "SQLite에서 옮겨온다"가 아니다. `settings.database_url()`은
+`data_directory` 인자와 SQLite 대체 경로를 잃고 `TUBEDEPTH_DATABASE_URL`이
+없으면 예외를 던진다. `migrations/env.py`는 자기 복사본 대신 그 함수를 부르고,
+SQLite 전용이던 `render_as_batch`를 뗐다.
+
+`tests/test_transfer.py`의 offline 메커니즘 테스트(개수, identifier 보존,
+부분 실패 메시지, 재확인)는 여전히 양끝 다 SQLite다 — 서버 없이도
+`tubedepth transfer`가 동작함을 증명하는 것이 그 테스트들의 존재 이유이고,
+`transfer()` 자체는 ORM으로 행을 옮기므로 dialect에 무관하기 때문이다. 실제
+운영 조합(SQLite in, PostgreSQL out, 진짜 migrator/runtime role)은 그 파일
+맨 아래 `test_a_sqlite_index_round_trips_through_postgresql`이 증명한다.
+
+`tests/test_cli.py`의 CLI 테스트 약 30개는 `--data-dir`의 SQLite 대체 경로에
+기대고 있었다. 이제 `verify_placement()`가 모든 `_database()` 호출을 통과하고
+그 검사는 고정된 스키마 이름(`"tubedepth"`)을 요구하므로, 임의의 per-test
+스키마로는 통과할 수 없다 — 그래서 이 파일은 실제 `tubedepth` 스키마를 테스트마다
+drop/재생성하는 autouse fixture 하나로 옮겼다(`test_postgres_migrations.py`의
+`empty_database`와 같은 모양). 결과적으로 Deferred Minor 5가 물었던 질문의
+답은 "강제로 옮겨간다"이다: 이 파일의 모든 명령이 이제 실제 PostgreSQL 위에서
+돈다 — 달리 열 곳이 없어서다.
+
+`tests/test_migrations.py`는 지웠다. 그 파일이 SQLite로 확인하던 성질들(head
+하나, 모델과 일치, 되돌릴 수 있음, drift 없음, version table 위치)은 이미
+`tests/test_postgres_migrations.py`가 PostgreSQL로 증명하고 있었고 — 그 파일
+자신의 docstring이 말하듯 SQLite는 애초에 PostgreSQL에만 있는 dialect 차이를
+볼 수 없었다. CLI 수준 성질(predates-migration stamp, 빈 스키마 upgrade,
+operator URL이 이기고 복원됨, 값 없으면 깨끗이 거부)은
+`test_postgres_migrations.py`로 옮겨 다시 썼다.
+
+`deploy/*.service` 세 유닛 모두 `TUBEDEPTH_DATABASE_URL`을 위한 필수
+`EnvironmentFile`을 갖는다(worker는 기존의 선택적 파일을 필수로 바꿈). manifest와
+`database.py`의 connection 산수는 규정 4의 나머지 두 항(migration 연결
++1, rolling-deploy overlap +0)을 명시해서 17 ≤ 20이 됐다 — 위 표 참고.
+`repositories.JobRepository.claim()`의 docstring은 더 이상 SQLite의 BEGIN
+IMMEDIATE를 "belt and braces"로 부르지 않는다 — guarded UPDATE와 rowcount
+확인이 이제 유일한 메커니즘이라고 고쳤다. `tests/conftest.py`의 socket guard는
+호스트 allow-list에 더해 `TUBEDEPTH_TEST_POSTGRES_URL`이 실제로 이름하는
+포트로 좁혔다.
+
+**Manifest**: [`service-db.json`](../service-db.json).
+
+
+### 컨테이너로 배포할 때 되돌리기 비싼 것들 (#22)
+
+이미지 하나에 `ENTRYPOINT ["tubedepth"]`, compose 서비스는 `command:`만 다르다.
+여기 적는 것은 나중에 바꾸려면 비싼 결정들이다.
+
+**`--concurrency`는 compose에서 플래그이고, 그래서 예산 교차 검증의 다섯 번째
+자리다.** `api`와 `worker`는 YAML anchor 하나로 env block을 공유해야 한다 —
+listing·comment·trending cap이 cache key의 일부라서, 두 프로세스가 다른 값을
+읽으면 API가 worker가 수집한 적 없는 질문에 답한다. worker에만
+`TUBEDEPTH_CONCURRENCY`를 env로 더하면 그 anchor가 깨지므로, 숫자를
+`command: work --poll 5 --concurrency 6`에 실었다.
+`test_the_connection_budget_agrees_everywhere_it_is_declared`가 이제 이 줄도
+regex로 읽어서 worker 유닛의 `TUBEDEPTH_CONCURRENCY`와 같은지 확인한다. 예산을
+올리려면 다섯 곳(`service-db.json`, `postgres-bootstrap.sql`, worker 유닛,
+`database.py` 주석, compose)을 함께 고쳐야 하고, 안 고치면 이 테스트가 빨개진다.
+
+**상주하는 `watch` 컨테이너는 manifest가 세지 않은 연결을 쓴다.**
+`service-db.json`은 32를 api 8 + worker 2C+4 + migration 1 + `service_spare` 7로
+쪼개면서 `workers_and_schedulers: 0`이라고 적는다. 그 0은 유일한 스케줄러가
+밀리초 살고 죽는 systemd one-shot이던 시절에는 참이었다. compose에는 타이머가
+없어서 `watch --every`가 상주하고, 다른 명령과 똑같이 `_database()`를 거치므로
+write engine(2+2)과 read engine(2+2)을 만들어 컨테이너 수명 내내 idle 연결을
+쥔다 — 정상 상태로는 2개(한 pass가 write session 하나, placement 확인이 read
+하나), pool 천장으로는 8개다. **`service_spare` 7에서 나가므로 산수는 여전히
+맞고, 그래서 manifest 숫자는 건드리지 않았다** — 네 파일이 그 숫자에 동의하고
+있고 교차 검증이 그걸 지킨다. compose 배포를 두 인스턴스로 늘리거나 watch를
+여러 개 띄우는 순간 이 여유는 사라지므로, 그때는 manifest의
+`workers_and_schedulers`를 실제 숫자로 올리고 fleet에 다시 요청하는 것이 순서다.
+
+**이미지에는 `HEALTHCHECK`가 없다.** 이미지 수준 healthcheck는 그 이미지로 뜨는
+모든 컨테이너에 붙는데, 이 이미지가 돌리는 넷 중 셋에게 틀린다 — `work`와
+`watch`는 포트를 열지 않고, `migrate`는 끝나는 게 정상인 one-shot이라 성공한
+migration이 unhealthy로 표시된다. `/healthz`를 실제로 답하는 서비스는 `api`
+하나뿐이므로 healthcheck는 compose에 있다.
+
+**이미지는 editable 설치를 그대로 담는다.** `uv sync`는 프로젝트를 editable로
+넣고(`.pth`가 `/app/src`를 가리킨다), `tubedepth migrate`는 `alembic.ini`와
+`migrations/`를 `Path(__file__).parent.parent.parent`로 찾는다(`cli.py`). 그래서
+runtime 스테이지가 `/app` 전체(venv + `src/` + `alembic.ini` + `migrations/`)를
+같은 절대 경로에 복사한다. `--no-editable`로 바꾸면 그 표현식이
+`.../lib/python3.13`을 가리키게 되어 `migrate`가 자기 script directory를 찾지
+못한다 — 바꾸려면 `cli.py`의 경로 해석을 함께 고쳐야 한다.
+
+**URL은 둘이다.** `migrate`는 migrator 자격증명으로, `api`/`worker`/`watch`는
+runtime 자격증명으로 붙는다(규정 1). 하나로 합치면 runtime이 DDL을 내거나
+migrator가 애플리케이션 DML을 내게 되고, 그건 이 저장소가 bootstrap SQL로 세운
+경계를 compose가 무르는 것이다. 둘 다 `deploy/.env`에서 `${...}`로 들어오고
+compose 파일에는 어떤 비밀 리터럴도 없다(`tests/test_compose.py`가 확인한다).
+
+
+### Measured 2026-08-20: what the first PostgreSQL run found
+
+Step 1 was meant to be a yes-or-no about `batch_alter_table`. Batch mode was
+fine — it is a no-op on a dialect that can `ALTER` in place. Two other things
+were not, and neither would have been found by reading.
+
+**A boolean default that only SQLite accepts.** `50ee31ae8b82` added
+`refresh` with `server_default=sa.text("0")`, because SQLite refuses
+`ADD COLUMN … NOT NULL` without a default. PostgreSQL refuses the literal:
+`column "refresh" is of type boolean but default expression is of type
+integer`, and there is no implicit cast. `sa.false()` is rendered by the
+dialect — `0` on SQLite, `false` on PostgreSQL — so one revision is now correct
+on both. **The general form is the thing to keep**: `sa.text()` in a migration
+is a dialect assumption written in a place that outlives the dialect.
+
+**The rule in `docs/shared-postgres.md` had a bug of its own.** It said to set
+`version_table_schema="tubedepth"` *and* `include_schemas=False`. Doing both
+makes autogenerate propose `drop_table('alembic_version')` — alembic excludes
+its own version table by comparing the configured schema against the reflected
+one, and reflection under a `search_path` reports `None`, so `"tubedepth" !=
+None` and the exclusion misses. The setting written down to prevent a spurious
+`drop_table` produces one. The role's `search_path` alone already puts the
+version table in the service's schema; the two are alternatives, not a pair.
+The document is corrected, and the correction is asserted rather than
+described.
+
+Both were found by running, and both are now checks with callers rather than
+paragraphs: `tests/test_postgres_migrations.py`, run by `just postgres` and by
+a CI service container, against the same
+[`deploy/postgres-bootstrap.sql`](../deploy/postgres-bootstrap.sql) a
+deployment runs. The suite is `-m postgres` and deselected by default, for the
+reason `live` is: the offline suite must stay runnable with nothing installed.
+
+**One difference that helps.** PostgreSQL runs DDL inside a transaction, so the
+failed chain rolled all four revisions back and left an empty database. That is
+the opposite of SQLite, where a partial upgrade is exactly what produced the
+`duplicate column name` in [`troubleshooting.md`](troubleshooting.md). After
+the cutover, a failed migration is a failed migration rather than a schema
+somebody has to reconstruct by hand.
+
+**Unpaid, and worth naming.** Placing tables by `search_path` means a missing
+`ALTER ROLE … SET search_path` sends them silently to `public` — the schema
+every database has by default. The test asserts where `alembic_version` lands,
+which catches it in CI; nothing catches it on a host where someone bootstrapped
+by hand. Tracked as
+[#16](https://github.com/slopindustries/yt-scrapper/issues/16), to be decided
+during the cutover rather than after it.
+
 
 Three of these have since been paid for and moved to
 [`decisions/`](../decisions/README.md), which holds only rules something has
@@ -415,6 +979,284 @@ One trap found immediately: `fileConfig` defaults to `disable_existing_loggers
 =True`, so running a migration in-process switched off the application's own
 logging for the rest of the process. It silenced two unrelated tests, which is
 how it was noticed rather than in production.
+
+### `refresh` is a column, because it has to outlive the request
+
+`"refresh": true` was read once, in `POST /v1/jobs`, to skip the API's own cache
+check — and then dropped. The `Job` row never carried it, so the worker called
+`collect()` with the default and served the job from the cache it had just been
+told to bypass. The job succeeded, pointed at a payload collected hours earlier,
+and recorded no artifact. Nothing errored, nothing logged a problem, and from
+outside it was indistinguishable from a fresh collection.
+
+What that cost is not hypothetical: it is the whole premise of trend detection.
+Velocity is the difference between two observations, and a poller running faster
+than a kind's freshness window was recording none while reporting success.
+
+*The flag lives on the row rather than being resolved at submission.* The
+collection happens in another process, minutes later; a decision made in the
+request handler is one the worker never sees. It also means a retry is still a
+forced collection, which falls out of the column rather than having to be
+arranged — and would have been the next silent version of the same bug.
+
+*It is deliberately not indexed.* The claim filters on `state` and
+`scheduled_at` and orders by `scheduled_at, created_at`; nothing asks this
+column in a query, so an index on it would be write cost for no read.
+
+*A forced listing does not force its follow-ups.* `--then` turns one listing
+into a job per video, so propagating would multiply one flag into a collection
+per video on every sweep, out of the one per-address budget everything else
+draws on. **Settled 2026-08-21 by #20, with the arithmetic in hand:** `watch`
+forces `refresh=True` on the listing job so the enumeration is re-run and a
+channel's new videos appear, and deliberately does not propagate it, so the
+per-video follow-ups stay cache-governed. At the default 100-item cap,
+propagating would turn one `channel` line into a hundred forced collections an
+hour to re-fetch videos whose six-hour freshness window has not run out.
+
+*The migration carries a `server_default` and the model does not.* SQLite
+refuses `ADD COLUMN ... NOT NULL` outright unless the statement carries a
+default, so the migration must supply one — the same rule `Database._add_column`
+learned earlier and wrote into its own docstring. Putting it on the model too
+would have been tidier and is wrong: `_add_column` renders the column with
+`CreateColumn` and then appends its own `DEFAULT`, so a server default on the
+model produces `refresh BOOLEAN DEFAULT 0 NOT NULL DEFAULT 0` and the startup
+repair fails on the statement. The two paths therefore differ in DDL, which
+nothing depends on, and agree in behaviour, which everything does.
+
+### Measured 2026-08-19: the trending chart is alive, `ytsearchdate` is not
+
+Issue #3 lists three routes to trend detection and says which one is real
+decides the design of the other two, so both of its unverified claims were
+checked before anything was built. Both answers are in.
+
+**`videos.list?chart=mostPopular` still returns data.** `regionCode=KR` and
+`regionCode=US` each answer 200 results. So the retirement of the `/feed/trending`
+*page* did not take the chart endpoint with it, and route C is available.
+
+That settles issue #3's fork the good way. C spends **Google API quota, not the
+per-address YouTube budget** everything else in this project competes for — 1
+unit per request against 10,000/day, so a five-minute cadence is ~288 units.
+General "what is rising on YouTube" therefore costs nothing that matters, and
+routes A and B shrink to what C cannot do: velocity inside a chosen topic.
+
+It also wants its own `Lane`. Google's quota is a different budget from
+YouTube's bot tolerance, and riding on `Lane.YOUTUBE` would make one throttle
+the other for no reason. Transport goes in `src/tubedepth/egress/` per the
+architecture rule.
+
+**`ytsearchdate{N}:` does not exist.** Issue #3 flagged this as remembered
+rather than run, and it was wrong. yt-dlp 2026.07.04 answers
+`Unsupported url scheme: "ytsearchdate5"`, and its extractor list holds only
+`youtube:search`, `youtube:search_url` and `youtube:music:search_url` — there is
+no date-sorted search extractor. Plain `ytsearch3:` works, so the failure is the
+prefix and not the mechanism.
+
+The obvious workaround does not work either: `search_url` with YouTube's
+`sp=CAI%3D` ("sort by upload date") returns the same videos as the relevance
+search, so the parameter is being dropped somewhere between us and the results.
+
+**So route B needs building, not calling.** The likely home is this project's
+own InnerTube client (`src/tubedepth/innertube/`), which already constructs
+search requests and can carry a sort parameter directly instead of hoping
+yt-dlp forwards one. That is a different and larger job than the "cheapest
+change in this issue by a wide margin" the issue estimated, and it should be
+re-estimated before it is scheduled.
+
+### The complete enumeration of a channel already existed and nobody used it
+
+Measured 2026-08-20 on `@director_pihyunjung`, flat extractions, direct line:
+
+| surface | items | requests |
+| --- | --- | --- |
+| `playlist.items` on the uploads playlist (`UU…`) | **698** | **8** |
+| `channel.videos` (the `/videos` tab) | 474 | 16 |
+| `/shorts` tab | 216 | 5 |
+| `/streams` tab | 3 | ~2 |
+
+The three tabs are pairwise disjoint and all strict subsets of the uploads
+playlist. `UU − /videos` is 224: **216 Shorts, 3 past live streams, and 5
+entries that carry titles and view counts in the grid and cannot be watched at
+all.** yt-dlp reports 698 against the Data API's 697; the extra one is an
+offline live entry, so the playlist is complete.
+
+**The uploads playlist is wider *and* cheaper.** It pages a hundred at a time
+where the tab pages thirty, so it reaches more with half the requests. That
+was the surprise — the assumption going in was that completeness would cost
+something.
+
+*No new kind was built, and that is the finding.* `playlist.items` collects
+this today with no change at all: `normalize_playlist_identifier` passes a
+`UU…` through untouched and `_extraction_target` builds the right URL. Issue
+#2 left "the uploads playlist is the wider enumeration" as an open question;
+the answer is that it was never closed, only unwritten.
+
+*Tab-stitching was measured and rejected.* `/videos + /shorts + /streams` is 23
+requests for 693 items against 8 for 698, and the `/shorts` tab returns
+`duration: null` for every entry — throwing away one of the two fields
+`ListedVideo` exists to carry.
+
+**What was deliberately not done.** Making `channel.videos` silently *be* the
+uploads playlist when handed a `UC…` is strictly wider and strictly cheaper,
+and the payload shape does not change — so `just record-payload-shapes` would
+pass and CI would say nothing. It would also widen every existing sweep of
+every channel by roughly half and start queueing the unwatchable entries. That
+is a decision with a record, not a patch, and it has not been taken.
+
+**And the cost is on the other side.** The listing is 8 requests either way;
+the fan-out goes from 474 jobs to 698, and at roughly three requests per
+metadata job that is about 670 more YouTube requests per sweep. 96% of what it
+buys is Shorts: 31% of that channel's catalogue and 9% of its views, median 47k
+against 305k, and a fifty-second video has no chapters, a one-sentence
+transcript and thin comments. For this channel the answer is no. `--then` has
+no predicate, so "enumerate everything, collect metadata for the long ones" is
+not currently expressible — that, not a listing kind, is what would make this
+worth revisiting.
+
+### The listing cap is a deployment setting, and both units must agree
+
+`channel.videos`, `search.videos` and `playlist.items` stopped at 100 and
+nothing at runtime could raise it, so a channel with more videos than that
+could not be collected in full. `TUBEDEPTH_LISTING_LIMIT` and
+`TUBEDEPTH_COMMENT_LIMIT` now do, read once per process in `default_registry()`.
+
+*The dangerous half was already closed.* Raising the constant alone would have
+been a silent wrong answer — the limit was not in the cache key, so re-running a
+channel swept an hour earlier would have served the cached 100-item listing for
+the request that asked for 1,000, with nothing looking wrong. That is why the
+parameters went into the fingerprint first and this came second.
+
+**The remaining hazard is that `serve` and `work` are separate processes.** Each
+reads the environment once, and `default_registry()` is `@cache`d. If the two
+units carry different values the API computes a different cache key than the
+worker records: it stops matching anything the worker writes, *and* keeps
+matching rows written before the change and serving them as 200 — a listing
+collected at the old cap answering a request for the new one.
+
+Nothing inside one process can detect that, so `GET /v1/sources` reports the
+values actually in effect, and comparing that route between the two instances
+is the check. The unit files carry both variables commented out together, so
+the next person sets them in both places or neither.
+
+*A bigger cap is not free.* `extract_flat` makes a listing one extraction, but
+yt-dlp still walks continuations to reach a thousand, and every one of those
+comes out of the per-address budget everything else draws on. It is refused
+rather than defaulted when it does not parse: an operator who sets it and
+silently gets the old behaviour concludes the variable does nothing, and the
+sweep they ran is exactly the size they were trying to change.
+
+### The upcast machinery is deferred, and here is what should build it
+
+Issue #4 asks for five things. Four shipped: `Artifact.schema_version` and its
+backfill, `GET /v1/artifacts/{digest}`, the invalidate half (`retracted_versions`,
+which `channel.about` v1 actually needs), and the CI check that refuses a model
+change without a bump. The fifth — a source declaring how to *lift* a payload
+from the previous version — was not built, on purpose.
+
+*Because there is nothing to lift.* Measured before deciding: nine sources have
+never bumped, `channel.about` is the only one that has, and issue #4 itself says
+its honest handling is deletion rather than a lift. `channel.about` had **zero**
+stored rows. So `Upgrade` would have shipped with no instance and its tests would
+have exercised a `lift` written by the test — the `renew_lease` shape exactly, in
+a repository with a decision file about that.
+
+*And because the signature would be a guess.* `Callable[[Mapping], Mapping]` fits
+a rename or a default. It does not fit a field split needing data v1 never held,
+and it does not fit a semantic change to an existing field. Designing the seam
+before the case is how you get a seam the case does not fit.
+
+**Build it the first time all three hold:**
+
+1. **The kind about to bump has stored history.** Checkable, not recalled:
+   ```sql
+   SELECT kind, count(*) FROM (
+     SELECT kind, target, count(*) n FROM artifacts GROUP BY 1,2 HAVING n>1
+   ) GROUP BY 1;
+   ```
+   On 2026-08-20 that returned `video.metadata` and nothing else.
+2. **The bump is a shape change, not a correctness fix.** If the old data is
+   wrong, `retracted_versions` is already the honest answer and is built.
+3. **Something reads across the version boundary** — the trend work's delta
+   layer, or a second consumer of `/v1/artifacts/{digest}` that needs one shape.
+
+The tripwire is already armed: `tests/test_payload_shapes.py` fails on the bump
+that would need this, and its message names the fork — bump and record, or
+retract. A deferral with a tripwire is a plan; without one it is a hope.
+
+*Not in `decisions/`.* That directory's README sets the bar at a cost someone
+has already paid and measured. Nothing here has been paid yet.
+
+### The sampler is a timer and a text file, not a scheduler
+
+**Superseded 2026-08-21 by `watch` — see the next section.** Kept because the
+reasoning below is why the replacement is still a timer and a text file.
+
+Nothing in this project ran periodically, so the artifact table was a time
+series with nothing taking samples. `tubedepth-sample.timer` fires
+`tubedepth enqueue video.metadata --from-file … --refresh` every hour and that
+is the whole mechanism.
+
+*It was built now rather than with the feature that needs it.* Trend detection
+is the difference between two observations, and observations only accumulate in
+real time — no amount of work later produces last week's view count. Everything
+else in the backlog can be built faster by adding people or agents to it; this
+one cannot, so it starts first and runs while the rest is built.
+
+*Deliberately not a scheduler.* No table of schedules, no watch-list model, no
+cadence per target. The trend work will need a real watch list, and it should
+inherit a generic worker control channel — the same one an operator pausing the
+worker from the dashboard needs — rather than a bespoke table built here that
+would then have to be replaced. A timer and a file cost nothing to throw away.
+
+*The list lives outside the repository,* at `~/.config/tubedepth/watchlist.txt`,
+next to the WireGuard config and for the same reason: which videos someone is
+watching is operator data, not project data, and a checked-in list is one every
+clone starts collecting.
+
+*A missing list is a failure, not an empty sweep.* A timer firing hourly at a
+file somebody moved would otherwise queue nothing, report success, and leave
+the series to stop moving with nothing anywhere reporting a problem — which is
+the exact shape of the `refresh` bug above, rebuilt on purpose.
+
+*Sizing is arithmetic, and it is written down so it can be checked.* One line
+is one forced collection per firing. A hundred videos hourly is 100 jobs/h
+against a rate measured at **~3,100 jobs/h under sustained load** (2026-08-20,
+above), so around three percent. That measurement replaced an estimate: the
+figure quoted here before was taken from forty-job runs and was low.
+
+The watch list and the cadence are still one decision and should still move
+together — the headroom is larger than it looked, not unlimited, and the
+sampler competes with every other lane user for the same per-address budget.
+
+### watch list에 타입이 붙고, 샘플러 유닛은 지웠다
+
+**결정 2026-08-21 (#20).** 릴리스 게이트가 요구하는 것은 채널·트렌드 키워드·지역을
+한 스케줄에서 수집하는 것이고, 그것을 한 줄에 id 하나짜리 목록으로는 표현할 수 없다.
+`UCxxx`, `@handle`, `kpop debut`, `KR`은 문자열만 보고 서로를 구분할 수 없다.
+
+*그래서 형식에 타입을 붙였다.* `<directive><공백><target>` 한 줄이고 directive는
+`video`·`channel`·`search`·`trending` 넷이다. 되돌리기 비싼 이유는 이 파일이 저장소
+밖 운영자 데이터라서다 — 형식을 다시 바꾸면 이미 손으로 쓴 목록을 다시 손으로 고쳐야
+한다. 알 수 없는 directive는 줄 번호를 짚어 거부한다. 아무도 보지 않는 타이머가 읽는
+파일에서 조용히 아무것도 수집하지 않는 오타가 가장 비싼 실패이기 때문이다.
+`#`는 줄 맨 앞에서만 주석이다. 검색어에 해시태그가 들어가는 것이 정상이라 인라인
+주석 문법을 두면 가장 평범한 질의가 조용히 잘린다.
+
+*`enqueue --from-file`의 bare-id 형식은 그대로 둔다.* 그쪽은 kind를 인자로 받으니
+타입이 필요 없고, 형식을 갈아엎으면 그 명령을 쓰는 것들이 같이 깨진다. 두 형식이
+공존하는 값은 치른다.
+
+*`deploy/tubedepth-sample.{service,timer}`는 지웠다.* `watch`가 생긴 뒤로 샘플러
+유닛에는 권장할 만한 호출자가 없고, 그것이 `decisions/003`이 말하는 상황 그 자체다.
+새 짝은 `tubedepth-watch.{service,timer}`이고, 여전히 타이머 + one-shot이다 —
+systemd에 이미 스케줄러가 있으므로 상주 프로세스는 두 번째 스케줄러일 뿐이다.
+`--every`는 타이머가 없는 환경(compose)을 위해 남긴다. **이 호스트에 깔린 유닛은
+아직 샘플러다.** 컷오버는 #24다.
+
+*listing 한 줄의 값은 video 한 줄의 값과 다르다.* `channel`·`search`·`trending`은
+`--then video.metadata`로 영상마다 잡을 만들므로 `TUBEDEPTH_LISTING_LIMIT`(기본 100)
+배까지 간다. 목록 크기를 정하는 사람이 이것을 모르면 열 줄짜리 목록이 시간당 1,000잡,
+측정된 ~3,100 jobs/h 천장의 3분의 1이 된다. 산수는 `deploy/watchlist.example.txt`에
+적어 뒀다.
 
 ### The dashboard reads the same API as everything else
 
@@ -678,6 +1520,22 @@ now adds nullable columns and refuses anything else by name; it is not a
 migration tool and does not pretend to be one (nothing renames, drops or
 backfills). Alembic is still the real answer and is still unbuilt.
 
+**CI was red at step one, and had been since the checks were written.**
+`tool/checks/format` runs `uv run ruff format --check`, and `uv run` installs
+the project's dependencies into a missing virtualenv but *not* its extras —
+ruff is a dev extra. So the first check on a fresh runner exited 2 with
+`Failed to spawn: ruff`, and because it was the first step, `verify` never
+reached the tests: **the suite was not running in CI at all**, on any push,
+while every commit message here said it was green. It passed on every laptop,
+which is exactly why it lasted — a laptop has already run `tool/checks/test`
+once, and that one does sync. The tell was visible the whole time and looked
+like noise: `gh run list` showed `failure` on every push for a fortnight.
+Fixed 2026-08-20 by syncing in each check, with the invariant asserted in
+`test_repository_hygiene.py`, since the next check will be written by copying
+one of these and the sync line is the part that looks like boilerplate. **The
+general form: a check that cannot fail loudly is indistinguishable from a check
+that passes, and the first green run is the only proof either way.**
+
 **Reflection deadlocked against the repair.** The first version of that repair
 used `inspect(engine)` and then `engine.begin()` — two connections, and *every*
 transaction here is `BEGIN IMMEDIATE`, so the reflecting one held the write lock
@@ -714,21 +1572,35 @@ first example for a day, against a route that never existed. The `GET`/`POST`
 split is the part worth having if they are ever added: it lets a client ask
 "have you got this" without being able to trigger a fetch by accident.
 
-**Never verified, in order of how likely it is to bite.**
+**Never verified.** Two of the four entries this list opened with are now
+answered, and the two that remain are GitHub issues rather than paragraphs here
+— a list in a status file is not a thing anyone is assigned.
 
-1. **Nothing here is measured beyond a few hundred jobs.** Every figure in this
-   file comes from sweeps of 20–50. How the rate controller behaves over hours,
-   where the bot-check threshold sits under sustained load, and whether the
-   AIMD window settles or oscillates are all unknown — and they decide whether
-   this works at the scale it was built for.
-2. **Verify a fresh clone** per project-scaffold `decisions/006`: follow the
-   README in order using nothing you happen to know. Never done here.
-3. **The units have never actually run.** `systemd-analyze verify` passes and
-   the tests check what units get wrong, but nothing has been installed,
-   enabled, or survived a reboot.
-4. **Retention has never evicted anything.** The orphan sweep has now run for
-   real, but no artifact has ever aged out, so the age path is untested against
-   volume.
+*Answered.* Sustained load is measured: 474 jobs, 0 failed, 430 s, **~3,100
+jobs/hour**, the lane window at its ceiling and the quarantine streak at zero.
+That replaces the ~2,150 figure quoted from sweeps of 20–50. And the units have
+run — both were broken the first time they were enabled (`status=127` from a
+PATH systemd does not inherit, then `Read-only file system` from
+`ProtectHome=read-only` over `~/.cache/uv`), which is the argument for enabling
+a unit rather than verifying it.
+
+*Open.* **[#17](https://github.com/slopindustries/yt-scrapper/issues/17)** —
+retention has never deleted for age; the first real run is currently scheduled
+for whenever the store turns 30 days old, which is the wrong way to find out.
+**[#18](https://github.com/slopindustries/yt-scrapper/issues/18)** — nobody has
+followed the README from a fresh clone. That one is overdue: CI was red at its
+first step for a fortnight for exactly the reason a README walkthrough exists to
+catch, and it passed on every laptop the whole time.
+
+**Where the work is tracked.** Milestones hold the two pieces of work large
+enough to have an order: *PostgreSQL: join the fleet's shared server*
+([#14](https://github.com/slopindustries/yt-scrapper/issues/14),
+[#15](https://github.com/slopindustries/yt-scrapper/issues/15),
+[#16](https://github.com/slopindustries/yt-scrapper/issues/16)) and *Trends:
+answer what is rising* ([#3](https://github.com/slopindustries/yt-scrapper/issues/3),
+where routes B and C are built and route A — the delta layer — is what is
+left). This file keeps the reasoning; the issues keep the state, so that
+updating one does not silently contradict the other.
 
 **Known and deliberate.** The rate controller's state is still per process and
 per run: a restart forgets which routes were in trouble, and two workers do not

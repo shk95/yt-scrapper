@@ -12,4 +12,13 @@ set -e
 . tool/checks/prerequisite
 require_command uv
 
+# The sync is not redundant with `tool/checks/test`'s. `uv run` installs the
+# project's own dependencies into a missing venv but not its extras, and ruff
+# is a dev extra — so on a machine with no `.venv` this failed with `Failed to
+# spawn: ruff` before it checked anything. That is every CI runner, and it is
+# where this check runs first, so CI was red at step one and never reached the
+# tests at all. It passed on every laptop, because a laptop has already run
+# `tool/checks/test` once.
+uv sync --extra dev --frozen
+
 uv run ruff format --check .
