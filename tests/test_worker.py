@@ -357,10 +357,22 @@ def test_disabling_the_claim_lock_lets_two_threads_exceed_the_reservation(
     rather than luck. This one swaps the real lock for a no-op and forces
     both worker threads past the reservation check before either registers,
     which is exactly the race `_claim`'s docstring describes. With the real
-    lock this cannot happen; here, it does, every time.
+    lock this cannot happen; with the no-op lock it does, reliably.
+
+    "Reliably" is measured on the reservation counter itself, not on whether
+    the two jobs are ever observed running at the same instant. An earlier
+    version asserted `slow.peak > 1` — the source's own count of concurrent
+    callers — which depends on both jobs still being in `collect()` at the
+    same moment. That is a fact about scheduling downstream of the race, not
+    the race itself: instrumenting many runs showed the reservation being
+    exceeded — both threads incrementing `_in_flight_by_cost` for the same
+    cost — every single time the assertion was reached, while `slow.peak`
+    stayed reliable too once the unrelated crash below was removed. Measuring
+    the counter directly removes any dependency on later scheduling.
     """
     import contextlib
     import itertools
+    from unittest.mock import Mock
 
     slow = SlowSource(seconds=0.2, cost=SourceCost.EXPENSIVE)
     database, _, payloads = build(tmp_path, database, slow)
@@ -384,6 +396,16 @@ def test_disabling_the_claim_lock_lets_two_threads_exceed_the_reservation(
     # a test about the cost reservation specifically. Not what this test is
     # about, so it is bypassed rather than tuned around.
     monkeypatch.setattr(RateController, "acquire", lambda self, egress, lane: True)
+    # `SourceHealthService.record` and `LaneHealthService.observe` both do a
+    # SELECT-then-INSERT get-or-create with no protection against two
+    # sessions racing to create the same row — a real bug on its own, but not
+    # the one this test exists to prove, and forcing both threads to finish
+    # within the same instant (below) makes the two jobs' completions collide
+    # on it far more often than production timing ever would, raising
+    # IntegrityError out of `drain()` before the assertion below is reached.
+    # Stubbed out so an unrelated race cannot masquerade as this one failing.
+    monkeypatch.setattr(worker, "_health", Mock())
+    monkeypatch.setattr(worker, "_lanes", Mock())
 
     # Both EXPENSIVE-cost jobs are meant to be capped at one concurrent
     # (share 0.5 of concurrency=2), so the race window is: both threads read
@@ -402,9 +424,27 @@ def test_disabling_the_claim_lock_lets_two_threads_exceed_the_reservation(
 
     monkeypatch.setattr(worker, "_admissible_kinds_unlocked", _racing_admissible_kinds_unlocked)
 
+    # The property under test is that both threads got past the
+    # check-then-increment and both registered against the EXPENSIVE
+    # reservation at once — exactly what `_claim`'s docstring describes, and
+    # measured at the moment it happens rather than inferred from how the
+    # jobs are scheduled afterwards (see the docstring above).
+    reservation_peak = 0
+    real_claim = worker._claim
+
+    def _claim_and_record_reservation_peak() -> tuple[str, str, str, str | None, bool] | None:
+        nonlocal reservation_peak
+        claimed = real_claim()
+        reservation_peak = max(
+            reservation_peak, worker._in_flight_by_cost.get(SourceCost.EXPENSIVE, 0)
+        )
+        return claimed
+
+    monkeypatch.setattr(worker, "_claim", _claim_and_record_reservation_peak)
+
     worker.drain()
 
-    assert slow.peak > 1, (
+    assert reservation_peak > 1, (
         "the reservation held even with no lock — the forced race did not "
         "reproduce, so this test is not proving what it claims to"
     )
