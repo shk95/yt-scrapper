@@ -31,6 +31,7 @@ from sqlalchemy.exc import ProgrammingError
 
 ROOT = Path(__file__).parent.parent
 SCHEMA = "tubedepth"
+BOOTSTRAP_SQL = ROOT / "deploy" / "postgres-bootstrap.sql"
 
 pytestmark = pytest.mark.postgres
 
@@ -54,6 +55,27 @@ def alembic(*arguments: str) -> subprocess.CompletedProcess[str]:
             "PYTHONPATH": str(ROOT / "src"),
         },
     )
+
+
+def schema_scoped_grants() -> list[str]:
+    """The GRANT / ALTER DEFAULT PRIVILEGES block between
+    deploy/postgres-bootstrap.sql's SCHEMA-SCOPED-GRANTS markers, split into
+    individual statements.
+
+    Not retyped here on purpose. Those ACLs are tied to the schema's own OID,
+    so `migrated_database` below has to re-apply them after every DROP SCHEMA
+    ... CASCADE — and if this test file kept its own copy of that SQL, editing
+    or deleting a line in the real bootstrap file (say, one of the
+    ALTER DEFAULT PRIVILEGES lines rule 1 calls "not optional") would leave
+    this suite green while production broke. Reading the block out of the
+    file itself is what makes a deleted line here fail here too.
+    """
+    text_ = BOOTSTRAP_SQL.read_text()
+    start = text_.index("-- SCHEMA-SCOPED-GRANTS-BEGIN")
+    end = text_.index("-- SCHEMA-SCOPED-GRANTS-END")
+    block = text_[start:end]
+    statements = [line if not line.strip().startswith("--") else "" for line in block.splitlines()]
+    return [stmt.strip() for stmt in "\n".join(statements).split(";") if stmt.strip()]
 
 
 @pytest.fixture
@@ -88,20 +110,14 @@ def migrated_database() -> Iterator[None]:
     # name, is a new object with none of them. Without re-applying these here,
     # tubedepth_runtime would have no DML access at all, and every negative
     # test in this module would pass for the wrong reason: nothing granted,
-    # rather than DDL specifically denied.
+    # rather than DDL specifically denied. Read out of the bootstrap file
+    # itself (see schema_scoped_grants) rather than retyped, so a deleted
+    # ALTER DEFAULT PRIVILEGES line there is a deleted line here too.
     engine = create_engine(MIGRATOR_URL or "")
     with engine.begin() as connection:
         connection.execute(text("SET ROLE tubedepth_owner"))
-        connection.execute(text(f"GRANT USAGE ON SCHEMA {SCHEMA} TO tubedepth_runtime"))
-        connection.execute(
-            text(
-                f"GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA {SCHEMA} "
-                "TO tubedepth_runtime"
-            )
-        )
-        connection.execute(
-            text(f"GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA {SCHEMA} TO tubedepth_runtime")
-        )
+        for statement in schema_scoped_grants():
+            connection.execute(text(statement))
     engine.dispose()
 
     yield
@@ -178,3 +194,70 @@ def test_the_runtime_role_carries_the_timeouts_the_regulation_requires(
     engine.dispose()
     for name in ("statement_timeout", "lock_timeout", "idle_in_transaction_session_timeout"):
         assert name in settings, f"{name} is not set on the runtime role"
+
+
+@needs_postgres
+def test_the_runtime_role_can_do_the_dml_it_is_granted(migrated_database: None) -> None:
+    """The positive control the four negative tests above need.
+
+    Deleting the `GRANT USAGE ON SCHEMA` statement from `schema_scoped_grants`
+    (or from `deploy/postgres-bootstrap.sql`, since that is where it reads
+    from) makes every one of those four tests pass for the wrong reason:
+    `permission denied for schema tubedepth` refuses `CREATE TABLE` just as
+    effectively as a working grant does, and the assertion there cannot tell
+    the difference between "DDL is specifically denied" and "runtime has no
+    access to anything at all". This test is what tells them apart — it fails
+    if runtime cannot do the DML rule 1 says it must be able to.
+    """
+    engine = create_engine(RUNTIME_URL or "")
+    with engine.begin() as connection:
+        connection.execute(
+            text(
+                "INSERT INTO tubedepth.jobs "
+                "(identifier, kind, target, refresh, state, attempt_count, "
+                "max_attempts, scheduled_at, created_at, webhook_attempts) "
+                "VALUES "
+                "('positive-control', 'video.metadata', 'dQw4w9WgXcQ', false, "
+                "'queued', 0, 3, now(), now(), 0)"
+            )
+        )
+        count = connection.execute(
+            text("SELECT count(*) FROM tubedepth.jobs WHERE identifier = 'positive-control'")
+        ).scalar_one()
+    engine.dispose()
+    assert count == 1
+
+
+@needs_postgres
+def test_a_table_created_after_the_grants_is_reachable_through_default_privileges(
+    migrated_database: None,
+) -> None:
+    """The proof rule 1's `ALTER DEFAULT PRIVILEGES` lines earn their keep.
+
+    `migrated_database` re-applies `schema_scoped_grants()` — including the
+    explicit `GRANT ... ON ALL TABLES` — before this test runs, and that
+    explicit grant only covers tables that already existed at the moment it
+    ran. It says nothing about a table created afterwards. If the three
+    ALTER DEFAULT PRIVILEGES statements in deploy/postgres-bootstrap.sql were
+    deleted, `schema_scoped_grants()` would read a shorter block, apply fewer
+    statements, and this table — created by the owner after the fixture's
+    grants ran, the same order a real migration follows in production — would
+    be unreachable by runtime. That is exactly the failure rule 1 warns about:
+    discovered at the first request after a deploy, not during it.
+    """
+    engine = create_engine(MIGRATOR_URL or "")
+    with engine.begin() as connection:
+        connection.execute(text("SET ROLE tubedepth_owner"))
+        connection.execute(
+            text("CREATE TABLE tubedepth.created_after_grants (id bigint PRIMARY KEY)")
+        )
+    engine.dispose()
+
+    runtime_engine = create_engine(RUNTIME_URL or "")
+    with runtime_engine.begin() as connection:
+        connection.execute(text("INSERT INTO tubedepth.created_after_grants (id) VALUES (1)"))
+        count = connection.execute(
+            text("SELECT count(*) FROM tubedepth.created_after_grants")
+        ).scalar_one()
+    runtime_engine.dispose()
+    assert count == 1

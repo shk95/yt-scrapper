@@ -46,6 +46,16 @@ REVOKE CREATE ON SCHEMA public FROM PUBLIC;
 -- Rule 1: the runtime role gets DML only — no CREATE, ALTER, DROP, TRUNCATE,
 -- REFERENCES or TRIGGER. It can use the schema and touch the rows in it, and
 -- nothing else.
+--
+-- SCHEMA-SCOPED-GRANTS-BEGIN
+-- These statements are ACL entries tied to the schema's own OID (the GRANTs
+-- directly, and the ALTER DEFAULT PRIVILEGES entries, which are keyed by
+-- (role, namespace)). `tests/test_postgres_privileges.py` drops and recreates
+-- `tubedepth` between test runs for isolation, which takes a schema's ACL
+-- entries with it, so that file re-applies exactly this block — parsed out by
+-- these markers, not retyped — after every reset. Keep the block
+-- self-contained (no `:database`/`:password` psql variables) so it can be
+-- extracted and replayed verbatim.
 GRANT USAGE ON SCHEMA tubedepth TO tubedepth_runtime;
 GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA tubedepth TO tubedepth_runtime;
 GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA tubedepth TO tubedepth_runtime;
@@ -59,6 +69,7 @@ ALTER DEFAULT PRIVILEGES FOR ROLE tubedepth_owner IN SCHEMA tubedepth
   GRANT USAGE, SELECT ON SEQUENCES TO tubedepth_runtime;
 ALTER DEFAULT PRIVILEGES FOR ROLE tubedepth_owner IN SCHEMA tubedepth
   REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+-- SCHEMA-SCOPED-GRANTS-END
 
 -- Not cosmetic. Unqualified names resolve here, which is what puts this
 -- service's alembic_version in its own schema instead of the one row every
