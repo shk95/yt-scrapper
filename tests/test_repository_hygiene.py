@@ -101,3 +101,28 @@ def test_no_module_outside_a_sanctioned_site_constructs_a_transport_directly() -
         f"({sorted(str(p.relative_to(REPOSITORY_ROOT)) for p in sanctioned)}): "
         f"{[str(p.relative_to(REPOSITORY_ROOT)) for p in offenders]}"
     )
+
+
+def test_every_check_that_runs_a_dev_tool_installs_the_dev_extras() -> None:
+    """The failure that made CI red at step one for a fortnight.
+
+    `uv run` will create a missing virtualenv and install the project's own
+    dependencies, but not its extras — and ruff and basedpyright are dev
+    extras. `tool/checks/format` ran first, found no `ruff`, and exited 2
+    before anything was checked; `verify` never reached the test step, so the
+    suite was not running in CI at all. It passed on every laptop, because a
+    laptop has already run `tool/checks/test` once and has the venv to show
+    for it.
+
+    Asserted rather than remembered because the next check added here will be
+    written by copying one of these, and the sync line is the part that looks
+    like boilerplate.
+    """
+    checks = REPOSITORY_ROOT / "tool" / "checks"
+    missing = [
+        script.name
+        for script in sorted(checks.iterdir())
+        if script.is_file() and "uv run" in (body := script.read_text()) and "uv sync" not in body
+    ]
+
+    assert not missing, f"these run a dev tool without installing it: {missing}"
