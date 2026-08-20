@@ -1,0 +1,42 @@
+# The manifest docs/shared-postgres.md requires of every service on the shared
+# database. This is the declaration other services and the database owner read;
+# when reality and this file disagree, one of them is wrong and the audit
+# queries in that document are how to find out which.
+#
+# `database` is deployment-specific and is therefore named by the deployment
+# (TUBEDEPTH_DATABASE_URL), not here.
+
+service: tubedepth
+schema: tubedepth
+roles:
+  owner: tubedepth_owner
+  migrator: tubedepth_migrator
+  runtime: tubedepth_runtime
+
+# None, and rule 10-13 of docs/shared-postgres.md is why it should stay that
+# way: other services' identifiers (if ever stored) are plain values, validated
+# through their APIs, never through a cross-schema FK or JOIN.
+cross_service_dependencies: []
+
+# None. The schema uses only core types; migrations are forbidden from
+# CREATE EXTENSION by rule 8 regardless.
+required_extensions: []
+
+# The payload store: gzip blobs under TUBEDEPTH_DATA_DIR/payloads, keyed by
+# content digest (immutable keys — the same digest is never rewritten with
+# different bytes, which is rule 7's write protocol by construction). Artifact
+# rows reference these files; a backup is a recovery SET of database plus this
+# directory, never the database alone.
+external_object_stores:
+  - kind: filesystem
+    path: ${TUBEDEPTH_DATA_DIR}/payloads
+    write_protocol: content-addressed, write-then-record
+    referenced_by: artifacts.digest
+
+# One API process + one worker process, each holding a write engine and a
+# read engine. The number below is the hard ceiling to be enforced with
+# CONNECTION LIMIT on tubedepth_runtime; the per-engine pool sizes that add up
+# to it are set in code and recorded in docs/status.md when #15 lands. Until
+# then this is the budget being requested from the fleet total, not a measured
+# figure.
+connection_budget: 20

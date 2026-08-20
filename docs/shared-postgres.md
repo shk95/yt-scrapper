@@ -1,149 +1,595 @@
-# 공유 PostgreSQL에서 지켜야 하는 것
+# 하나의 PostgreSQL database를 여러 서비스가 공유할 때의 운영 지시 규정
 
-이 프로젝트는 다른 스크래퍼들과 **물리 데이터베이스 하나를 나눠 쓰고, 경계는 논리적으로만
-두는** 구성으로 간다. 이 문서는 그 구성의 규약이고, 함대의 다른 서비스에도 같은 것이 적용된다.
+> 이 파일은 함대 공통 규정의 사본이다. 문구를 저장소 사정에 맞게 고치지 않는다 — 이 저장소가
+> 규정을 어떻게 적용하는지는 `docs/status.md`의 "규정 적용" 절에 적는다. 규정 자체의 개정은
+> 함대 수준에서 하고, 개정본을 그대로 다시 복사한다.
 
-각 항목은 규칙·왜·확인 순서다. **왜를 지운 채 규칙만 옮기지 말 것** — 몇 개는 이유를 모르면
-불필요한 격식으로 보여서 제일 먼저 지워진다. 순서는 값싼 순이 아니라 **위험이 큰 순**이다.
+## 목적과 적용 범위
 
-## 0. 전제 — 서비스마다 스키마 하나, 롤 하나
+이 문서는 여러 서비스가 **하나의 PostgreSQL database 안에서 서비스별 schema를 소유**하는 구성에 적용한다.
 
-```sql
-CREATE ROLE tubedepth LOGIN PASSWORD '...';
-CREATE SCHEMA tubedepth AUTHORIZATION tubedepth;
-ALTER ROLE tubedepth SET search_path = tubedepth;
-REVOKE ALL ON SCHEMA public FROM PUBLIC;
+```text
+PostgreSQL cluster / instance
+└─ database: app
+   ├─ schema: orders
+   ├─ schema: catalog
+   └─ schema: identity
 ```
 
-이 저장소에서는 `deploy/postgres-bootstrap.sql`이 그 파일이고, `just postgres`와 CI가 **같은 파일로**
-서버를 세운 뒤 마이그레이션을 검사한다. 문서에만 있는 셋업은 배포와 갈라지고, 갈라진 것은
-배포일에 발견된다.
+이 구조의 목표는 단순히 현재의 공유 database를 안전하게 사용하는 데 그치지 않는다.
 
-논리 경계는 강제될 때만 경계다. 같은 롤과 같은 `public`을 공유하면 그건 명명 규칙일 뿐이고,
-여섯 달 뒤 누군가 경계를 넘는 조인을 하나 쓴다. 그때는 다른 서비스가 이미 그 조인에
-의존하므로 되돌릴 수 없다.
+> 어느 서비스든 자기 schema를 별도 database로 옮겼을 때 데이터 소유권과 애플리케이션 의미가 깨지지 않아야 한다.
 
-테이블명에 서비스 접두사를 붙이지 않는다. 스키마가 그 일을 한다.
+문서에서 다음 용어는 강제 수준을 뜻한다.
 
-## 1. 가장 위험 — autogenerate가 남의 테이블을 지운다
+- **금지한다 / 해야 한다**: 예외 승인 없이는 위반할 수 없는 운영 규칙
+- **권장한다**: 기본 선택이며, 다르게 할 때 근거를 기록해야 하는 규칙
+- **예외**: 책임자, 만료일, 제거 계획을 기록하고 승인한 한시적 결정
+
+각 서비스는 다음 정보를 저장소의 운영 문서나 machine-readable manifest로 관리해야 한다.
+
+```yaml
+service: orders
+database: app
+schema: orders
+roles:
+  owner: orders_owner
+  migrator: orders_migrator
+  runtime: orders_runtime
+cross_service_dependencies: []
+required_extensions: []
+external_object_stores: []
+connection_budget: 20
+```
+
+---
+
+## 0. 서비스마다 schema 하나와 소유자 하나를 둔다
+
+**규칙.** 서비스의 테이블, sequence, view, function, type과 Alembic version table은 모두 그 서비스 schema 안에 둔다. 서비스 이름의 table prefix나 `public.shared_*` 같은 명명 규칙을 경계로 사용하지 않는다. `public`을 애플리케이션 객체의 기본 위치로 사용하지 않고, 모든 서비스 schema에서 `PUBLIC`의 권한을 회수한다.
+
+`search_path`에 넣는 schema는 해당 로그인 주체가 신뢰할 수 있는 곳으로만 제한한다. 특히 다른 주체가 `CREATE`할 수 있는 schema를 runtime의 `search_path`에 넣지 않는다.
+
+```sql
+REVOKE CREATE ON SCHEMA public FROM PUBLIC;
+
+CREATE ROLE orders_owner NOLOGIN;
+CREATE SCHEMA orders AUTHORIZATION orders_owner;
+REVOKE ALL ON SCHEMA orders FROM PUBLIC;
+```
+
+**이유.** PostgreSQL schema는 namespace일 뿐이며, 실제 경계는 schema의 `USAGE`·`CREATE` 권한과 그 안의 객체 권한으로 형성된다. 또한 writable schema가 `search_path`에 있으면 같은 이름의 함수나 객체를 만든 주체를 신뢰하는 결과가 된다. schema 이름만 나눠 놓고 권한을 나누지 않으면 소유권 경계가 아니다.
+
+**확인 방법.** 다음을 모두 확인한다.
+
+- `public`과 각 서비스 schema에서 `PUBLIC`에 `CREATE`가 없다.
+- runtime role의 `SHOW search_path` 결과에 자기 schema와 `pg_catalog` 외의 애플리케이션 schema가 없다.
+- runtime role로 자기 schema 밖의 객체를 조회하거나 생성하면 거부된다.
+- 사용자 객체가 `public`에 존재하지 않는다.
+
+```sql
+SELECT nspname, nspacl
+FROM pg_namespace
+WHERE nspname IN ('public', 'orders');
+
+SELECT schemaname, tablename, tableowner
+FROM pg_tables
+WHERE schemaname = 'public';
+```
+
+---
+
+## 1. owner, migrator, runtime role을 분리한다
+
+**규칙.** 서비스마다 최소 세 role을 둔다.
+
+```text
+orders_owner     NOLOGIN, schema와 그 안의 객체 소유
+orders_migrator  LOGIN, 배포 시에만 사용, SET ROLE로 owner 권한 획득
+orders_runtime   LOGIN, 실행 중 필요한 DML만 허용
+```
+
+runtime role은 schema owner가 아니며 `CREATE`, `ALTER`, `DROP`, `TRUNCATE`, `REFERENCES`, `TRIGGER` 권한을 갖지 않는다. migrator credential은 애플리케이션 runtime 환경에 배포하지 않는다. migration은 `orders_owner`로 `SET ROLE`한 세션에서 실행하여 새 객체의 owner가 일관되게 `orders_owner`가 되도록 한다.
+
+```sql
+CREATE ROLE orders_owner NOLOGIN;
+CREATE ROLE orders_migrator LOGIN NOINHERIT PASSWORD 'managed-secret';
+CREATE ROLE orders_runtime  LOGIN NOINHERIT PASSWORD 'managed-secret';
+
+GRANT orders_owner TO orders_migrator;
+
+GRANT USAGE ON SCHEMA orders TO orders_runtime;
+GRANT SELECT, INSERT, UPDATE, DELETE
+  ON ALL TABLES IN SCHEMA orders TO orders_runtime;
+GRANT USAGE, SELECT
+  ON ALL SEQUENCES IN SCHEMA orders TO orders_runtime;
+
+ALTER DEFAULT PRIVILEGES FOR ROLE orders_owner IN SCHEMA orders
+  GRANT SELECT, INSERT, UPDATE, DELETE ON TABLES TO orders_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE orders_owner IN SCHEMA orders
+  GRANT USAGE, SELECT ON SEQUENCES TO orders_runtime;
+ALTER DEFAULT PRIVILEGES FOR ROLE orders_owner IN SCHEMA orders
+  REVOKE EXECUTE ON FUNCTIONS FROM PUBLIC;
+
+ALTER ROLE orders_runtime IN DATABASE app
+  SET search_path = orders, pg_catalog;
+ALTER ROLE orders_migrator IN DATABASE app
+  SET search_path = pg_catalog;
+```
+
+필요한 function은 `PUBLIC`이 아니라 호출 주체에게만 `EXECUTE`를 부여한다. 기존 객체에 대한 `GRANT`와 미래 객체에 대한 `ALTER DEFAULT PRIVILEGES`를 둘 다 설정한다. 후자는 **지정한 object creator가 앞으로 만드는 객체에만** 적용된다.
+
+**이유.** schema owner인 runtime credential이 탈취되거나 잘못된 SQL을 실행하면 DML 사고가 DDL 사고로 확대된다. owner를 `NOLOGIN`으로 두고 migration 경로에서만 사용하면 서비스 경계와 변경 경로를 database가 강제한다.
+
+**확인 방법.** runtime credential로 다음 부정 테스트를 실행해 모두 거부되는지 확인한다.
+
+```sql
+CREATE TABLE orders.must_fail(id bigint);
+ALTER TABLE orders.some_table ADD COLUMN must_fail text;
+DROP TABLE orders.some_table;
+TRUNCATE orders.some_table;
+```
+
+또한 schema 안의 모든 객체 owner가 해당 서비스 owner role인지 감사한다.
+
+```sql
+SELECT n.nspname, c.relname, c.relkind, pg_get_userbyid(c.relowner) AS owner
+FROM pg_class c
+JOIN pg_namespace n ON n.oid = c.relnamespace
+WHERE n.nspname = 'orders'
+  AND pg_get_userbyid(c.relowner) <> 'orders_owner';
+```
+
+결과가 비어 있어야 한다. 승인된 예외가 있다면 manifest와 일치해야 한다.
+
+---
+
+## 2. Alembic autogenerate는 자기 schema만 명시적으로 allowlist한다
+
+**규칙.** `include_schemas=False`와 `search_path`만으로 autogenerate 범위를 통제하지 않는다. 모델 metadata와 migration operation은 서비스 schema를 명시적으로 사용하고, reflection 단계에서 schema allowlist를 적용한다.
 
 ```python
-context.configure(..., include_schemas=False)
+SERVICE_SCHEMA = "orders"
+
+metadata_schemas = {table.schema for table in target_metadata.tables.values()}
+assert metadata_schemas == {SERVICE_SCHEMA}
+
+def include_name(name, type_, parent_names):
+    if type_ == "schema":
+        return name == SERVICE_SCHEMA
+    if type_ == "table":
+        return parent_names.get("schema_name") == SERVICE_SCHEMA
+    return True
+
+context.configure(
+    connection=connection,
+    target_metadata=target_metadata,
+    include_schemas=True,
+    include_name=include_name,
+    version_table="alembic_version",
+    version_table_schema=SERVICE_SCHEMA,
+)
 ```
 
-Alembic의 autogenerate는 내 모델과 **데이터베이스에 실제로 있는 것**을 비교한다. 연결이 다른
-서비스의 테이블을 볼 수 있으면 그것들을 "모델에 없는 테이블"로 판정하고 **`op.drop_table()`을
-생성한다.** 리뷰에서 걸린다고 생각하기 쉽지만 생성된 마이그레이션은 잘 안 읽힌다. 이 목록에서
-**다른 팀의 데이터를 지우는 유일한 항목**이다.
+migration connection의 기본 `search_path`는 `pg_catalog`처럼 fail-closed로 두고, `MetaData(schema="orders")`, `op.create_table(..., schema="orders")`처럼 대상 schema를 명시한다. 프로젝트가 다른 Alembic 전략을 선택할 수는 있지만, **실제 타 schema가 존재하는 database를 이용한 격리 테스트**로 동등한 안전성을 증명해야 한다.
 
-그래서 0번이 취향이 아니다 — 스키마 분리가 autogenerate를 안전하게 만드는 장치다. `search_path`가
-`tubedepth`뿐이면 리플렉션이 남의 테이블을 아예 못 보고, `include_schemas=False`가 그 범위를
-넓히지 않겠다는 선언이다.
+생성된 revision은 실행 가능한 후보일 뿐이다. 사람이 검토하지 않은 autogenerate 결과를 자동 적용하지 않는다.
 
-**`version_table_schema`는 여기 같이 쓰지 않는다.** 처음 이 문서는 둘을 함께 적었는데, 실제로
-돌려보니 그 조합이 **`drop_table('alembic_version')`을 만들어낸다.** alembic은 설정된 스키마와
-리플렉션된 스키마를 비교해서 자기 버전 테이블을 제외하는데, `search_path` 아래의 리플렉션은
-`None`을 보고하므로 `"tubedepth" != None`이 되어 제외에 실패한다. 스퓨리어스 `drop_table`을
-막으려던 설정이 하나를 만든다. 0번의 `search_path`만으로 버전 테이블은 이미 자기 스키마에
-들어가므로 **둘은 대안이지 짝이 아니다.**
+**이유.** autogenerate는 metadata와 reflection 결과의 차이를 migration 후보로 만든다. 범위가 잘못되면 다른 서비스 객체를 "metadata에 없는 객체"로 보고 삭제나 변경 대상으로 만들 수 있다. `search_path`와 dialect의 default schema 해석에만 기대면 설정 조합에 따라 반영 범위가 달라질 수 있다.
 
-**확인.** `alembic revision --autogenerate`를 한 번 돌려 `drop_table`이 없는지 본다. 이 저장소에서는
-`tests/test_postgres_migrations.py`가 그것을 매번 한다.
-
-## 2. `alembic_version`을 스키마마다 분리한다
-
-기본값은 `public.alembic_version`이고, 서비스가 여럿이면 **같은 한 줄을 서로 덮어쓴다.** 그러면
-A의 마이그레이션이 B의 리비전을 head로 알고 이미 적용된 것을 다시 돌리거나 건너뛴다. 조용히
-깨지고, 알아챘을 때는 어디까지 적용됐는지가 추측이 된다.
-
-분리하는 방법은 **0번의 `search_path` 하나면 된다** — 확인했다. 별도 설정이 아니라 1번에서 쓰지
-말라고 한 그 설정의 대안이다. 다만 `search_path`에 기대는 만큼, 롤 설정이 빠지면 테이블이 조용히
-`public`으로 간다. 그래서 이건 문서가 아니라 테스트가 지켜야 한다.
-
-**확인.** `\dt *.alembic_version` — 스키마마다 하나씩 있어야 한다.
-
-## 3. 커넥션은 함대 예산이다
-
-```
-max_connections >= Σ(서비스별 pool_size + max_overflow) + 운영 여유
-```
-
-이 서비스는 워커 concurrency + API 풀 + CLI 배치다. 한 서비스가 풀을 다 쓰면 **다른 서비스가
-`too many clients`로 죽는다** — 원인은 멀쩡하고 피해는 남이 본다. 계산을 지금 해서 적어둔다;
-세 번째 서비스가 들어올 때 그 숫자를 다시 찾을 사람이 없다.
-
-## 4. 긴 트랜잭션은 남의 테이블 청소를 막는다
+**확인 방법.** CI에서 임시 database에 다음 sentinel을 만든다.
 
 ```sql
-ALTER ROLE tubedepth SET idle_in_transaction_session_timeout = '30s';
+CREATE SCHEMA foreign_sentinel;
+CREATE TABLE foreign_sentinel.must_survive(id bigint PRIMARY KEY);
 ```
 
-autovacuum은 **가장 오래된 열린 트랜잭션보다 나중에 죽은 튜플을 치울 수 없고, 이건 DB
-전역이다.** 한 서비스가 외부 API를 기다리며 트랜잭션을 열어두면 다른 서비스의 테이블에 죽은
-튜플이 쌓인다. 증상이 원인과 다른 곳에서 나타나 진단이 가장 어렵다.
+그 뒤 autogenerate를 실행하여 다음을 검증한다.
 
-**스크래퍼가 특히 저지르기 쉽다**: "행을 잠그고 → 가져오고 → 결과를 쓴다"가 자연스러워 보이지만
-그 사이가 몇 초다. 네트워크 호출을 트랜잭션 안에서 하지 않는다.
+- 생성 revision에 `foreign_sentinel`이 한 번도 나타나지 않는다.
+- 자기 schema 밖의 `drop_table`, `drop_column`, `alter_column`, constraint 변경이 없다.
+- 빈 database에서 `upgrade head`가 성공한다.
+- 현재 운영 schema를 복제한 상태에서도 `upgrade head`가 성공한다.
+- `upgrade head` 후 다시 autogenerate하면 의도하지 않은 diff가 없다.
 
-## 5. DB 밖의 파일은 백업이 한 쌍이다
+---
 
-이 프로젝트의 payload는 DB가 아니라 `var/payloads/`의 파일이다. **DB만 복구하면 아무것도
-가리키지 않는 인덱스가 남는다** — 수집 경로는 캐시 미스로 넘어가고 `GET /v1/jobs/{id}/result`는
-404가 된다. 복구는 **파일 먼저, DB 나중**이어야 인덱스가 파일을 앞지르지 않는다.
+## 3. Alembic version state를 서비스별로 격리한다
 
-공유 DB로 가면 DB 백업이 함대 공통 절차가 되면서 이 두 번째 절반이 잊힌다. 그래서 여기 적는다.
+**규칙.** 각 서비스는 자기 schema 안에 자기 Alembic version table을 둔다. 독립된 migration graph들이 같은 `public.alembic_version`을 공유하지 않는다.
 
-## 6. 시작할 때 스키마를 고치지 않는다
+```python
+context.configure(
+    # ...
+    version_table="alembic_version",
+    version_table_schema="orders",
+)
+```
 
-부팅 경로에서 `create_all()`이나 `ALTER TABLE`을 호출하지 않는다. 스키마 변경 경로는
-마이그레이션 하나다.
+서비스 migration은 해당 서비스 저장소와 배포 파이프라인이 소유한다. 동일 서비스의 migration 두 개가 동시에 실행되지 않도록 배포 단계를 직렬화하거나 서비스별 advisory lock을 사용한다.
 
-단일 서비스에서는 편의였다. 공유 DB에서는 **부팅할 때마다 남이 있는 DB의 DDL을 건드리는
-서비스**가 되고, 재시작 루프에 걸리면 그걸 반복한다. 부작용도 있다: 부팅이 스키마를 고치면
-버전 테이블은 그대로라 다음 마이그레이션이 **이미 있는 컬럼을 추가하려다 실패한다**
-(`duplicate column name` — 이 저장소가 실제로 겪었다. `docs/troubleshooting.md` 참조).
+**이유.** 서로 독립된 Alembic 환경이 version state 하나를 공유하면 각 migration graph의 현재 revision을 신뢰할 수 없게 된다. version table만 분리해도 동시 migration 충돌까지 해결되는 것은 아니므로 실행 직렬화도 별도로 필요하다.
 
-**이 프로젝트에서는 `Database._repair_existing_tables`를 지우는 일이다.**
+**확인 방법.** 모든 서비스 schema에 version table이 정확히 하나씩 있고 `public`에는 공용 version table이 없는지 확인한다.
 
-## 7. 읽기 경로는 읽기라고 선언한다
+```sql
+SELECT schemaname, tablename
+FROM pg_tables
+WHERE tablename = 'alembic_version'
+ORDER BY schemaname;
+```
 
-PostgreSQL에서 리더는 라이터를 막지 않으므로 성능 이유는 없다. 이유는 둘 — 읽기 경로에서
-실수로 쓰면 거부되고, 코드가 의도를 말한다. `decisions/002`의 `readonly=True`는 유지하되
-구현이 `PRAGMA query_only`에서 `SET TRANSACTION READ ONLY`로 바뀐다. 나중에 읽기를 핫스탠바이로
-보낼 생각이 조금이라도 있으면 선택이 아니다.
+각 서비스에서 `alembic current`와 `alembic heads`가 일치하는지 확인하고, 동시 실행 테스트에서 두 번째 migrator가 대기하거나 실패하도록 검증한다.
 
-## 8. 확장과 전역 설정은 함대 결정이다
+---
 
-`CREATE EXTENSION`은 **데이터베이스 전역**이다. 마이그레이션에 넣으면 한 서비스의 배포가 다른
-서비스의 런타임을 바꾼다. 확장 설치는 DB 프로비저닝에서 하고, 서비스 마이그레이션에는
-`IF NOT EXISTS`조차 넣지 않는다.
+## 4. connection은 database 전체의 예산으로 관리한다
 
-## 9. 시각은 전부 `timestamptz`, 저장은 UTC
+**규칙.** 서비스별 connection budget을 배포 인스턴스 수까지 포함해 계산하고, 합계가 일반 애플리케이션용 슬롯을 넘지 않게 한다.
 
-서비스마다 시각 규약이 다르면 조인하는 순간 드러나고 그때는 양쪽에 데이터가 있다. naive
-datetime을 저장하지 않는다 — 이 프로젝트의 `UtcDateTime` TypeDecorator가 이미 그 일을 하고,
-Postgres에서도 유지한다.
+```text
+서비스 budget
+= 최대 동시 인스턴스 수 × 인스턴스당 DB pool 상한
++ worker·scheduler·batch 전용 연결
++ 서비스 migration 연결
 
-## 규칙이 **아닌** 것
+Σ(서비스 budget)
+<= max_connections
+ - superuser_reserved_connections
+ - reserved_connections
+ - 운영 안전 여유
+```
 
-- 서비스마다 DB를 나눌 필요는 없다. 그게 이 구성의 전제다. 규모가 커지면 `pg_dump -n <schema>`가
-  그대로 이관 단위가 되므로, 스키마 분리는 그 미래에 대한 선불이기도 하다.
-- 크로스 서비스 조인이 금지는 아니다. **명시적 GRANT**를 거치면 되고, 그러면 누가 무엇에
-  의존하는지가 DB에 기록으로 남는다.
-- PgBouncer는 아직 필요 없다. 3번의 계산이 맞으면 서비스가 몇 개 늘 때까지 괜찮다.
+SQLAlchemy를 사용한다면 pool 하나의 상한은 보통 `pool_size + max_overflow`이지만, 프로세스와 worker마다 pool이 따로 생기는지 반드시 반영한다. PgBouncer transaction pooling을 사용하면 애플리케이션 client 수가 아니라 PostgreSQL backend pool 상한을 budget에 사용한다. `max_connections`를 계속 올리는 것을 기본 해결책으로 삼지 않는다.
 
-## 도입 체크리스트
+가능하면 runtime login role에 `CONNECTION LIMIT`도 설정하여 계산 실수를 hard limit로 막는다. rolling deployment로 구·신 인스턴스가 겹치는 구간도 예산에 포함한다.
 
-- [ ] 롤·스키마·`search_path` (0)
-- [ ] `include_schemas=False` (1) — `version_table_schema`는 **쓰지 않는다**
-- [ ] `alembic_version`이 서비스 스키마에 있는지, 테스트로 (2)
-- [ ] autogenerate 한 번 돌려 `drop_table` 없는지 (1)
-- [ ] 최대 커넥션 계산해서 함대 합계에 더하기 (3)
-- [ ] `idle_in_transaction_session_timeout` (4)
-- [ ] 백업 절차에 DB와 payload를 한 쌍으로 (5)
-- [ ] 부팅 경로에 DDL 없는지 grep (6)
-- [ ] 읽기 경로가 READ ONLY인지 (7)
-- [ ] 마이그레이션에 `CREATE EXTENSION` 없는지 (8)
-- [ ] 시각 컬럼이 전부 `timestamptz`인지 (9)
+**이유.** 공유 database에서 한 서비스의 connection 폭증은 다른 모든 서비스의 신규 접속을 막는다. `max_connections`를 높이면 PostgreSQL이 예약하는 일부 자원도 증가하므로 숫자만 늘리는 것은 비용 없는 해결책이 아니다.
 
-시간이 없으면 **1번과 2번만이라도** 먼저 본다. 다른 서비스를 망가뜨릴 수 있는 항목은 그 둘뿐이다.
+**확인 방법.** 배포 전 manifest의 합계를 검사하고, 운영 중 role·서비스별 사용량과 대기 시간을 관찰한다.
+
+```sql
+SELECT name, setting
+FROM pg_settings
+WHERE name IN (
+  'max_connections',
+  'superuser_reserved_connections',
+  'reserved_connections'
+)
+ORDER BY name;
+
+SELECT usename, application_name, state, count(*) AS connections
+FROM pg_stat_activity
+GROUP BY usename, application_name, state
+ORDER BY connections DESC;
+```
+
+최대 autoscaling과 rolling deployment를 재현한 부하 테스트에서도 운영 안전 여유가 남아야 한다.
+
+---
+
+## 5. statement, lock, transaction의 수명 상한을 역할별로 둔다
+
+**규칙.** runtime role에는 최소한 `statement_timeout`, `lock_timeout`, `idle_in_transaction_session_timeout`을 설정한다. PostgreSQL 버전이 지원하면 `transaction_timeout`도 설정하고, 지원하지 않거나 prepared transaction 등 적용 제외가 있으면 애플리케이션 deadline으로 전체 transaction 수명을 제한한다. migrator와 장시간 batch는 runtime 기본값을 무력화하지 말고 별도 role 또는 승인된 세션 설정을 사용한다.
+
+```sql
+ALTER ROLE orders_runtime IN DATABASE app
+  SET statement_timeout = '30s';
+ALTER ROLE orders_runtime IN DATABASE app
+  SET lock_timeout = '5s';
+ALTER ROLE orders_runtime IN DATABASE app
+  SET idle_in_transaction_session_timeout = '15s';
+-- 지원 버전에서 서비스 SLO에 맞게 설정
+ALTER ROLE orders_runtime IN DATABASE app
+  SET transaction_timeout = '60s';
+```
+
+예시 값은 정책이 아니다. 실제 값은 endpoint와 workload의 SLO에 따라 정한다. 일반적으로 `lock_timeout`은 `statement_timeout`보다 짧게 둔다. 외부 API 호출, object upload, 사용자 입력 대기는 DB transaction 밖에서 수행한다.
+
+**이유.** 열린 transaction은 lock을 오래 보유할 수 있고, idle transaction도 dead tuple 정리를 지연시켜 table bloat에 기여할 수 있다. 이는 같은 database의 다른 서비스에도 지연과 저장 공간 증가로 나타난다. `statement_timeout`만으로는 statement 사이에서 idle인 transaction의 수명을 제한하지 못한다.
+
+**확인 방법.** 설정값과 오래된 transaction을 점검한다.
+
+```sql
+SELECT rolname, rolconfig
+FROM pg_roles
+WHERE rolname LIKE '%\_runtime' ESCAPE '\';
+
+SELECT pid, usename, application_name, state,
+       now() - xact_start AS transaction_age,
+       now() - state_change AS state_age,
+       wait_event_type, wait_event
+FROM pg_stat_activity
+WHERE xact_start IS NOT NULL
+ORDER BY xact_start;
+```
+
+CI 또는 staging에서 lock 대기, 장기 statement, idle-in-transaction을 각각 유도하고 의도한 timeout과 오류 처리가 작동하는지 확인한다.
+
+---
+
+## 6. 애플리케이션 startup에서 DDL을 실행하지 않는다
+
+**규칙.** 애플리케이션 부팅 경로에서 `create_all()`, `CREATE TABLE`, `ALTER TABLE`, `DROP`, extension 설치나 자동 schema 수정 기능을 실행하지 않는다. schema 변경 경로는 검토된 migration 하나로 제한한다. migration 실패 시 애플리케이션이 임의로 schema를 보정하거나 `alembic stamp`하지 않는다.
+
+`stamp`는 실제 schema가 그 revision과 동일하다는 별도 검증을 통과했을 때만 운영 절차로 실행한다.
+
+**이유.** DDL은 명령에 따라 강한 lock을 요구할 수 있고 일부 `ALTER TABLE` 작업은 `ACCESS EXCLUSIVE` lock을 획득한다. 재시작되는 runtime이 DDL을 반복하면 다른 서비스까지 지연시킬 수 있다. startup DDL과 migration을 함께 사용하면 실제 schema와 version state가 갈라진다.
+
+**확인 방법.** 다음 세 검사를 모두 수행한다.
+
+- migration 디렉터리 밖에서 DDL 문자열과 ORM schema 생성 API를 정적 검색한다.
+- DDL 권한이 없는 runtime role로 빈 schema에서 애플리케이션을 시작해, schema를 만들지 않고 명확히 실패하는지 확인한다.
+- 정상 schema에서는 runtime 시작 전후 DDL fingerprint가 같음을 확인한다.
+
+---
+
+## 7. DB 밖의 object와 DB metadata 사이의 일관성을 명시한다
+
+**규칙.** object storage나 파일시스템의 byte를 DB row가 참조하면 다음 write protocol을 사용한다.
+
+```text
+생성: immutable key로 upload
+   → durability·크기·checksum 확인
+   → DB metadata commit
+
+삭제: DB reference 제거 또는 삭제 예정 표시
+   → 복구 가능한 grace period
+   → 재시도 가능한 garbage collection
+```
+
+DB transaction 안에서 upload나 외부 network 호출을 기다리지 않는다. 동일 key를 다른 내용으로 덮어쓰지 않고, 재시도에는 idempotency key를 사용한다. 실패한 upload, metadata commit 실패, GC 실패를 각각 안전하게 재시도할 수 있어야 한다.
+
+백업은 "DB dump 파일 하나"가 아니라 DB snapshot과 object version/manifest가 결합된 **복구 세트**로 정의한다. 두 저장소가 원자적 snapshot을 제공하지 않으면 허용 가능한 시점 차이와 reconciliation 절차를 문서화한다.
+
+**이유.** PostgreSQL transaction은 외부 object store와 원자적으로 commit되지 않는다. DB만 복구하면 missing object reference가, object만 복구하면 orphan object가 남을 수 있다. 단순한 복구 순서만으로 이 문제를 일반적으로 해결할 수 없으므로 write protocol, versioning, GC와 reconciliation이 함께 필요하다.
+
+**확인 방법.** 다음 failure injection과 복구 리허설을 수행한다.
+
+- upload 성공 후 DB commit 실패: orphan이 grace period 뒤 수거된다.
+- upload 실패: DB reference가 생성되지 않는다.
+- DB reference 제거 후 GC 실패: object가 다시 수거되며 사용자 경로에는 노출되지 않는다.
+- 복구 세트로 새 환경을 만든 뒤 sample 또는 전수 checksum 검증에서 missing·mismatch가 없다.
+- missing object와 orphan object 수를 측정하는 정기 reconciliation job이 있다.
+
+---
+
+## 8. extension과 database·cluster 수준 설정은 중앙에서 관리한다
+
+**규칙.** 서비스 migration은 `CREATE EXTENSION`, `ALTER EXTENSION`, `DROP EXTENSION`, `ALTER DATABASE`, `ALTER SYSTEM`을 실행하지 않는다. extension과 공유 설정은 database provisioning 또는 플랫폼 변경 절차에서 승인·적용한다.
+
+각 서비스는 필요한 extension, 최소·최대 호환 version, 필요한 schema, 사용 기능을 manifest에 선언한다. 서비스별 timeout이나 `search_path`처럼 role 범위가 적절한 설정은 중앙 정책 안에서 `ALTER ROLE ... IN DATABASE`로 내린다.
+
+**이유.** extension은 현재 database에 등록되고 object는 특정 schema에 놓일 수 있지만, 설치 상태와 version은 같은 database의 서비스들이 공유한다. database·cluster 수준 설정 변경도 다른 서비스의 동작과 자원 사용을 바꿀 수 있다. 따라서 개별 서비스 배포가 공유 환경을 임의로 변경해서는 안 된다.
+
+**확인 방법.** migration에서 금지 구문을 정적 검사하고 실제 상태를 manifest와 비교한다.
+
+```sql
+SELECT e.extname, e.extversion, n.nspname AS object_schema
+FROM pg_extension e
+JOIN pg_namespace n ON n.oid = e.extnamespace
+ORDER BY e.extname;
+
+SELECT name, setting, source, sourcefile
+FROM pg_settings
+WHERE source NOT IN ('default', 'override')
+ORDER BY name;
+```
+
+extension upgrade는 공유 staging database에서 모든 소비 서비스의 회귀 테스트를 통과한 뒤 수행한다.
+
+---
+
+## 9. timestamp는 의미에 따라 type을 선택한다
+
+**규칙.** 실제 세계의 발생 시점, 생성·수정 시각, 만료 시각처럼 하나의 instant를 나타내는 값은 `timestamptz`를 사용한다. 애플리케이션은 timezone-aware 값만 전달하고, 세션 `TimeZone`은 출력과 암묵 변환의 예측 가능성을 위해 기본적으로 `UTC`로 통일한다.
+
+다음 값은 의미에 맞는 다른 type을 사용할 수 있다.
+
+```text
+달력 날짜                  → date
+매일 09:00 같은 지역 시각  → time 또는 timestamp without time zone
+지역 규칙이 필요한 일정     → local date/time + IANA timezone name
+기간                        → interval 또는 명시한 단위의 수치
+```
+
+`timestamptz`는 instant를 내부적으로 UTC 기준으로 저장하지만 원래 입력한 timezone 이름을 보존하지 않는다. 원래 지역 규칙이 업무 의미라면 `Asia/Seoul` 같은 IANA timezone name을 별도 column에 저장한다. `timestamp without time zone`은 금지 type이 아니라 **instant를 표현하는 데 사용하면 안 되는 type**이다.
+
+**이유.** 모든 시간 값을 무조건 `timestamptz`로 바꾸면 달력상의 지역 시각 의미를 훼손할 수 있고, 반대로 instant를 timezone 없는 값으로 저장하면 해석이 session 설정과 코드 관례에 의존한다. 두 의미를 구분해야 DST와 서비스 간 직렬화에서 일관성을 유지할 수 있다.
+
+**확인 방법.** timestamp column을 열거하고 각 column의 의미와 type이 schema 문서에 대응하는지 검사한다.
+
+```sql
+SELECT table_schema, table_name, column_name, data_type
+FROM information_schema.columns
+WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+  AND data_type LIKE 'timestamp%'
+ORDER BY table_schema, table_name, ordinal_position;
+```
+
+instant column에 naive datetime을 넣으면 애플리케이션이 거부하는지, DST 전환 구간의 round trip과 API 직렬화가 동일 instant를 유지하는지 테스트한다.
+
+---
+
+## 10. cross-service foreign key와 DB-level 참조 무결성 결합을 금지한다
+
+**규칙.** 한 서비스 schema의 table이 다른 서비스 schema의 table을 참조하는 foreign key를 만들지 않는다. 동일한 결합을 trigger, function, generated expression 등으로 우회 구현하지 않는다. 다른 서비스의 identifier는 일반 값으로 저장하고, 유효성은 API, event, local projection과 보상 절차로 관리한다.
+
+**이유.** cross-service FK는 migration 순서, 삭제 정책, restore, 장애, 배포와 schema extraction을 하나의 database 수명 주기에 묶는다. 같은 database에서 기술적으로 가능하다는 사실은 서비스 경계에 적합하다는 뜻이 아니다.
+
+**확인 방법.** 다음 query 결과가 비어 있어야 한다.
+
+```sql
+SELECT c.conname,
+       src_ns.nspname AS source_schema,
+       src.relname AS source_table,
+       dst_ns.nspname AS target_schema,
+       dst.relname AS target_table
+FROM pg_constraint c
+JOIN pg_class src ON src.oid = c.conrelid
+JOIN pg_namespace src_ns ON src_ns.oid = src.relnamespace
+JOIN pg_class dst ON dst.oid = c.confrelid
+JOIN pg_namespace dst_ns ON dst_ns.oid = dst.relnamespace
+WHERE c.contype = 'f'
+  AND src_ns.nspname <> dst_ns.nspname
+  AND src_ns.nspname NOT IN ('pg_catalog', 'information_schema')
+  AND dst_ns.nspname NOT IN ('pg_catalog', 'information_schema');
+```
+
+또한 trigger와 function 정의에서 타 서비스 schema를 참조하는지 정적·catalog 검사를 수행하고, extraction test에서 원래 database에 대한 연결을 차단한다.
+
+---
+
+## 11. shared table을 만들지 않는다
+
+**규칙.** 둘 이상의 서비스가 공동 소유하는 table을 만들지 않는다. `public.common_*`, `shared_lookup`, `global_status` 같은 무소유 또는 공동소유 table도 금지한다. 공유 개념에는 반드시 한 서비스 owner를 정하고, 다른 서비스는 API·event·local projection을 기본 경로로 사용한다.
+
+reference data가 작고 안정적이어도 각 소비 서비스가 자기 schema에 versioned copy를 가질 수 있다. 이때 원본 owner, 배포 방식, version 호환 규칙을 기록한다.
+
+**이유.** 공동소유 table은 schema migration과 데이터 의미 변경의 단일 책임자를 없애고, 서비스별 schema를 이름뿐인 경계로 만든다. 특히 `public`의 공유 table은 시간이 지나면서 사실상의 중앙 도메인 모델이 되기 쉽다.
+
+**확인 방법.** 다음을 운영 gate로 둔다.
+
+- `public`에 사용자 table이 없다.
+- 모든 사용자 table이 정확히 한 서비스 manifest의 schema와 owner에 매핑된다.
+- 두 서비스 migration 저장소가 같은 객체를 생성·변경하지 않는다.
+- local projection은 원본이 아니라 파생본으로 표시되고 재구축할 수 있다.
+
+---
+
+## 12. cross-service SQL 접근은 명시적 GRANT와 의존성 기록을 요구한다
+
+**규칙.** 기본 통신 경로는 API 또는 event다. 같은 database의 직접 `SELECT`나 JOIN이 꼭 필요하면 예외로 취급하여 다음 조건을 모두 만족해야 한다.
+
+- provider가 소유한 안정된 view 또는 승인된 최소 column에만 권한을 준다.
+- consumer에는 provider schema의 `USAGE`와 필요한 객체의 `SELECT`만 부여한다.
+- provider schema를 consumer의 `search_path`에 추가하지 않고 항상 schema-qualified name을 쓴다.
+- `INSERT`, `UPDATE`, `DELETE`, `TRUNCATE`, `REFERENCES`, `TRIGGER`, sequence 권한은 부여하지 않는다.
+- 의존성 registry에 provider, consumer, object·column, 목적, 데이터 의미, freshness, 변경 통지, 승인자, 만료일, 제거·extraction 계획을 기록한다.
+
+```sql
+GRANT USAGE ON SCHEMA catalog TO orders_runtime;
+GRANT SELECT (product_id, sellable)
+  ON catalog.orders_product_contract_v1 TO orders_runtime;
+```
+
+명시적 `GRANT`는 접근을 정당화하거나 extraction-safe하게 만들지 않는다. 단지 권한과 의존성을 보이게 만드는 최소 조건이다.
+
+**이유.** 직접 SQL 의존은 provider의 물리 schema와 동시 가용성에 consumer를 결합한다. 암묵 접근보다 명시적 grant가 낫지만, 별도 database로 옮기면 같은 query가 더 이상 작동하지 않으므로 제거 또는 대체 경로가 필요하다.
+
+**확인 방법.** ACL을 dependency registry와 대조하여 등록되지 않은 grant를 실패 처리한다.
+
+```sql
+SELECT table_schema, table_name, grantee, privilege_type
+FROM information_schema.role_table_grants
+WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+ORDER BY table_schema, table_name, grantee, privilege_type;
+
+SELECT table_schema, table_name, column_name, grantee, privilege_type
+FROM information_schema.role_column_grants
+WHERE table_schema NOT IN ('pg_catalog', 'information_schema')
+ORDER BY table_schema, table_name, column_name, grantee, privilege_type;
+```
+
+provider contract 변경 테스트와 extraction test에서 consumer가 API·event·local projection 대체 경로로 계속 동작하는지 확인한다. 대체 경로가 없으면 그 서비스는 extraction gate를 통과하지 못한다.
+
+---
+
+## 13. 서비스 transaction은 자기 소유 schema 안에서 끝낸다
+
+**규칙.** 하나의 application transaction에서 여러 서비스 schema를 함께 쓰지 않는다. 다른 서비스의 상태 변경은 API 또는 event로 요청하고, 원자성이 필요하면 outbox/inbox, idempotency key와 보상 절차를 사용한다. 직접 읽기 예외가 있더라도 consumer transaction에서 provider data를 잠그거나 변경하지 않는다.
+
+**이유.** 같은 database이므로 cross-schema transaction은 쉽게 작성할 수 있지만, 이는 transaction boundary를 물리 배치에 결합한다. schema를 별도 database로 옮기는 순간 같은 ACID transaction을 유지할 수 없으며 서비스 장애와 배포도 결합된다.
+
+**확인 방법.** SQL tracing 또는 query log에서 하나의 transaction ID가 둘 이상의 서비스 schema에 DML을 수행하는지 검사한다. extraction test에서는 service database 외의 DB 권한과 network 경로를 차단한 상태로 쓰기 흐름, 중복 event, consumer 지연, 부분 실패를 검증한다.
+
+---
+
+## 14. schema extraction test를 실제 release gate로 운영한다
+
+**규칙.** 신규 서비스의 운영 투입 전, 그리고 cross-service grant·extension·external object 계약이 바뀔 때마다 해당 schema를 깨끗한 별도 database로 옮기는 extraction test를 실행한다. 정기적으로도 반복한다. `pg_dump -n` 파일 생성 성공만으로 통과로 간주하지 않는다.
+
+최소 절차는 다음과 같다.
+
+1. 원본 database의 schema, ACL, extension, cross-schema dependency, large object 사용을 inventory한다.
+2. `pg_dump --format=custom --schema=orders`로 대상 schema를 dump한다.
+3. 깨끗한 target database를 만들고, 중앙 승인된 extension과 필수 설정만 provisioning한다.
+4. `pg_restore --no-owner --no-privileges`로 복원하고 서비스 role·grant를 target에 다시 적용한다.
+5. Alembic version state가 보존되고 `upgrade head` 및 무차이 autogenerate 검사가 성공하는지 확인한다.
+6. 대상 서비스의 DB 연결만 target으로 바꾸고 원본 database에 대한 DB 권한과 우회 network 경로를 차단한다.
+7. read/write, migration, outbox/inbox, API/event contract, timeout, backup·external object 복구 smoke test를 수행한다.
+8. 기존 cross-service SQL consumer는 등록된 대체 경로로 전환하여 계속 동작하는지 확인한다.
+
+통과 기준은 다음과 같다.
+
+- clean target에 unresolved cross-schema dependency 없이 복원된다.
+- 서비스 runtime과 migration이 target database만으로 성공한다.
+- 다른 서비스의 정상 흐름이 유지된다.
+- cross-service FK, shared table, 타 서비스 schema write가 없다.
+- 승인된 extension·설정·external object 의존성이 manifest와 일치한다.
+- 모든 직접 SQL grant에 동작하는 extraction 대체 경로가 있다.
+
+**이유.** PostgreSQL은 `pg_dump -n`이 선택한 schema가 의존하는 외부 객체를 자동으로 포함하지 않으며, 그 dump가 깨끗한 database에 독립 복원된다고 보장하지 않는다. "나중에 분리할 수 있다"는 설계 설명은 실제 복원과 전환 테스트를 통과해야만 검증된 사실이 된다.
+
+**확인 방법.** CI 또는 staging 결과물로 다음 증거를 보존한다.
+
+- dump와 restore log
+- cross-schema dependency scan 결과
+- target의 schema·owner·ACL inventory
+- Alembic current/head와 no-diff 결과
+- 서비스 smoke·failure test 결과
+- 원본 DB 차단 증거
+- cross-service consumer 대체 경로 테스트 결과
+- external object checksum/reconciliation 결과
+
+어느 하나라도 해결되지 않으면 `PASS WITH EXCEPTION`으로 완화하지 않는다. extraction 가능성은 통과하거나 실패한다. 실패 항목은 owner, 수정 계획과 재시험 날짜를 가진 명시적 부채로 기록한다.
+
+---
+
+## 신규 서비스 도입 체크리스트
+
+- [ ] 서비스 schema와 `NOLOGIN` owner를 만들었다.
+- [ ] migrator와 runtime credential·권한·배포 위치를 분리했다.
+- [ ] `PUBLIC`과 runtime에서 DDL 권한을 제거했다.
+- [ ] 기존 객체와 미래 객체의 runtime 권한을 각각 설정했다.
+- [ ] 모든 서비스 객체가 자기 schema와 owner에 속한다.
+- [ ] Alembic metadata와 operation이 schema-qualified다.
+- [ ] autogenerate reflection에 schema allowlist와 foreign-schema sentinel test가 있다.
+- [ ] 서비스별 `alembic_version`과 migration 직렬화가 있다.
+- [ ] 최대 scale·rolling deploy를 포함한 connection budget이 승인됐다.
+- [ ] statement, lock, idle transaction, 전체 transaction 수명 제한이 검증됐다.
+- [ ] startup 경로에 DDL이 없고 runtime DDL 부정 테스트가 통과했다.
+- [ ] external object의 write·delete·backup·reconciliation 절차가 있다.
+- [ ] extension과 공유 설정이 중앙 manifest 및 provisioning으로 관리된다.
+- [ ] timestamp column마다 instant와 calendar-local 의미가 구분돼 있다.
+- [ ] cross-service FK와 우회 참조 무결성 결합이 없다.
+- [ ] shared table이 없고 모든 table owner가 하나다.
+- [ ] cross-service SQL grant가 registry, 만료일, 대체 경로와 일치한다.
+- [ ] cross-schema write transaction이 없다.
+- [ ] clean target database extraction test가 통과했다.
+
+---
+
+## 운영 중 정기 감사
+
+| 주기 | 확인 대상 |
+|---|---|
+| 배포마다 | migration review, schema allowlist, version head, startup DDL, connection budget |
+| 매일 | connection 사용량, 오래된 transaction, timeout, missing/orphan object 지표 |
+| 권한 변경마다 | role membership, schema/table/function ACL, dependency registry |
+| extension·공유 설정 변경마다 | 전체 소비 서비스 회귀 테스트와 extraction test |
+| 정기 리허설 | backup 복구와 서비스별 clean-database extraction |
+
+감사에서 발견한 미등록 cross-service dependency, runtime DDL 권한, cross-service FK, shared table은 단순 경고가 아니라 release blocker로 처리한다.
+
+---
+
+## 공식 문서 근거
+
+- [PostgreSQL: Schemas and secure `search_path` usage](https://www.postgresql.org/docs/current/ddl-schemas.html)
+- [PostgreSQL: Privileges](https://www.postgresql.org/docs/current/ddl-priv.html)
+- [Alembic: Autogenerate and schema filtering](https://alembic.sqlalchemy.org/en/latest/autogenerate.html)
+- [PostgreSQL: Client connection defaults and timeouts](https://www.postgresql.org/docs/current/runtime-config-client.html)
+- [PostgreSQL: Connection settings and reserved slots](https://www.postgresql.org/docs/current/runtime-config-connection.html)
+- [PostgreSQL: Date/time types](https://www.postgresql.org/docs/current/datatype-datetime.html)
+- [PostgreSQL: `CREATE EXTENSION`](https://www.postgresql.org/docs/current/sql-createextension.html)
