@@ -101,6 +101,17 @@ ALTER ROLE tubedepth_runtime IN DATABASE :database SET idle_in_transaction_sessi
 -- loudly rather than silently skip a required setting.
 ALTER ROLE tubedepth_runtime IN DATABASE :database SET transaction_timeout = '60s';
 
+-- Rule 9: pin the session TimeZone to UTC on both roles that connect. The
+-- regulation asks for this as a predictability property in its own right —
+-- implicit conversions (a bare `timestamp` cast, `now()`, display) all read
+-- through the session zone — and Task 4 measured what happens without it: a
+-- `timestamptz -> timestamp` downgrade with no explicit `AT TIME ZONE` ran
+-- under a non-UTC session zone and shifted every stored instant by the
+-- session's offset. Migrator gets it too — it is the role that runs
+-- migrations, including ones with exactly that kind of implicit cast.
+ALTER ROLE tubedepth_runtime  IN DATABASE :database SET TimeZone = 'UTC';
+ALTER ROLE tubedepth_migrator IN DATABASE :database SET TimeZone = 'UTC';
+
 -- Rule 4: connection budget. deploy/service-manifest.yaml declares 20 for
 -- this service; CONNECTION LIMIT makes the database enforce it rather than
 -- trust every pool configuration to add up correctly.

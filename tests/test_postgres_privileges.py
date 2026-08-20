@@ -197,6 +197,37 @@ def test_the_runtime_role_carries_the_timeouts_the_regulation_requires(
 
 
 @needs_postgres
+def test_the_runtime_and_migrator_roles_pin_their_session_timezone_to_utc(
+    migrated_database: None,
+) -> None:
+    """Rule 9's other half, the one Task 4 found while proving `AT TIME ZONE
+    'UTC'` in the timestamptz migration: a downgrade with no explicit `AT TIME
+    ZONE` clause converts through the *session's* TimeZone, and nothing before
+    this pinned that session setting to UTC. Same pg_db_role_setting trap as
+    the timeout test above — pg_roles.rolconfig is empty for a per-database
+    `ALTER ROLE ... IN DATABASE ... SET ...` even though it is in effect.
+    """
+    engine = create_engine(MIGRATOR_URL or "")
+    with engine.connect() as connection:
+        for role in ("tubedepth_runtime", "tubedepth_migrator"):
+            settings = dict(
+                item.split("=", 1)
+                for item in connection.execute(
+                    text("""
+                    SELECT unnest(drs.setconfig)
+                    FROM pg_db_role_setting drs
+                    JOIN pg_roles r ON r.oid = drs.setrole
+                    JOIN pg_database d ON d.oid = drs.setdatabase
+                    WHERE r.rolname = :role AND d.datname = current_database()
+                    """),
+                    {"role": role},
+                ).scalars()
+            )
+            assert settings.get("TimeZone") == "UTC", f"{role} does not pin TimeZone to UTC"
+    engine.dispose()
+
+
+@needs_postgres
 def test_the_runtime_role_can_do_the_dml_it_is_granted(migrated_database: None) -> None:
     """The positive control the four negative tests above need.
 

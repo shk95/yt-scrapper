@@ -64,4 +64,14 @@ def downgrade() -> None:
     if op.get_bind().dialect.name != "postgresql":
         return
     for table, column in COLUMNS:
-        op.execute(f"ALTER TABLE {table} ALTER COLUMN {column} TYPE timestamp")
+        # The same argument as upgrade(), read backwards: the column is
+        # timestamptz, an aware instant, and PostgreSQL's default cast to
+        # `timestamp` without a USING clause converts through the *session's*
+        # TimeZone rather than UTC. Measured: under a non-UTC session zone this
+        # shifted every stored instant by the session's offset. `AT TIME ZONE
+        # 'UTC'` reads the instant back out as its UTC wall-clock value, which
+        # is the exact inverse of what upgrade() did.
+        op.execute(
+            f"ALTER TABLE {table} ALTER COLUMN {column} "
+            f"TYPE timestamp USING {column} AT TIME ZONE 'UTC'"
+        )
