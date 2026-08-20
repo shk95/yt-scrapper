@@ -27,7 +27,7 @@
 
 set -e
 . tool/checks/prerequisite
-require_command uv docker
+require_command uv docker pg_isready
 
 uv sync --extra dev --frozen
 
@@ -37,8 +37,22 @@ if [ -z "$TUBEDEPTH_TEST_POSTGRES_URL" ]; then
     docker rm -f "$name" >/dev/null 2>&1 || true
     docker run -d --name "$name" -e POSTGRES_PASSWORD=fleet -e POSTGRES_USER=fleet \
         -e POSTGRES_DB=fleet -p 55432:5432 postgres:18-alpine >/dev/null
+    # A host-side check, not `docker exec ... pg_isready`: the entrypoint runs
+    # a temporary, local-only server during initdb before the real one starts,
+    # and that temporary server also answers `pg_isready` ready — but only on
+    # its Unix socket inside the container, which is exactly what a plain
+    # `docker exec` reaches by default. Polling from the host instead asks the
+    # same question the tests themselves ask: is the mapped TCP port, the one
+    # `TUBEDEPTH_TEST_POSTGRES_URL` below actually points at, accepting
+    # connections. The temporary server never binds a TCP interface at all
+    # (confirmed against the container's own log — no "listening on IPv4/IPv6
+    # address" line until the real server's second startup), so this cannot
+    # see it and cannot pass early. Getting this wrong meant a check that
+    # occasionally raced the container's restart and died mid-test with
+    # `server closed the connection unexpectedly` — a failure indistinguishable
+    # from a flake, gating every commit on this branch.
     for _ in $(seq 1 60); do
-        docker exec "$name" pg_isready -U fleet -q 2>/dev/null && break
+        pg_isready -h localhost -p 55432 -U fleet -q 2>/dev/null && break
         sleep 1
     done
     docker exec -i "$name" psql -U fleet -d fleet -v ON_ERROR_STOP=1 \
