@@ -59,7 +59,7 @@ def test_upgrading_an_empty_database_produces_the_schema_the_models_describe(
     result = alembic("upgrade", "head", database=migrated)
     assert result.returncode == 0, result.stderr
 
-    Database(tmp_path / "created.db").create_schema()
+    Database(f"sqlite+pysqlite:///{tmp_path / 'created.db'}").create_schema()
 
     def schema(path: Path) -> dict[str, set[str]]:
         inspector = inspect(create_engine(f"sqlite+pysqlite:///{path}"))
@@ -110,7 +110,9 @@ def test_the_models_and_the_migrations_have_not_drifted(tmp_path: Path) -> None:
     assert difference == [], f"models and migrations disagree: {difference}"
 
 
-def test_the_cli_can_stamp_a_database_that_predates_migrations(tmp_path: Path) -> None:
+def test_the_cli_can_stamp_a_database_that_predates_migrations(
+    tmp_path: Path, database_url_for_tests: str
+) -> None:
     """The one-time problem every project gets exactly once.
 
     This database existed for a day before migrations did. Upgrading it would
@@ -122,7 +124,7 @@ def test_the_cli_can_stamp_a_database_that_predates_migrations(tmp_path: Path) -
     from tubedepth.cli import application
     from tubedepth.database import Database
 
-    Database(tmp_path / "tubedepth.db").create_schema()
+    Database(database_url_for_tests).create_schema()
 
     result = CliRunner().invoke(application, ["migrate", "--stamp", "--data-dir", str(tmp_path)])
 

@@ -156,9 +156,9 @@ class CountingSource:
         return FakeListing(target=target)
 
 
-def cached_service(tmp_path: Path, source: object) -> tuple[CollectionService, Database]:
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
+def cached_service(
+    tmp_path: Path, database: Database, source: object
+) -> tuple[CollectionService, Database]:
     registry = SourceRegistry()
     registry.register(source)  # type: ignore[arg-type]
     service = CollectionService(
@@ -170,11 +170,13 @@ def cached_service(tmp_path: Path, source: object) -> tuple[CollectionService, D
     return service, database
 
 
-def test_collecting_the_same_thing_twice_only_fetches_once(tmp_path: Path) -> None:
+def test_collecting_the_same_thing_twice_only_fetches_once(
+    tmp_path: Path, database: Database
+) -> None:
     # The whole point. Throughput against YouTube is capped by YouTube, so not
     # asking twice is the only large multiplier left.
     source = CountingSource()
-    service, _ = cached_service(tmp_path, source)
+    service, _ = cached_service(tmp_path, database, source)
 
     first = service.collect("video.counted", "dQw4w9WgXcQ")
     second = service.collect("video.counted", "dQw4w9WgXcQ")
@@ -185,11 +187,13 @@ def test_collecting_the_same_thing_twice_only_fetches_once(tmp_path: Path) -> No
     assert first.from_cache is False
 
 
-def test_a_forced_refresh_fetches_even_when_the_cache_is_fresh(tmp_path: Path) -> None:
+def test_a_forced_refresh_fetches_even_when_the_cache_is_fresh(
+    tmp_path: Path, database: Database
+) -> None:
     # Counts move, and sometimes the current number is the point. Without this
     # the cache is a ceiling on freshness rather than a saving.
     source = CountingSource()
-    service, _ = cached_service(tmp_path, source)
+    service, _ = cached_service(tmp_path, database, source)
     service.collect("video.counted", "dQw4w9WgXcQ")
 
     service.collect("video.counted", "dQw4w9WgXcQ", refresh=True)
@@ -197,9 +201,11 @@ def test_a_forced_refresh_fetches_even_when_the_cache_is_fresh(tmp_path: Path) -
     assert source.calls == 2
 
 
-def test_two_different_videos_do_not_share_a_cache_entry(tmp_path: Path) -> None:
+def test_two_different_videos_do_not_share_a_cache_entry(
+    tmp_path: Path, database: Database
+) -> None:
     source = CountingSource()
-    service, _ = cached_service(tmp_path, source)
+    service, _ = cached_service(tmp_path, database, source)
 
     service.collect("video.counted", "dQw4w9WgXcQ")
     service.collect("video.counted", "kJQP7kiw5Fk")
@@ -207,7 +213,9 @@ def test_two_different_videos_do_not_share_a_cache_entry(tmp_path: Path) -> None
     assert source.calls == 2
 
 
-def test_a_recorded_artifact_names_the_schema_version_that_wrote_it(tmp_path: Path) -> None:
+def test_a_recorded_artifact_names_the_schema_version_that_wrote_it(
+    tmp_path: Path, database: Database
+) -> None:
     """The fingerprint contains the version and is a SHA-256, so it cannot be read back.
 
     Hold an old payload and there is no way to tell which shape it is in, which
@@ -217,7 +225,7 @@ def test_a_recorded_artifact_names_the_schema_version_that_wrote_it(tmp_path: Pa
     has ever had is trivial today and archaeology after a few more bumps.
     """
     source = CountingSource()
-    service, database = cached_service(tmp_path, source)
+    service, database = cached_service(tmp_path, database, source)
 
     service.collect("video.counted", "dQw4w9WgXcQ")
 
@@ -246,7 +254,9 @@ class ParameterisedSource:
         return FakeListing(target=target)
 
 
-def test_the_cache_check_answers_for_the_question_the_collection_recorded(tmp_path: Path) -> None:
+def test_the_cache_check_answers_for_the_question_the_collection_recorded(
+    tmp_path: Path, database: Database
+) -> None:
     """`collect` and `cached` built the same key in two places.
 
     They are the same lookup asked from two processes — the worker and the API
@@ -256,7 +266,7 @@ def test_the_cache_check_answers_for_the_question_the_collection_recorded(tmp_pa
     docstring at once.
     """
     source = ParameterisedSource(limit=10)
-    service, _ = cached_service(tmp_path, source)
+    service, _ = cached_service(tmp_path, database, source)
     service.collect("video.parameterised", "dQw4w9WgXcQ")
 
     held = service.cached("video.parameterised", "dQw4w9WgXcQ")
@@ -265,11 +275,11 @@ def test_the_cache_check_answers_for_the_question_the_collection_recorded(tmp_pa
 
 
 def test_two_sources_differing_only_in_a_parameter_do_not_share_an_artifact(
-    tmp_path: Path,
+    tmp_path: Path, database: Database
 ) -> None:
     """A listing capped at 10 is not an answer to a request for 20."""
     narrow = ParameterisedSource(limit=10)
-    service, database = cached_service(tmp_path, narrow)
+    service, database = cached_service(tmp_path, database, narrow)
     service.collect("video.parameterised", "dQw4w9WgXcQ")
 
     wide = ParameterisedSource(limit=20)
@@ -285,7 +295,9 @@ def test_two_sources_differing_only_in_a_parameter_do_not_share_an_artifact(
     assert wide.calls == 1, "the wider request was served the narrower one's answer"
 
 
-def test_a_stored_payload_the_model_can_no_longer_parse_is_a_cache_miss(tmp_path: Path) -> None:
+def test_a_stored_payload_the_model_can_no_longer_parse_is_a_cache_miss(
+    tmp_path: Path, database: Database
+) -> None:
     """Forget the bump and the cache serves bytes the new model rejects.
 
     A pydantic `ValidationError` is not a `TubedepthError`, and the API
@@ -296,7 +308,7 @@ def test_a_stored_payload_the_model_can_no_longer_parse_is_a_cache_miss(tmp_path
     cost is requests until someone bumps, rather than an API that is down.
     """
     source = CountingSource()
-    service, database = cached_service(tmp_path, source)
+    service, database = cached_service(tmp_path, database, source)
     service.collect("video.counted", "dQw4w9WgXcQ")
     with database.session() as session:
         digest = session.query(Artifact).one().digest

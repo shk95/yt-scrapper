@@ -17,6 +17,8 @@ from pathlib import Path
 
 import pytest
 
+from tubedepth.database import Database
+
 FIXTURE_ROOT = Path(__file__).parent / "fixtures"
 
 
@@ -66,3 +68,21 @@ def refuse_outbound_network(
 @pytest.fixture
 def fixture_root() -> Path:
     return FIXTURE_ROOT
+
+
+@pytest.fixture
+def database_url_for_tests(tmp_path: Path) -> str:
+    """The one place the suite names a database.
+
+    Every test module used to write `Database(tmp_path / "tubedepth.db")`,
+    fifty-nine times across eighteen files, so "the tests move to PostgreSQL"
+    meant fifty-nine edits. It is one now.
+    """
+    return f"sqlite+pysqlite:///{tmp_path / 'tubedepth.db'}"
+
+
+@pytest.fixture
+def database(database_url_for_tests: str) -> Database:
+    database = Database(database_url_for_tests)
+    database.create_schema()
+    return database

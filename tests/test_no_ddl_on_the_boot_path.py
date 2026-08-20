@@ -94,11 +94,11 @@ def test_create_schema_does_not_alter_a_table_that_has_fallen_behind(tmp_path: P
     from sqlalchemy import create_engine, inspect, text
 
     url = f"sqlite+pysqlite:///{tmp_path / 'tubedepth.db'}"
-    Database(tmp_path / "tubedepth.db").create_schema()
+    Database(url).create_schema()
     with create_engine(url).begin() as connection:
         connection.execute(text("ALTER TABLE jobs DROP COLUMN api_key_id"))
 
-    Database(tmp_path / "tubedepth.db").create_schema()
+    Database(url).create_schema()
 
     columns = {c["name"] for c in inspect(create_engine(url)).get_columns("jobs")}
     assert "api_key_id" not in columns, "create_schema repaired a table instead of leaving it"

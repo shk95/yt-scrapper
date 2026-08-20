@@ -32,6 +32,7 @@ from .repositories import JobRepository
 from .retention import RetentionPolicy, RetentionService
 from .schema_versions import SchemaVersionBackfill
 from .services.keys import ApiKeyService
+from .settings import database_url
 from .sources import default_registry
 from .sources.innertube_sources import RECORDABLE_SURFACES, record_surface
 from .sources.registry import attempts_for
@@ -128,13 +129,17 @@ def _database(data_directory: Path) -> Database:
     `is_migrated()` only reflects, so checking it here does not reintroduce
     DDL on the boot path; it just turns the eventual failure into one that
     names the fix.
+
+    The URL comes from `settings.database_url`, the one resolver Alembic also
+    calls (`migrate` below) — so `tubedepth work` and `tubedepth migrate`
+    always agree on which database they mean.
     """
     data_directory.mkdir(parents=True, exist_ok=True)
-    database = Database(data_directory / "tubedepth.db")
+    url = database_url(data_directory)
+    database = Database(url)
     if not database.is_migrated():
         raise ConfigurationError(
-            f"no schema at {data_directory / 'tubedepth.db'} — run: "
-            f"tubedepth migrate --data-dir {data_directory}"
+            f"no schema at {url} — run: tubedepth migrate --data-dir {data_directory}"
         )
     return database
 
@@ -419,14 +424,32 @@ def migrate(
     root = Path(__file__).resolve().parent.parent.parent
     configuration = Config(str(root / "alembic.ini"))
     configuration.set_main_option("script_location", str(root / "migrations"))
-    os.environ["TUBEDEPTH_DATABASE_URL"] = f"sqlite+pysqlite:///{data_directory / 'tubedepth.db'}"
+    url = database_url(data_directory)
+    configuration.set_main_option("sqlalchemy.url", url)
 
-    if stamp:
-        command.stamp(configuration, "head")
-        typer.echo(f"✓ stamped {data_directory / 'tubedepth.db'} at the current revision")
-        return
-    command.upgrade(configuration, "head")
-    typer.echo(f"✓ {data_directory / 'tubedepth.db'} is at the current schema")
+    # `migrations/env.py` does not yet read the Config object above — it has
+    # its own copy of this resolver and calls it directly (Task 8 unifies the
+    # two). Until then, this environment variable is the only thing that
+    # actually reaches it: without it, env.py falls back to `TUBEDEPTH_DATA_DIR`
+    # (default `var`), silently ignoring whatever `--data-dir` named here.
+    # Restored afterwards rather than left set — this process now honours
+    # `TUBEDEPTH_DATABASE_URL` everywhere (that is the point of this change),
+    # so a value left behind here would silently redirect every later call in
+    # the same process, `tubedepth serve`/`work` included.
+    previous_url = os.environ.get("TUBEDEPTH_DATABASE_URL")
+    os.environ["TUBEDEPTH_DATABASE_URL"] = url
+    try:
+        if stamp:
+            command.stamp(configuration, "head")
+            typer.echo(f"✓ stamped {url} at the current revision")
+            return
+        command.upgrade(configuration, "head")
+        typer.echo(f"✓ {url} is at the current schema")
+    finally:
+        if previous_url is None:
+            os.environ.pop("TUBEDEPTH_DATABASE_URL", None)
+        else:
+            os.environ["TUBEDEPTH_DATABASE_URL"] = previous_url
 
     # A separate command is a command that gets skipped, and the window for
     # this one closes: attribution works by recomputing fingerprints against

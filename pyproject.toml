@@ -50,6 +50,13 @@ dev = [
   "respx>=0.21,<1",
   "ruff>=0.6,<1",
   "basedpyright>=1.18,<2",
+  # `Database` now accepts a PostgreSQL URL, and SQLAlchemy's create_engine
+  # imports the driver module at construction time even when nothing ever
+  # connects (tests/test_database_url.py). Those tests are offline and run in
+  # `just check`, not behind `@pytest.mark.postgres`, so the driver has to be
+  # importable there too — hence the duplication with the `postgres` extra
+  # above, which still exists for a real deployment.
+  "psycopg[binary]>=3.2,<4",
 ]
 
 [project.scripts]

@@ -11,19 +11,9 @@ measures the machine it runs on; `EXPLAIN QUERY PLAN` measures the decision.
 
 from __future__ import annotations
 
-from pathlib import Path
-
-import pytest
 from sqlalchemy import text
 
 from tubedepth.database import Database
-
-
-@pytest.fixture
-def database(tmp_path: Path) -> Database:
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
-    return database
 
 
 def plan(database: Database, sql: str) -> str:

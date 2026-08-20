@@ -16,6 +16,7 @@ from typer.testing import CliRunner
 from tubedepth.cli import application
 from tubedepth.database import Database
 from tubedepth.errors import ConfigurationError
+from tubedepth.settings import database_url
 
 runner = CliRunner()
 
@@ -41,7 +42,7 @@ def migrated(data_directory: Path) -> Path:
     needing tables to already exist has to bring them into being itself.
     """
     data_directory.mkdir(parents=True, exist_ok=True)
-    Database(data_directory / "tubedepth.db").create_schema()
+    Database(database_url(data_directory)).create_schema()
     return data_directory
 
 
@@ -315,15 +316,16 @@ def test_recording_an_innertube_surface_nobody_records_is_refused_before_the_net
     assert list(tmp_path.iterdir()) == []
 
 
-def test_the_backfill_command_reports_what_it_attributed(tmp_path: Path) -> None:
+def test_the_backfill_command_reports_what_it_attributed(
+    tmp_path: Path, database_url_for_tests: str
+) -> None:
     """A command nobody runs is the same as no command, so `migrate` points at
     this one — the window closes as retention ages out the rows it would
     attribute."""
-    from tubedepth.database import Database
     from tubedepth.fingerprints import fingerprint
     from tubedepth.models import Artifact, utcnow
 
-    database = Database(tmp_path / "tubedepth.db")
+    database = Database(database_url_for_tests)
     database.create_schema()
     with database.session() as session:
         session.add(
@@ -347,12 +349,13 @@ def test_the_backfill_command_reports_what_it_attributed(tmp_path: Path) -> None
         assert next(connection.execute("SELECT schema_version FROM artifacts"))[0] == "1"
 
 
-def test_the_key_list_says_when_each_key_was_last_used(tmp_path: Path) -> None:
+def test_the_key_list_says_when_each_key_was_last_used(
+    tmp_path: Path, database_url_for_tests: str
+) -> None:
     """The one question asked before revoking, which had no answer."""
-    from tubedepth.database import Database
     from tubedepth.services.keys import ApiKeyService
 
-    database = Database(tmp_path / "tubedepth.db")
+    database = Database(database_url_for_tests)
     database.create_schema()
     ApiKeyService(database).mint(label="ingest")
 
@@ -394,7 +397,7 @@ def test_resuming_from_the_command_line_says_what_changed(tmp_path: Path) -> Non
 
 
 def test_the_key_list_shows_the_allowance_it_is_about_to_be_asked_for(
-    tmp_path: Path,
+    tmp_path: Path, database_url_for_tests: str
 ) -> None:
     """`key create --rpm N` set an allowance the listing never showed back.
 
@@ -403,10 +406,9 @@ def test_the_key_list_shows_the_allowance_it_is_about_to_be_asked_for(
     this command's own docstring makes about `last_used_at`, reintroduced in
     the command written to answer it.
     """
-    from tubedepth.database import Database
     from tubedepth.services.keys import ApiKeyService
 
-    database = Database(tmp_path / "tubedepth.db")
+    database = Database(database_url_for_tests)
     database.create_schema()
     ApiKeyService(database).mint(label="ingest", requests_per_minute=240)
 

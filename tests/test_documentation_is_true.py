@@ -71,14 +71,14 @@ KINDS_REGION = re.compile(r"<!-- kinds:start -->(.*?)<!-- kinds:end -->", re.DOT
 CHANGELOG_RELEASE = re.compile(r"^## \[([^\]]+)\]", re.MULTILINE)
 
 
-def served_paths() -> set[str]:
+def served_paths(tmp_path: Path) -> set[str]:
     from tubedepth.api.application import create_application
     from tubedepth.database import Database
     from tubedepth.payload_store import PayloadStore
 
     application = create_application(
-        database=Database(Path("/tmp/tubedepth-doc-check.db")),
-        payloads=PayloadStore(Path("/tmp/tubedepth-doc-check")),
+        database=Database(f"sqlite+pysqlite:///{tmp_path / 'tubedepth.db'}"),
+        payloads=PayloadStore(tmp_path / "payloads"),
     )
     # From the OpenAPI document rather than `application.routes`: recent
     # FastAPI keeps an included router as one object instead of flattening its
@@ -121,7 +121,7 @@ def test_the_documents_this_project_promises_exist(document: Path) -> None:
 
 
 @pytest.mark.parametrize("document", DOCUMENTS, ids=lambda p: p.name)
-def test_every_v1_route_in_a_worked_example_is_served(document: Path) -> None:
+def test_every_v1_route_in_a_worked_example_is_served(document: Path, tmp_path: Path) -> None:
     """The README promised `/v1/videos/{id}/metadata` for a day.
 
     Only fenced examples, not prose. A document has to be able to say a route
@@ -138,7 +138,7 @@ def test_every_v1_route_in_a_worked_example_is_served(document: Path) -> None:
         pytest.skip(f"{document.name} does not exist")
 
     examples = "\n".join(re.findall(r"```[a-z]*\n(.*?)```", document.read_text(), re.DOTALL))
-    served = served_paths()
+    served = served_paths(tmp_path)
     mentioned = {match.rstrip("/") for match in re.findall(r"/v1/[A-Za-z0-9_{}$/-]+", examples)}
 
     for path in sorted(mentioned):
@@ -209,7 +209,9 @@ def test_the_capability_tables_list_exactly_the_kinds_that_are_registered(docume
 @pytest.mark.parametrize(
     "document", [ROOT / "docs" / "api.md", ROOT / "docs" / "api.ko.md"], ids=lambda p: p.name
 )
-def test_the_api_reference_documents_every_route_that_is_served(document: Path) -> None:
+def test_the_api_reference_documents_every_route_that_is_served(
+    document: Path, tmp_path: Path
+) -> None:
     """The counterpart to the check above, and the one that catches omissions.
 
     That one forbids documenting a route which does not exist. This one forbids
@@ -226,7 +228,7 @@ def test_the_api_reference_documents_every_route_that_is_served(document: Path) 
         normalise(match) for match in re.findall(r"/(?:v1|healthz)[A-Za-z0-9_{}/-]*", text)
     }
 
-    undocumented = {normalise(path) for path in served_paths()} - mentioned
+    undocumented = {normalise(path) for path in served_paths(tmp_path)} - mentioned
     assert not undocumented, f"{document.name} does not document: {sorted(undocumented)}"
 
 
@@ -351,7 +353,7 @@ def test_every_option_the_justfile_passes_exists() -> None:
     assert not missing, f"the Justfile passes options that do not exist: {missing}"
 
 
-def test_every_route_the_dashboard_calls_is_served() -> None:
+def test_every_route_the_dashboard_calls_is_served(tmp_path: Path) -> None:
     """The dashboard is the third surface that names routes, and had no check.
 
     `deploy/*.service` is checked for the commands it runs and the Justfile now
@@ -364,7 +366,7 @@ def test_every_route_the_dashboard_calls_is_served() -> None:
     Both of those are covered by their own entries here.
     """
     dashboard = (ROOT / "src/tubedepth/api/dashboard.html").read_text()
-    served = {normalise(path) for path in served_paths()} | {"/healthz"}
+    served = {normalise(path) for path in served_paths(tmp_path)} | {"/healthz"}
 
     called = {
         normalise(re.sub(r"\$\{[^}]*\}", "{}", path))

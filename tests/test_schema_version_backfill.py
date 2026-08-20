@@ -14,7 +14,6 @@ of this file is that such a row is left alone and counted rather than stamped.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 from tubedepth.database import Database
 from tubedepth.fingerprints import fingerprint
@@ -42,19 +41,12 @@ def store(
         )
 
 
-def prepared(tmp_path: Path) -> Database:
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
-    return database
-
-
 def versions(database: Database) -> list[str | None]:
     with database.session() as session:
         return [artifact.schema_version for artifact in session.query(Artifact).all()]
 
 
-def test_a_row_written_before_the_column_existed_is_attributed(tmp_path: Path) -> None:
-    database = prepared(tmp_path)
+def test_a_row_written_before_the_column_existed_is_attributed(database: Database) -> None:
     store(
         database,
         kind="video.metadata",
@@ -70,7 +62,7 @@ def test_a_row_written_before_the_column_existed_is_attributed(tmp_path: Path) -
 
 
 def test_a_listing_row_from_before_parameters_entered_the_key_is_still_attributed(
-    tmp_path: Path,
+    database: Database,
 ) -> None:
     """The test that catches the tempting wrong implementation.
 
@@ -80,7 +72,6 @@ def test_a_listing_row_from_before_parameters_entered_the_key_is_still_attribute
     that matches nothing for exactly the six kinds whose fingerprints just
     moved, and leaves them unattributed while confidently attributing the rest.
     """
-    database = prepared(tmp_path)
     store(
         database,
         kind="channel.videos",
@@ -96,12 +87,11 @@ def test_a_listing_row_from_before_parameters_entered_the_key_is_still_attribute
 
 
 def test_a_row_from_a_superseded_version_is_not_stamped_with_the_current_one(
-    tmp_path: Path,
+    database: Database,
 ) -> None:
     """`channel.about` is at "2", and its v1 rows hold a video's description
     where the channel's belongs. Stamping those "2" would erase the one signal
     that says the contents are wrong."""
-    database = prepared(tmp_path)
     store(
         database,
         kind="channel.about",
@@ -115,9 +105,8 @@ def test_a_row_from_a_superseded_version_is_not_stamped_with_the_current_one(
     assert versions(database) == ["1"]
 
 
-def test_a_row_matching_no_known_version_is_left_alone_and_named(tmp_path: Path) -> None:
+def test_a_row_matching_no_known_version_is_left_alone_and_named(database: Database) -> None:
     """Never guess. Unattributed and honest beats attributed and wrong."""
-    database = prepared(tmp_path)
     store(
         database,
         kind="video.metadata",
@@ -133,10 +122,9 @@ def test_a_row_matching_no_known_version_is_left_alone_and_named(tmp_path: Path)
     assert versions(database) == [None]
 
 
-def test_a_row_that_already_names_its_version_is_left_alone(tmp_path: Path) -> None:
+def test_a_row_that_already_names_its_version_is_left_alone(database: Database) -> None:
     """Idempotent, and the reason a worker writing concurrently is not a race:
     a row it writes is non-NULL by construction and invisible to this."""
-    database = prepared(tmp_path)
     store(
         database,
         kind="video.metadata",
@@ -151,8 +139,7 @@ def test_a_row_that_already_names_its_version_is_left_alone(tmp_path: Path) -> N
     assert versions(database) == ["9"]
 
 
-def test_a_dry_run_reports_what_it_would_do_and_writes_nothing(tmp_path: Path) -> None:
-    database = prepared(tmp_path)
+def test_a_dry_run_reports_what_it_would_do_and_writes_nothing(database: Database) -> None:
     store(
         database,
         kind="video.metadata",
@@ -168,10 +155,9 @@ def test_a_dry_run_reports_what_it_would_do_and_writes_nothing(tmp_path: Path) -
 
 
 def test_a_kind_no_source_is_registered_for_is_reported_rather_than_raising(
-    tmp_path: Path,
+    database: Database,
 ) -> None:
     """A retired kind's rows are exactly the history this is meant to preserve."""
-    database = prepared(tmp_path)
     store(
         database,
         kind="video.dislikes",

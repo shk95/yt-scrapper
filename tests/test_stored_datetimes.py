@@ -9,15 +9,12 @@ one does not raise, it silently compares wrong.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from pathlib import Path
 
 from tubedepth.database import Database
 from tubedepth.models import Artifact
 
 
-def test_a_stored_instant_reads_back_offset_aware(tmp_path: Path) -> None:
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
+def test_a_stored_instant_reads_back_offset_aware(database: Database) -> None:
     written = datetime(2026, 8, 18, 12, 0, tzinfo=UTC)
 
     with database.session() as session:

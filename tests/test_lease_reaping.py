@@ -37,9 +37,7 @@ class FakeClock:
         self._now += delta
 
 
-def prepared(tmp_path: Path, clock: FakeClock, *kinds: str) -> Database:
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
+def prepared(database: Database, clock: FakeClock, *kinds: str) -> Database:
     with database.session() as session:
         for kind in kinds:
             session.add(
@@ -48,9 +46,9 @@ def prepared(tmp_path: Path, clock: FakeClock, *kinds: str) -> Database:
     return database
 
 
-def test_a_job_whose_lease_expired_returns_to_the_queue(tmp_path: Path) -> None:
+def test_a_job_whose_lease_expired_returns_to_the_queue(tmp_path: Path, database: Database) -> None:
     clock = FakeClock()
-    database = prepared(tmp_path, clock, "video.metadata")
+    database = prepared(database, clock, "video.metadata")
     with database.session() as session:
         JobRepository(session, clock=clock).claim(worker="doomed", lease=LEASE)
 
@@ -66,11 +64,13 @@ def test_a_job_whose_lease_expired_returns_to_the_queue(tmp_path: Path) -> None:
         assert job.lease_expires_at is None
 
 
-def test_a_reaped_job_keeps_the_attempt_that_was_spent_on_it(tmp_path: Path) -> None:
+def test_a_reaped_job_keeps_the_attempt_that_was_spent_on_it(
+    tmp_path: Path, database: Database
+) -> None:
     # Otherwise a job that crashes a worker every time is retried forever, and
     # the attempt limit that exists to stop that never counts anything.
     clock = FakeClock()
-    database = prepared(tmp_path, clock, "video.metadata")
+    database = prepared(database, clock, "video.metadata")
     with database.session() as session:
         JobRepository(session, clock=clock).claim(worker="doomed", lease=LEASE)
     clock.advance(LEASE + timedelta(seconds=1))
@@ -84,9 +84,10 @@ def test_a_reaped_job_keeps_the_attempt_that_was_spent_on_it(tmp_path: Path) -> 
 
 def test_a_job_that_has_used_every_attempt_is_failed_rather_than_requeued(
     tmp_path: Path,
+    database: Database,
 ) -> None:
     clock = FakeClock()
-    database = prepared(tmp_path, clock, "video.metadata")
+    database = prepared(database, clock, "video.metadata")
     with database.session() as session:
         session.query(Job).one().max_attempts = 1
     with database.session() as session:
@@ -103,9 +104,9 @@ def test_a_job_that_has_used_every_attempt_is_failed_rather_than_requeued(
         assert "lease" in (job.error_message or "")
 
 
-def test_a_job_whose_lease_is_still_valid_is_left_alone(tmp_path: Path) -> None:
+def test_a_job_whose_lease_is_still_valid_is_left_alone(tmp_path: Path, database: Database) -> None:
     clock = FakeClock()
-    database = prepared(tmp_path, clock, "video.metadata")
+    database = prepared(database, clock, "video.metadata")
     with database.session() as session:
         JobRepository(session, clock=clock).claim(worker="busy", lease=LEASE)
 
@@ -117,12 +118,14 @@ def test_a_job_whose_lease_is_still_valid_is_left_alone(tmp_path: Path) -> None:
         assert session.query(Job).one().state is JobState.RUNNING
 
 
-def test_renewing_a_lease_keeps_a_long_job_out_of_the_reaper(tmp_path: Path) -> None:
+def test_renewing_a_lease_keeps_a_long_job_out_of_the_reaper(
+    tmp_path: Path, database: Database
+) -> None:
     """A harvest can outlive its lease, and being reaped mid-run is worse than
     slow: the job runs twice, against the same address, for nothing.
     """
     clock = FakeClock()
-    database = prepared(tmp_path, clock, "video.comments")
+    database = prepared(database, clock, "video.comments")
     with database.session() as session:
         claimed = JobRepository(session, clock=clock).claim(worker="slow", lease=LEASE)
         assert claimed is not None
@@ -137,7 +140,9 @@ def test_renewing_a_lease_keeps_a_long_job_out_of_the_reaper(tmp_path: Path) -> 
         assert JobRepository(session, clock=clock).reap_expired_leases() == 0
 
 
-def test_a_job_that_outlives_its_lease_keeps_it_alive_while_it_runs(tmp_path: Path) -> None:
+def test_a_job_that_outlives_its_lease_keeps_it_alive_while_it_runs(
+    tmp_path: Path, database: Database
+) -> None:
     """`renew_lease` existed and nothing called it.
 
     A comment harvest runs for tens of minutes against the default fifteen
@@ -157,8 +162,6 @@ def test_a_job_that_outlives_its_lease_keeps_it_alive_while_it_runs(tmp_path: Pa
             release.wait(timeout=5)
             return super().collect(target, egress, runtime)
 
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
     identifier = enqueue(database, "video.echo", "video000001")
     worker = Worker(
         database=database,

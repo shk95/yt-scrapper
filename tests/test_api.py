@@ -45,15 +45,13 @@ class EchoSource:
         return EchoPayload(target=target)
 
 
-def build_api(tmp_path: Path) -> tuple[TestClient, str, Database]:
+def build_api(tmp_path: Path, database: Database) -> tuple[TestClient, str, Database]:
     """The fixture's body as a plain function.
 
     Other test modules need the same client and were reaching into the
     fixture's `__wrapped__`, which is an implementation detail of pytest and
     not a seam anyone should rely on.
     """
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
     registry = SourceRegistry()
     registry.register(EchoSource())  # type: ignore[arg-type]
     application = create_application(
@@ -68,8 +66,8 @@ def build_api(tmp_path: Path) -> tuple[TestClient, str, Database]:
 
 
 @pytest.fixture
-def api(tmp_path: Path) -> tuple[TestClient, str, Database]:
-    return build_api(tmp_path)
+def api(tmp_path: Path, database: Database) -> tuple[TestClient, str, Database]:
+    return build_api(tmp_path, database)
 
 
 def test_health_needs_no_key(api: tuple[TestClient, str, Database]) -> None:
@@ -661,7 +659,9 @@ def test_the_dashboard_never_embeds_a_key(api: tuple[TestClient, str, Database])
     assert "ytd_" not in client.get("/").text
 
 
-def test_a_submission_carries_the_bound_its_kind_deserves(tmp_path: Path) -> None:
+def test_a_submission_carries_the_bound_its_kind_deserves(
+    tmp_path: Path, database: Database
+) -> None:
     """The API is the third place a job is constructed, and the easiest to miss.
 
     A client cannot ask for a retry budget and should not: how many times a
@@ -684,8 +684,6 @@ def test_a_submission_carries_the_bound_its_kind_deserves(tmp_path: Path) -> Non
         def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> ExpensivePayload:
             return ExpensivePayload(target=target)
 
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
     registry = SourceRegistry()
     registry.register(EchoSource())  # type: ignore[arg-type]
     registry.register(ExpensiveSource())  # type: ignore[arg-type]
@@ -764,7 +762,7 @@ def test_a_digest_this_instance_never_stored_is_not_found(
 
 
 def test_an_observation_from_a_retracted_version_is_gone_rather_than_served(
-    api: tuple[TestClient, str, Database], tmp_path: Path
+    api: tuple[TestClient, str, Database], tmp_path: Path, database_url_for_tests: str
 ) -> None:
     """`channel.about` v1 read the home tab as the about panel and returned a
     video's description as the channel's. That data is wrong rather than old,
@@ -786,8 +784,7 @@ def test_an_observation_from_a_retracted_version_is_gone_rather_than_served(
         def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
             return EchoPayload(target=target)
 
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
+    database = Database(database_url_for_tests)
     registry = SourceRegistry()
     registry.register(Retracted())  # type: ignore[arg-type]
     client = TestClient(
@@ -988,6 +985,7 @@ def test_a_batch_whose_first_target_is_uncached_does_not_deadlock(
 
 def test_an_observation_whose_version_is_unrecorded_is_not_claimed_to_be_fine(
     tmp_path: Path,
+    database_url_for_tests: str,
 ) -> None:
     """The window between deploying the column and running the backfill.
 
@@ -1015,7 +1013,7 @@ def test_an_observation_whose_version_is_unrecorded_is_not_claimed_to_be_fine(
         def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
             return EchoPayload(target=target)
 
-    database = Database(tmp_path / "tubedepth.db")
+    database = Database(database_url_for_tests)
     database.create_schema()
     registry = SourceRegistry()
     registry.register(Retracted())  # type: ignore[arg-type]

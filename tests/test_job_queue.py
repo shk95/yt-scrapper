@@ -25,8 +25,13 @@ LEASE = timedelta(minutes=5)
 
 
 def queued_database(path: Path, *kinds: str) -> Database:
-    """A database holding one queued job per kind, in the order given."""
-    database = Database(path / "tubedepth.db")
+    """A database holding one queued job per kind, in the order given.
+
+    Takes a directory rather than the `database_url_for_tests` fixture: this
+    module also opens the same file with raw `sqlite3` (the write-lock tests
+    below), so the path has to be known, not just the URL.
+    """
+    database = Database(f"sqlite+pysqlite:///{path / 'tubedepth.db'}")
     database.create_schema()
     with database.session() as session:
         for kind in kinds:
@@ -34,10 +39,7 @@ def queued_database(path: Path, *kinds: str) -> Database:
     return database
 
 
-def test_claiming_an_empty_queue_returns_nothing(tmp_path: Path) -> None:
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
-
+def test_claiming_an_empty_queue_returns_nothing(database: Database) -> None:
     with database.session() as session:
         assert JobRepository(session).claim(worker="worker-1", lease=LEASE) is None
 

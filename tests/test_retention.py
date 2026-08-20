@@ -37,10 +37,8 @@ class FakeClock:
 
 
 def build(
-    tmp_path: Path, policy: RetentionPolicy, clock: FakeClock
+    tmp_path: Path, database: Database, policy: RetentionPolicy, clock: FakeClock
 ) -> tuple[Database, PayloadStore, RetentionService]:
-    database = Database(tmp_path / "tubedepth.db")
-    database.create_schema()
     payloads = PayloadStore(tmp_path / "payloads")
     service = RetentionService(database=database, payloads=payloads, policy=policy, clock=clock)
     return database, payloads, service
@@ -71,10 +69,10 @@ def _age(path: Path, by: timedelta) -> None:
     os.utime(path, (when, when))
 
 
-def test_an_artifact_past_its_retention_age_is_removed(tmp_path: Path) -> None:
+def test_an_artifact_past_its_retention_age_is_removed(tmp_path: Path, database: Database) -> None:
     clock = FakeClock()
     database, payloads, service = build(
-        tmp_path, RetentionPolicy(maximum_age=timedelta(days=30)), clock
+        tmp_path, database, RetentionPolicy(maximum_age=timedelta(days=30)), clock
     )
     digest = store(database, payloads, clock, b'{"a": 1}', "old")
 
@@ -87,10 +85,10 @@ def test_an_artifact_past_its_retention_age_is_removed(tmp_path: Path) -> None:
         assert session.query(Artifact).count() == 0
 
 
-def test_a_recent_artifact_is_kept(tmp_path: Path) -> None:
+def test_a_recent_artifact_is_kept(tmp_path: Path, database: Database) -> None:
     clock = FakeClock()
     database, payloads, service = build(
-        tmp_path, RetentionPolicy(maximum_age=timedelta(days=30)), clock
+        tmp_path, database, RetentionPolicy(maximum_age=timedelta(days=30)), clock
     )
     store(database, payloads, clock, b'{"a": 1}', "recent")
 
@@ -102,7 +100,9 @@ def test_a_recent_artifact_is_kept(tmp_path: Path) -> None:
         assert session.query(Artifact).count() == 1
 
 
-def test_age_is_the_only_thing_that_protects_an_artifact(tmp_path: Path) -> None:
+def test_age_is_the_only_thing_that_protects_an_artifact(
+    tmp_path: Path, database: Database
+) -> None:
     """Nothing survives on the grounds of being the last of its kind.
 
     An earlier design kept the newest observation of each question regardless
@@ -114,7 +114,7 @@ def test_age_is_the_only_thing_that_protects_an_artifact(tmp_path: Path) -> None
     """
     clock = FakeClock()
     database, payloads, service = build(
-        tmp_path, RetentionPolicy(maximum_age=timedelta(days=30)), clock
+        tmp_path, database, RetentionPolicy(maximum_age=timedelta(days=30)), clock
     )
     store(database, payloads, clock, b'{"v": 1}', "only-one")
     clock.advance(timedelta(days=40))
@@ -128,6 +128,7 @@ def test_age_is_the_only_thing_that_protects_an_artifact(tmp_path: Path) -> None
 
 def test_exceeding_the_size_ceiling_is_reported_rather_than_absorbed(
     tmp_path: Path,
+    database: Database,
 ) -> None:
     # The ceiling is a backstop, not an operating point. Reaching it means the
     # age policy is not keeping up, and silently evicting hides that.
@@ -139,6 +140,7 @@ def test_exceeding_the_size_ceiling_is_reported_rather_than_absorbed(
     clock = FakeClock()
     database, payloads, service = build(
         tmp_path,
+        database,
         RetentionPolicy(maximum_age=timedelta(days=30), maximum_bytes=100),
         clock,
     )
@@ -153,10 +155,13 @@ def test_exceeding_the_size_ceiling_is_reported_rather_than_absorbed(
     assert outcome.total_bytes > 100
 
 
-def test_staying_under_the_ceiling_is_not_reported_as_a_problem(tmp_path: Path) -> None:
+def test_staying_under_the_ceiling_is_not_reported_as_a_problem(
+    tmp_path: Path, database: Database
+) -> None:
     clock = FakeClock()
     database, payloads, service = build(
         tmp_path,
+        database,
         RetentionPolicy(maximum_age=timedelta(days=30), maximum_bytes=10_000),
         clock,
     )
@@ -167,7 +172,7 @@ def test_staying_under_the_ceiling_is_not_reported_as_a_problem(tmp_path: Path) 
     assert outcome.over_ceiling is False
 
 
-def test_a_blob_with_no_artifact_row_is_swept(tmp_path: Path) -> None:
+def test_a_blob_with_no_artifact_row_is_swept(tmp_path: Path, database: Database) -> None:
     """Orphans are produced routinely, not exceptionally.
 
     `tubedepth collect` writes a payload and no row — it takes no database at
@@ -188,7 +193,7 @@ def test_a_blob_with_no_artifact_row_is_swept(tmp_path: Path) -> None:
     # being pointed at the wrong database.
     clock = FakeClock(datetime.now(UTC))
     database, payloads, service = build(
-        tmp_path, RetentionPolicy(sweep_without_an_index=True), clock
+        tmp_path, database, RetentionPolicy(sweep_without_an_index=True), clock
     )
     stored = payloads.put("video.metadata", b'{"orphan": true}')
     # Age the file rather than the clock, for the same reason.
@@ -201,7 +206,7 @@ def test_a_blob_with_no_artifact_row_is_swept(tmp_path: Path) -> None:
     assert outcome.orphans_removed == 1
 
 
-def test_a_blob_written_moments_ago_is_left_alone(tmp_path: Path) -> None:
+def test_a_blob_written_moments_ago_is_left_alone(tmp_path: Path, database: Database) -> None:
     """The race this sweep must not lose.
 
     Payloads are written before their artifact row — deliberately, so a crash
@@ -211,7 +216,7 @@ def test_a_blob_written_moments_ago_is_left_alone(tmp_path: Path) -> None:
     """
     clock = FakeClock(datetime(2026, 8, 19, tzinfo=UTC))
     database, payloads, service = build(
-        tmp_path, RetentionPolicy(sweep_without_an_index=True), clock
+        tmp_path, database, RetentionPolicy(sweep_without_an_index=True), clock
     )
     stored = payloads.put("video.metadata", b'{"just": "written"}')
 
@@ -221,7 +226,9 @@ def test_a_blob_written_moments_ago_is_left_alone(tmp_path: Path) -> None:
     assert outcome.orphans_removed == 0
 
 
-def test_the_store_size_is_measured_on_disk_and_not_from_the_rows(tmp_path: Path) -> None:
+def test_the_store_size_is_measured_on_disk_and_not_from_the_rows(
+    tmp_path: Path, database: Database
+) -> None:
     """The ceiling's only job is to describe the disk, so it must measure it.
 
     `byte_count` is the uncompressed payload size. Reporting that as the store
@@ -231,7 +238,7 @@ def test_the_store_size_is_measured_on_disk_and_not_from_the_rows(tmp_path: Path
     ignores it is not a size.
     """
     clock = FakeClock(datetime(2026, 8, 19, tzinfo=UTC))
-    database, payloads, service = build(tmp_path, RetentionPolicy(), clock)
+    database, payloads, service = build(tmp_path, database, RetentionPolicy(), clock)
     body = json.dumps({"text": "compressible " * 500}).encode()
     digest = store(database, payloads, clock, body, "video000001")
     stored_path = payloads.path_for("video.metadata", digest)
@@ -245,6 +252,7 @@ def test_the_store_size_is_measured_on_disk_and_not_from_the_rows(tmp_path: Path
 
 def test_an_expiring_observation_does_not_take_a_payload_a_current_one_shares(
     tmp_path: Path,
+    database: Database,
 ) -> None:
     """Two identical observations are one blob, and the older one expires first.
 
@@ -257,7 +265,7 @@ def test_an_expiring_observation_does_not_take_a_payload_a_current_one_shares(
     """
     clock = FakeClock()
     database, payloads, service = build(
-        tmp_path, RetentionPolicy(maximum_age=timedelta(days=30)), clock
+        tmp_path, database, RetentionPolicy(maximum_age=timedelta(days=30)), clock
     )
     unchanged = b'{"view_count": 100}'
     digest = store(database, payloads, clock, unchanged, "same-video")
@@ -277,6 +285,7 @@ def test_an_expiring_observation_does_not_take_a_payload_a_current_one_shares(
 
 def test_a_payload_store_with_no_index_rows_is_refused_rather_than_swept(
     tmp_path: Path,
+    database: Database,
 ) -> None:
     """An index with no rows at all cannot tell a full store from a wrong one.
 
@@ -288,7 +297,7 @@ def test_a_payload_store_with_no_index_rows_is_refused_rather_than_swept(
     """
     clock = FakeClock()
     database, payloads, service = build(
-        tmp_path, RetentionPolicy(maximum_age=timedelta(days=30)), clock
+        tmp_path, database, RetentionPolicy(maximum_age=timedelta(days=30)), clock
     )
     stored = payloads.put("video.metadata", b'{"orphaned": true}')
     _age(stored.path, timedelta(hours=2))
@@ -300,10 +309,14 @@ def test_a_payload_store_with_no_index_rows_is_refused_rather_than_swept(
     assert payloads.path_for("video.metadata", stored.digest) is not None
 
 
-def test_an_empty_index_and_an_empty_store_is_not_an_error(tmp_path: Path) -> None:
+def test_an_empty_index_and_an_empty_store_is_not_an_error(
+    tmp_path: Path, database: Database
+) -> None:
     """A fresh installation prunes nothing and says so, rather than refusing."""
     clock = FakeClock()
-    _, _, service = build(tmp_path, RetentionPolicy(maximum_age=timedelta(days=30)), clock)
+    _, _, service = build(
+        tmp_path, database, RetentionPolicy(maximum_age=timedelta(days=30)), clock
+    )
 
     outcome = service.prune()
 
@@ -313,6 +326,7 @@ def test_an_empty_index_and_an_empty_store_is_not_an_error(tmp_path: Path) -> No
 
 def test_the_refusal_is_overridable_for_a_store_that_is_genuinely_all_orphans(
     tmp_path: Path,
+    database: Database,
 ) -> None:
     """`tubedepth collect` takes no database, so a collect-only host is this.
 
@@ -324,6 +338,7 @@ def test_the_refusal_is_overridable_for_a_store_that_is_genuinely_all_orphans(
     clock = FakeClock(datetime.now(UTC))
     _, payloads, service = build(
         tmp_path,
+        database,
         RetentionPolicy(maximum_age=timedelta(days=30), sweep_without_an_index=True),
         clock,
     )
