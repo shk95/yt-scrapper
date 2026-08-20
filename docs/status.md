@@ -355,6 +355,71 @@ Direct egress is a residential KT line in KR.
 
 ## Decisions that are expensive to reverse
 
+### PostgreSQL is where this is going, and why
+
+**Decided 2026-08-20.** The other scrapers in this fleet already run on
+PostgreSQL, and the intended shape is **one physical database with logical
+boundaries per service** — a schema and a role each, not a database each.
+
+*The reason is not performance, and pretending otherwise would set the wrong
+priorities.* The rate controller is the binding constraint here, not the
+database: the first sustained run held its window at the ceiling with the
+quarantine streak at zero, so a faster claim buys nothing today. What decides
+it is that **SQLite cannot participate in that architecture at all.** A file has
+no story for "a logical boundary inside a shared physical database", so this
+service is currently excluded from the structure the rest of the fleet uses.
+
+Two things it does buy, and they are real:
+
+*The write-lock class of bug stops existing.* `decisions/002` records it twice
+and this repository produced a third instance on 2026-08-20 — `POST
+/v1/jobs/batch` held a write session and called a cache lookup that opened the
+write engine, deadlocking a request against a lock it was already holding.
+Every new route on SQLite carries that landmine.
+
+*One operational story.* With several scrapers, the one that is different is
+the one whose backup gets forgotten and whose restore nobody remembers. That
+tax does not shrink with scale.
+
+**The rules for the shared database are in [`shared-postgres.md`](shared-postgres.md).**
+Two of them can damage another service — autogenerate dropping tables it cannot
+see the models for, and `alembic_version` collisions — so they are not optional.
+
+**Scope, measured.** What is actually bound to SQLite: `database.py` (two
+engines, four PRAGMAs, the `BEGIN IMMEDIATE` hook, `_repair_existing_tables`),
+`migrations/env.py` (default URL, `render_as_batch`), the URL in `cli.py`, and
+three test modules using raw `sqlite3`. Roughly 150 lines.
+
+**The claim is already portable**, which is the part that lowers the risk most.
+`JobRepository.claim` is a SELECT followed by an UPDATE guarded on
+`state == QUEUED` with a rowcount check. Under PostgreSQL's READ COMMITTED two
+workers can pick the same candidate, but the second UPDATE re-evaluates against
+the committed row version and matches nothing. `FOR UPDATE SKIP LOCKED` is an
+optimisation, not a correction.
+
+**Cutover, not dual dialect** — supporting both doubles the test surface
+forever to preserve a property (runs with no server) that fleet consistency has
+made unwanted. And **the tests move too**: "production on PostgreSQL, tests on
+SQLite" is how a dialect bug ships, which is exactly what the deadlock above
+was. Docker is available on this host (see AGENTS.md), so a compose file and a
+CI service container are the whole cost.
+
+### The order this is being done in
+
+1. **Check it runs here** — PostgreSQL 18 in a container, `alembic upgrade head`
+   against it. Four revisions use `batch_alter_table`; confirm by running.
+2. **The migration itself** — dialect branches, `_repair_existing_tables` gone,
+   `version_table_schema`, schema and role, CI service, data across.
+3. **Issue #13** (a bundle's parts bypass every lane but its own). Independent
+   of the database, and currently dormant — nothing runs bundles, since the
+   sampler collects `video.metadata` only. It wakes the moment anything does.
+4. **Issue #3 route A**, the delta layer, where the accumulated history pays.
+
+#13 sits after the migration rather than before it because it is dormant while
+SQLite-shaped decisions keep accruing — 2026-08-20 alone added four, one of
+them the deadlock.
+
+
 Three of these have since been paid for and moved to
 [`decisions/`](../decisions/README.md), which holds only rules something has
 actually gone wrong without. What stays here is reasoning that has not yet cost
