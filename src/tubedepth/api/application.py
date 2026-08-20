@@ -101,7 +101,7 @@ class JobView(BaseModel):
     error_message: str | None = None
     # Which key submitted this, and which worker holds it. Both were written on
     # every job and readable from nowhere, so "identify the runaway client" and
-    # "which worker is stuck on this" meant opening SQLite by hand.
+    # "which worker is stuck on this" meant opening the database by hand.
     api_key_id: str | None = None
     claimed_by: str | None = None
     payload_bytes: int | None = None

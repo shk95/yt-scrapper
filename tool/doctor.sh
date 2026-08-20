@@ -78,7 +78,7 @@ fi
 # the filesystem that produced the intermittent "database is locked" this
 # check used to be named for. See docs/troubleshooting.md's SQLite section,
 # kept as history rather than deleted.
-data_dir=$(dirname "${TUBEDEPTH_DATA_DIR:-./var}")
+data_dir="${TUBEDEPTH_DATA_DIR:-./var}"
 case "$(cd "$data_dir" 2>/dev/null && pwd || echo "$data_dir")" in
   /mnt/*) bad "TUBEDEPTH_DATA_DIR is under /mnt (drvfs); avoid it for the payload store" ;;
   *)      ok  "TUBEDEPTH_DATA_DIR is on a filesystem with reliable POSIX semantics" ;;

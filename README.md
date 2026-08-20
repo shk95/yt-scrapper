@@ -252,8 +252,9 @@ estimates was removed on purpose — the reasons are in
 
 **Checked and unchecked.** Verified by hand on this machine during planning: 78
 yt-dlp keys, caption json3 retrieval, 20 comments in 6.7s, SponsorBlock 200 and
-404 both, InnerTube `/next` and `/browse` reachable, SQLite 3.46.1, wireproxy
-1.1.3 available, four parallel metadata extractions in 3.11s.
+404 both, InnerTube `/next` and `/browse` reachable, PostgreSQL reachable
+(SQLite 3.46.1 back when that was still the backend), wireproxy 1.1.3
+available, four parallel metadata extractions in 3.11s.
 
 Since then, under sustained load: 474 jobs, none failed, the AIMD window at its
 ceiling and the quarantine streak at zero — so the controller settles rather

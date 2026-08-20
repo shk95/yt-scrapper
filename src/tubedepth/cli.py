@@ -564,6 +564,13 @@ def transfer_command(
     cutover wants to see six numbers before committing to them.
     """
     source = Database(source_url, allow_sqlite_source=True)
+    # `transfer()` itself calls this on both ends (see its docstring), but
+    # `--dry-run` returns before ever calling `transfer()` — without this, a
+    # PostgreSQL source on the wrong `search_path` prints six confident zeros
+    # (every table genuinely empty *from this connection*) instead of the
+    # refusal that would tell an operator the URL is pointed at the wrong
+    # place before they trust what it reports.
+    source.verify_placement()
 
     if dry_run:
         models = mapped_models()
@@ -678,7 +685,7 @@ def key_list(
         state = " (revoked)" if entry.revoked else ""
         # The allowance is here because the error a client sees names it —
         # "over its allowance of N requests per minute" — and finding N for a
-        # key otherwise means opening SQLite. `created_at` is what this listing
+        # key otherwise means opening the database by hand. `created_at` is what this listing
         # is ordered by, so showing it is what makes the order readable.
         typer.echo(
             f"{entry.identifier}  {entry.key_prefix}…  "

@@ -17,7 +17,9 @@ default:
 doctor:
     tool/doctor.sh
 
-# Formatting, static analysis and the offline test suite.
+# Formatting, static analysis and the test suite — offline of YouTube (no
+# socket to the real internet, tests/conftest.py enforces it), but needs
+# Docker: tool/checks/test brings up a throwaway PostgreSQL container.
 [group('repository')]
 check:
     tool/checks/format

@@ -508,6 +508,37 @@ def test_the_key_list_shows_the_allowance_it_is_about_to_be_asked_for(tmp_path: 
     assert "240" in result.output, result.output
 
 
+def test_transfer_dry_run_checks_the_source_placement_too(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """`--dry-run` returns before ever calling `transfer()` — the only other
+    caller of `verify_placement()` on this path — so without its own call, a
+    PostgreSQL source on the wrong `search_path` would print six confident
+    zeros (every table genuinely empty *from this connection*) instead of the
+    refusal an operator needs to see before trusting what it reports."""
+    monkeypatch.setattr(
+        Database,
+        "verify_placement",
+        lambda self: (_ for _ in ()).throw(ConfigurationError("wrong search_path")),
+    )
+
+    result = runner.invoke(
+        application,
+        [
+            "transfer",
+            "--from",
+            f"sqlite+pysqlite:///{tmp_path / 'source.db'}",
+            "--to",
+            "postgresql+psycopg://u:p@h:5432/db",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ConfigurationError)
+    assert "wrong search_path" in str(result.exception)
+
+
 def test_prune_refuses_a_store_whose_index_is_somewhere_else(tmp_path: Path) -> None:
     """The half-finished cutover, from the command line.
 
