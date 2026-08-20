@@ -384,31 +384,46 @@ Direct egress is a residential KT line in KR.
 
 ### PostgreSQL is where this is going, and why
 
-**Decided 2026-08-20.** The other scrapers in this fleet already run on
-PostgreSQL, and the intended shape is **one physical database with logical
-boundaries per service** — a schema and a role each, not a database each.
+**Decided 2026-08-20, corrected 2026-08-20.** The other scrapers in this
+fleet already run on PostgreSQL, and the intended shape is **one shared
+PostgreSQL server (cluster) with one database per service** — not one shared
+database with a schema and a role per service. Confirmed against reality:
+trend-radar's manifest declares `database: trend_radar`, `schema:
+trend_radar` — its own database on the same server. (An earlier version of
+this section had this backwards, describing the shared unit as "one physical
+database with logical boundaries per service"; that was wrong and this
+paragraph replaces it rather than sitting alongside it.)
 
 *The reason is not performance, and pretending otherwise would set the wrong
 priorities.* The rate controller is the binding constraint here, not the
 database: the first sustained run held its window at the ceiling with the
 quarantine streak at zero, so a faster claim buys nothing today. What decides
-it is that **SQLite cannot participate in that architecture at all.** A file has
-no story for "a logical boundary inside a shared physical database", so this
-service is currently excluded from the structure the rest of the fleet uses.
+it is that **SQLite cannot participate in that architecture at all**, for
+three reasons that all hold regardless of whether the shared unit is a
+database or a server:
 
-Two things it does buy, and they are real:
+*No shared connection budget, no central role management.* A file has neither
+`max_connections` nor roles, and both are exactly what the rest of the fleet
+coordinates through — this is rule 4, and it is the one rule that still
+crosses the per-service-database boundary, because roles and
+`max_connections` are cluster-global (see "규정 적용" below).
 
-*The write-lock class of bug stops existing.* `decisions/002` records it twice
-and this repository produced a third instance on 2026-08-20 — `POST
-/v1/jobs/batch` held a write session and called a cache lookup that opened the
-write engine, deadlocking a request against a lock it was already holding.
-Every new route on SQLite carries that landmine.
+*No shared operational story.* Backup, restore, monitoring are all things
+every other service gets by being a database on the fleet's server, and a
+file is not. With several scrapers, the one that is different is the one
+whose backup gets forgotten and whose restore nobody remembers. That tax does
+not shrink with scale.
 
-*One operational story.* With several scrapers, the one that is different is
-the one whose backup gets forgotten and whose restore nobody remembers. That
-tax does not shrink with scale.
+*The write-lock class of bug.* `decisions/002` records it twice and this
+repository produced a third instance on 2026-08-20 — `POST /v1/jobs/batch`
+held a write session and called a cache lookup that opened the write engine,
+deadlocking a request against a lock it was already holding. Every new route
+on SQLite carries that landmine. This one was never about the
+shared-database-vs-shared-server question at all — a file deadlocks against
+itself regardless of what anything else on the network looks like — but it
+is real and it is exactly the kind of thing PostgreSQL does not do.
 
-**The rules for the shared database are in [`shared-postgres.md`](shared-postgres.md).**
+**The rules for the shared server are in [`shared-postgres.md`](shared-postgres.md).**
 Two of them can damage another service — autogenerate dropping tables it cannot
 see the models for, and `alembic_version` collisions — so they are not optional.
 
@@ -551,18 +566,18 @@ migrator와 runtime 둘 다 `search_path = tubedepth, pg_catalog`로 둔다. `do
 
 | 규정 | 이 저장소 | 어디서 |
 | --- | --- | --- |
-| 0 schema+owner | `tubedepth` schema; 3-role 분리 **적용됨(#15)** — `tubedepth_owner`가 schema와 그 안의 모든 객체를 소유 | `deploy/postgres-bootstrap.sql` |
+| 0 schema+owner | `tubedepth` schema; 3-role 분리 **적용됨(#15)** — `tubedepth_owner`가 schema와 그 안의 모든 객체를 소유. 각 서비스가 자기 database를 갖는 정정된 구조에서는 이 격리가 엄밀히는 불필요하다(database 하나에 서비스 하나뿐이므로 다른 서비스와 나눌 schema가 없다) — 그래도 **의도적으로 유지한다**: 비용이 없고, 언젠가 여러 서비스가 database 하나로 통합되거나 배포가 잘못된 database를 가리키는 날 값을 한다 | `deploy/postgres-bootstrap.sql` |
 | 1 owner/migrator/runtime | **적용됨(#15).** `tubedepth_owner`(NOLOGIN) / `tubedepth_migrator`(배포 전용, `GRANT tubedepth_owner`) / `tubedepth_runtime`(DML만) 3-role 분리. `migrations/env.py`가 postgres에서 `SET ROLE tubedepth_owner`; runtime의 부정 테스트 4종과 소유권 감사가 `tests/test_postgres_privileges.py` | `deploy/postgres-bootstrap.sql`, `migrations/env.py` |
-| 2 autogenerate 격리 | search_path 전략 + sentinel 증명 (위 선언, 테스트는 #15에서 실제로 작성됨) | `tests/test_postgres_migrations.py` |
-| 3 version table 격리 | `tubedepth.alembic_version`, 테스트가 위치를 단언 | 같은 파일 |
+| 2 autogenerate 격리 | search_path 전략 + sentinel 증명 (위 선언, 테스트는 #15에서 실제로 작성됨). 서비스당 database 하나뿐인 정정된 구조에서는 다른 서비스의 모델을 볼 일 자체가 없어 무해하게 불필요하지만, sentinel 테스트와 `search_path` 전략은 **그대로 둔다** — 비용이 없고, `verify_placement()`와 함께 잘못된 schema뿐 아니라 잘못된 database에 연결된 경우도 잡아낸다 | `tests/test_postgres_migrations.py` |
+| 3 version table 격리 | `tubedepth.alembic_version`, 테스트가 위치를 단언. 같은 이유로 database-per-service 아래서는 불필요하지만 무해하므로 유지 | 같은 파일 |
 | 4 connection budget | **적용됨(#15, Task 7-8; 전체 브랜치 리뷰로 2026-08-20 재조정; #26으로 증액 요청, 같은 날 승인).** `Database`의 write engine은 `--concurrency`로 크기가 정해진다(`pool_size=max_overflow=TUBEDEPTH_CONCURRENCY`): `Worker.drain`이 concurrency당 claim thread 하나와 lease 갱신 thread 하나를 돌리고 둘 다 write engine에서 세션을 얻으므로, concurrency 8이면 순간적으로 최대 16개 세션이 4-연결 pool을 다툴 수 있다는 것을 실측으로 확인(16개 동시 세션 요청을 pool_size=2/max_overflow=2에 걸어 측정 — 4개씩 배치로 직렬화되고 뒤 배치일수록 앞 배치의 세션 점유 시간만큼 대기가 쌓임을 확인). AIMD 레이트 컨트롤러가 실측한 유효 상한은 6(위 §를 보라 — 6을 넘으면 병목이 이 서비스 쪽이 아니라 YouTube 쪽이다), 그리고 6은 기존 20 예산 안에 들어가지 않았다(2×6+4=16짜리 worker write만으로도 API 8과 합쳐 24). 그래서 이 서비스는 20→32 증액을 함대에 **요청했고**(#26), **승인받았다** — 실측 근거: 운영 중인 공유 서버에서 `max_connections=100`, `superuser_reserved_connections=3`, `reserved_connections=0`(가용 97); 서버의 다른 선언자는 trend-radar 하나뿐이고 그 자신의 manifest(`service-db.json`)가 12를 선언; tubedepth가 32를 쓰면 44 claimed, 53 spare. manifest 상한과 `tubedepth_runtime`의 `CONNECTION LIMIT`을 20에서 32로 올리고, `TUBEDEPTH_CONCURRENCY` 배포 기본값을 2에서 6으로 올렸다: API 8(write 4 + read 4) + worker 16(write 6×2=12 + read 4, read는 `Worker.reap`만 쓰므로 concurrency와 무관하게 기본값 유지) = 24, +migration 1, +rolling-overlap 0 = 25 ≤ 32, 여유 7. 이 값은 AIMD가 실측한 유효 상한 그 자체이지 임의로 고른 숫자가 아니다. **32를 더 올릴 근거는 없다** — 이번 요청이 상한이었고, 그 이상은 다시 함대에 요청할 사안이다 | `src/tubedepth/database.py`, `src/tubedepth/cli.py`, `deploy/service-manifest.yaml`, `deploy/postgres-bootstrap.sql`, `deploy/tubedepth-worker.service` |
 | 5 timeout | **적용됨(#15).** `tubedepth_runtime`에 `statement_timeout`(15s), `lock_timeout`(3s, statement보다 짧게), `idle_in_transaction_session_timeout`(30s), `transaction_timeout`(60s, PG17+이므로 무조건 설정)을 role-scoped로 부여. 워커는 이미 network 호출을 transaction 밖에서 한다. 예외 하나: `tubedepth transfer`의 rollback 방향(PostgreSQL 소스 → SQLite 대상)은 `artifacts`를 한 번의 `SELECT`로 읽는데, 실제 크기의 테이블에서는 15s를 넘는다 — role의 기본값을 올리는 대신 그 read의 트랜잭션에서만 `SET LOCAL statement_timeout = '5min'`을 실행(`transfer.py`의 `_copy_table`), 다른 세션에는 영향을 주지 않는다 | `deploy/postgres-bootstrap.sql`, `src/tubedepth/transfer.py` |
 | 6 startup DDL 금지 | **적용됨.** `_database()`가 더는 `create_schema()`를 호출하지 않는다; 스키마 경로는 `tubedepth migrate` 하나뿐 | #14 |
 | 7 외부 object 일관성 | payload는 content-addressed(불변 key), write-then-record 순서로 이미 규정 형태. grace period와 reconciliation은 #17에 병합 | `payload_store.py`, #17 |
 | 8 extension 중앙 관리 | 필요 extension 없음, manifest가 선언 | manifest |
 | 9 timestamptz | **적용됨(#15).** 확인 결과 `sa.DateTime()`은 실제로 postgres에서 `timestamp without time zone`으로 렌더되고 있었다(16개 컬럼 전부, `information_schema.columns` 실측). `render_item`이 `sa.DateTime(timezone=True)`를 내보내도록 고치고, 기존 16개 `UtcDateTime` 컬럼을 `ALTER ... TYPE timestamptz USING ... AT TIME ZONE 'UTC'`로 옮기는 손으로 쓴 revision을 추가; `UtcDateTime.impl`도 `DateTime(timezone=True)`로 맞춰 autogenerate no-diff 유지 | `migrations/env.py`, `migrations/versions/20260820_55a24ac7a270_instants_are_timestamptz.py`, `tests/test_postgres_migrations.py` |
-| 10–13 cross-service 금지 | 단일 서비스라 위반 대상 없음. manifest가 빈 의존성을 선언하고, 규정의 감사 query가 gate | manifest |
-| 14 extraction test | **호스트 전환(post-release ops issue)의 통과 조건으로 편입** | ops issue |
+| 10–13 cross-service 금지 (FK, 공유 테이블, cross-service SQL, cross-schema transaction) | 정정된 구조(서비스당 자기 database)에서는 금지가 아니라 **구조적으로 불가능**하다 — cross-database query는 `dblink`나 `postgres_fdw`가 필요하고, 둘 다 extension인데 규정 8이 서비스 migration의 `CREATE EXTENSION`을 금지한다. manifest가 빈 의존성을 선언하고, 규정의 감사 query가 gate로 남는다 | manifest |
+| 14 extraction test | **호스트 전환(post-release ops issue)의 통과 조건으로 편입.** 서비스당 자기 database인 정정된 구조에서는 이 테스트가 더 쉬워진다 — 이미 서비스 하나 = database 하나이므로 추출이 `pg_dump` 한 번이다 | ops issue |
 
 **#14 — 부팅 경로에서 DDL 제거.** `Database.create_schema()`는 `Base.metadata.create_all`만
 호출한다. 예전에는 여기서 컬럼·인덱스 보수(`_repair_existing_tables`)까지 했는데, 이는
@@ -725,8 +740,8 @@ the cutover, a failed migration is a failed migration rather than a schema
 somebody has to reconstruct by hand.
 
 **Unpaid, and worth naming.** Placing tables by `search_path` means a missing
-`ALTER ROLE … SET search_path` sends them silently to `public` — the shared
-schema, on a shared database. The test asserts where `alembic_version` lands,
+`ALTER ROLE … SET search_path` sends them silently to `public` — the schema
+every database has by default. The test asserts where `alembic_version` lands,
 which catches it in CI; nothing catches it on a host where someone bootstrapped
 by hand. Tracked as
 [#16](https://github.com/slopindustries/yt-scrapper/issues/16), to be decided
@@ -1408,7 +1423,7 @@ first step for a fortnight for exactly the reason a README walkthrough exists to
 catch, and it passed on every laptop the whole time.
 
 **Where the work is tracked.** Milestones hold the two pieces of work large
-enough to have an order: *PostgreSQL: join the fleet's shared database*
+enough to have an order: *PostgreSQL: join the fleet's shared server*
 ([#14](https://github.com/slopindustries/yt-scrapper/issues/14),
 [#15](https://github.com/slopindustries/yt-scrapper/issues/15),
 [#16](https://github.com/slopindustries/yt-scrapper/issues/16)) and *Trends:
