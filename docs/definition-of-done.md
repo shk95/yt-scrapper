@@ -64,7 +64,7 @@ gh issue create --label blocked --label blocked/<what-is-missing> \
 - [ ] `test_no_module_outside_the_egress_package_constructs_a_transport_directly`
       passes
 
-## M2 — PostgreSQL: join the fleet's shared database (#14, #15, #16)
+## M2 — PostgreSQL: join the fleet's shared server (#14, #15, #16)
 
 - [ ] `tubedepth_runtime` is refused `CREATE TABLE tubedepth.anything (id int)`
       with a permission-denied error

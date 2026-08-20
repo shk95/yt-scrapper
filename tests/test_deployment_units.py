@@ -161,3 +161,57 @@ def test_every_option_the_unit_passes_actually_exists(name: str) -> None:
 
     for option in options:
         assert option in help_text, f"{name} passes {option}, which `tubedepth {subcommand}` lacks"
+
+
+def test_the_connection_budget_agrees_everywhere_it_is_declared() -> None:
+    """`deploy/service-manifest.yaml`, `deploy/postgres-bootstrap.sql`'s
+    `CONNECTION LIMIT`, `deploy/tubedepth-worker.service`'s
+    `TUBEDEPTH_CONCURRENCY`, and the pool-sizing comment in `database.py` all
+    have to agree, and nothing enforced that before this test — the previous
+    survivor was `database.py` still asserting numbers a budget-raise had
+    already changed everywhere else.
+
+    Parsed from the files themselves (regex, not yaml/configparser, to avoid
+    a dependency this repository does not declare directly) so a future
+    change to any one of them fails here rather than being caught by a human
+    rereading four files.
+    """
+    import re
+
+    def find(pattern: str, text: str) -> int:
+        match = re.search(pattern, text, re.MULTILINE)
+        assert match, f"pattern not found: {pattern!r}"
+        return int(match[1])
+
+    deploy = Path(__file__).parent.parent / "deploy"
+    database_py = Path(__file__).parent.parent / "src" / "tubedepth" / "database.py"
+
+    manifest_text = (deploy / "service-manifest.yaml").read_text()
+    manifest_budget = find(r"^connection_budget:\s*(\d+)", manifest_text)
+
+    bootstrap_text = (deploy / "postgres-bootstrap.sql").read_text()
+    bootstrap_limit = find(r"ALTER ROLE tubedepth_runtime CONNECTION LIMIT (\d+);", bootstrap_text)
+
+    worker_text = (deploy / "tubedepth-worker.service").read_text()
+    concurrency = find(r"^Environment=TUBEDEPTH_CONCURRENCY=(\d+)", worker_text)
+
+    database_text = database_py.read_text()
+    comment_budget = find(r"declares (\d+) as the ceiling", database_text)
+    comment_concurrency = find(r"deployed\n# default is (\d+), the AIMD controller", database_text)
+
+    assert manifest_budget == bootstrap_limit == comment_budget, (
+        "the connection budget disagrees between "
+        f"manifest ({manifest_budget}), bootstrap.sql ({bootstrap_limit}), "
+        f"and database.py's comment ({comment_budget})"
+    )
+    assert concurrency == comment_concurrency, (
+        "TUBEDEPTH_CONCURRENCY disagrees between the worker unit "
+        f"({concurrency}) and database.py's comment ({comment_concurrency})"
+    )
+
+    # docs/status.md's formula: total = 2C + 13, must fit inside the budget
+    # with the manifest's claimed margin.
+    total = 2 * concurrency + 13
+    assert total <= manifest_budget, (
+        f"2*{concurrency}+13={total} exceeds the declared budget {manifest_budget}"
+    )
