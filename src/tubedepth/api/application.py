@@ -118,6 +118,25 @@ def _describe_rejected_request(reported: Sequence[Any]) -> str:
     return "; ".join(lines) or "the request could not be understood"
 
 
+def _aware_time_bound(name: str, value: datetime | None) -> datetime | None:
+    """A `since`/`until` bound, refused at the boundary unless it carries an offset.
+
+    `?since=2026-08-21` — the most natural thing to type — parses to a *naive*
+    datetime, which FastAPI accepts and the comparison against a `UtcDateTime`
+    column then refuses deep in the driver: a ValueError that is neither a
+    `TubedepthError` nor a `RequestValidationError`, so a pure read answered
+    500 `internal_error` with a message about refusing to *store*. Guessing a
+    timezone here would be worse — a bound eight hours off silently returns
+    the wrong rows — so the only honest answer is 422, naming what to send.
+    """
+    if value is not None and value.tzinfo is None:
+        raise ValidationError(
+            f"{name} has no timezone offset — send an RFC 3339 timestamp with one, "
+            f"such as 2026-08-21T00:00:00Z"
+        )
+    return value
+
+
 class JobSubmission(BaseModel):
     kind: str
     target: str
@@ -719,6 +738,8 @@ def create_application(
         during paging, which on a table the worker is actively writing means
         showing the same job twice and missing another.
         """
+        since = _aware_time_bound("since", since)
+        until = _aware_time_bound("until", until)
         query = select(Job).order_by(Job.created_at.desc(), Job.identifier.desc())
         if state:
             query = query.where(Job.state == state)
@@ -767,6 +788,8 @@ def create_application(
         target gives one video's history — how its counts moved — which is the
         thing that table keeps and the job ledger cannot answer.
         """
+        since = _aware_time_bound("since", since)
+        until = _aware_time_bound("until", until)
         query = select(Artifact).order_by(Artifact.fetched_at.desc(), Artifact.identifier.desc())
         if kind:
             query = query.where(Artifact.kind == kind)

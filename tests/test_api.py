@@ -740,6 +740,47 @@ def test_artifacts_can_be_listed_and_filtered(api: tuple[TestClient, str, Databa
 
 
 @pytest.mark.parametrize("route", ["/v1/jobs", "/v1/artifacts"])
+@pytest.mark.parametrize("parameter", ["since", "until"])
+def test_a_time_bound_without_an_offset_is_refused_rather_than_a_500(
+    api: tuple[TestClient, str, Database], route: str, parameter: str
+) -> None:
+    """`?since=2026-08-21` — the most natural thing to type — parses to a
+    *naive* datetime, and the comparison against the stored column used to go
+    through `UtcDateTime.process_bind_param`, whose ValueError is neither a
+    `TubedepthError` nor a `RequestValidationError`. A pure read answered 500
+    `internal_error` with "refusing to store a naive datetime" — a storage
+    refusal, on a request that stores nothing, outside the documented shape.
+    """
+    client, key, _ = api
+
+    response = client.get(f"{route}?{parameter}=2026-08-21", headers={"X-API-Key": key})
+
+    assert response.status_code == 422
+    body = response.json()
+    assert body["error"]["code"] == "invalid_request"
+    assert parameter in body["error"]["message"], "the message says which value was refused"
+    assert "2026-08-21T00:00:00Z" in body["error"]["message"], (
+        "the message shows the caller what an accepted timestamp looks like"
+    )
+
+
+@pytest.mark.parametrize("route", ["/v1/jobs", "/v1/artifacts"])
+def test_a_time_bound_with_an_offset_is_accepted(
+    api: tuple[TestClient, str, Database], route: str
+) -> None:
+    """The other half of the refusal above: aware bounds keep working, any
+    offset, not just Z. `%2B` because a bare `+` in a query string is a space."""
+    client, key, _ = api
+
+    response = client.get(
+        f"{route}?since=2026-08-01T00:00:00Z&until=2026-08-21T09:00:00%2B09:00",
+        headers={"X-API-Key": key},
+    )
+
+    assert response.status_code == 200
+
+
+@pytest.mark.parametrize("route", ["/v1/jobs", "/v1/artifacts"])
 @pytest.mark.parametrize("limit", [0, -1, 100000])
 def test_a_page_size_outside_the_bounds_is_refused_rather_than_clamped(
     api: tuple[TestClient, str, Database], route: str, limit: int

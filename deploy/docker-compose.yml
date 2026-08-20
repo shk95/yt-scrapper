@@ -96,13 +96,20 @@ services:
       # when the old path is mounted instead.
       - postgres-data:/var/lib/postgresql
     healthcheck:
-      # `migrate` waits on this. The entrypoint runs a temporary local-only
-      # server during initdb, so a check that passes early would let migrate
-      # connect to a database the bootstrap has not finished creating.
+      # `migrate` waits on this, so "healthy" has to mean the real server,
+      # after the bootstrap. The entrypoint runs a temporary server during
+      # initdb with `listen_addresses=''` — it answers only the Unix socket,
+      # which is exactly what a bare `pg_isready` inside the container
+      # probes, and it answers while postgres-initdb/ may still be creating
+      # the roles. `-h 127.0.0.1` forces the probe over TCP, which the
+      # temporary server never binds; TCP appears only when the real server
+      # starts, after initdb — and so after the bootstrap — has finished.
+      # Same trap and same choice as tool/checks/test, which probes the
+      # mapped port from the host.
       test:
         [
           "CMD-SHELL",
-          "pg_isready -U ${TUBEDEPTH_LOCAL_SUPERUSER:-fleet} -d ${TUBEDEPTH_LOCAL_DATABASE:-fleet}",
+          "pg_isready -h 127.0.0.1 -U ${TUBEDEPTH_LOCAL_SUPERUSER:-fleet} -d ${TUBEDEPTH_LOCAL_DATABASE:-fleet}",
         ]
       interval: 5s
       timeout: 5s
