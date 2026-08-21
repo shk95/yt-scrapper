@@ -307,8 +307,9 @@ services:
     #
     # **This costs connections `service-db.json` does not budget for.** That
     # manifest decomposes the 32 as api 8 + worker 2C+4 + migration 1 +
-    # service_spare 7, with `workers_and_schedulers: 0` — true while the only
-    # scheduler was a systemd one-shot that lived for milliseconds. Resident,
+    # workers_and_schedulers 1 + service_spare 6 — and the 1 is the flatten
+    # timer's, not this watcher's: the manifest still assumes schedulers are
+    # one-shots that live for milliseconds. Resident,
     # this container goes through the same `_database()` as everything else, so
     # it builds a write engine (2+2) and a read engine (2+2) and keeps their
     # idle connections for the life of the container: about 2 in steady state
