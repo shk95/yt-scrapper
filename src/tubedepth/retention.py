@@ -146,7 +146,9 @@ class RetentionService:
             "If this store genuinely has no index, pass --sweep-without-an-index"
         )
 
-    def _refuse_to_sweep_disproportionately(self, total_rows: int, live: set[str]) -> None:
+    def _refuse_to_sweep_disproportionately(
+        self, surviving_rows: int, referenced: set[str]
+    ) -> None:
         """Refuse a sweep whose orphan count would dwarf the index judging it.
 
         `_refuse_to_sweep_without_an_index` only catches the **zero-row** case.
@@ -170,7 +172,7 @@ class RetentionService:
         the ratio gets — a transfer that dies after the first row leaves
         (almost) the whole store orphaned against that one row.
 
-        `orphans >= total_rows` is the threshold: orphan count reaching
+        `orphans >= surviving_rows` is the threshold: orphan count reaching
         parity with the row count. Ordinary operation needs a two-orders-of-
         magnitude spike in crash debris to reach parity (1% to 100%), so this
         does not fire on a healthy store having a bad week. A partial
@@ -179,25 +181,39 @@ class RetentionService:
         of stranded payloads is a smaller mistake to make irrecoverable — the
         threshold is deliberately tuned to catch the shape that destroys the
         most, not to catch every partial transfer regardless of size.
+
+        The comparison uses the index **as the sweep will find it**, on both
+        sides, and runs before `prune` has deleted anything (#31). The age
+        pass shrinks the denominator this proportionality test depends on:
+        judged against the pre-deletion count, 450 stranded files beside 500
+        rows of which 420 are age-expired passes parity — and the sweep then
+        runs against the 80 rows actually left, the catastrophic case in
+        person. So `surviving_rows` is what the age pass will leave, and
+        `referenced` holds every row's digest — a payload an *expiring* row
+        points at is not an orphan, it is a deletion `prune` itself is about
+        to make. Running before the deletes rather than between them and the
+        sweep also means the refusal protects the expired rows and their
+        payloads: in the partial-transfer state this exists to catch, those
+        are unmoved data too, not garbage.
         """
         if self._policy.sweep_without_an_index:
             return
         now = self._clock()
         orphans = 0
         for _kind, digest, path in self._payloads.stored_files():
-            if digest in live:
+            if digest in referenced:
                 continue
             age = now - datetime.fromtimestamp(path.stat().st_mtime, tz=UTC)
             if age >= self._policy.orphan_grace:
                 orphans += 1
-        if orphans and orphans >= max(total_rows, 1):
+        if orphans and orphans >= max(surviving_rows, 1):
             raise ConfigurationError(
-                f"refusing to sweep: {orphans} payload file(s) have no live artifact row "
-                f"against only {total_rows} row(s) in the index, which is what a partially "
-                "transferred database looks like — do not run `prune` after an interrupted "
-                "`transfer` until the target has been emptied and the transfer retried. "
-                "If this store's payloads genuinely and legitimately outnumber its index "
-                "this much, pass --sweep-without-an-index."
+                f"refusing to sweep: {orphans} payload file(s) have no artifact row at all "
+                f"against only the {surviving_rows} row(s) the index would keep after the "
+                "age pass, which is what a partially transferred database looks like — do "
+                "not run `prune` after an interrupted `transfer` until the target has been "
+                "emptied and the transfer retried. If this store's payloads genuinely and "
+                "legitimately outnumber its index this much, pass --sweep-without-an-index."
             )
 
     def prune(self) -> RetentionOutcome:
@@ -222,6 +238,17 @@ class RetentionService:
             # than that is not kept.
             live: set[str] = {a.digest for a in artifacts if a.fetched_at >= cutoff}
             expiring = [a for a in artifacts if a.fetched_at < cutoff]
+
+            # Before anything is deleted, because after is too late twice
+            # over (#31): the age deletes shrink the very row count the
+            # proportionality test divides by, and in the partial-transfer
+            # state this refuses, the expired rows and their payloads are
+            # unmoved data rather than garbage. Raising here rolls the
+            # session back with nothing in it.
+            self._refuse_to_sweep_disproportionately(
+                total_rows - len(expiring), {a.digest for a in artifacts}
+            )
+
             for artifact in expiring:
                 session.delete(artifact)
                 removed += 1
@@ -239,10 +266,23 @@ class RetentionService:
             #
             # Deduplicated because two expiring rows can share a blob too, and
             # the second unlink of one file is an error rather than a no-op.
-            for kind, digest in {(a.kind, a.digest) for a in expiring if a.digest not in live}:
-                self._payloads.delete(kind, digest)
+            #
+            # Collected here, while the instances are still attached — but
+            # not unlinked here (#32): these files must outlive the row
+            # DELETEs' commit, which happens on leaving this block.
+            doomed = {(a.kind, a.digest) for a in expiring if a.digest not in live}
 
-        self._refuse_to_sweep_disproportionately(total_rows, live)
+        # Only after the commit above has made the row DELETEs durable are
+        # the files unlinked. The other order — files gone, DELETEs still
+        # pending — meant one failed commit (a network blip to the remote
+        # PostgreSQL, a serialization error) rolled the rows back pointing
+        # at payloads that no longer existed, the exact state the payload-
+        # before-row write order forbids. This way the same failure leaves
+        # rows and files both intact, and a crash between the commit and
+        # this loop leaves orphan files, which the next sweep collects.
+        for kind, digest in doomed:
+            self._payloads.delete(kind, digest)
+
         orphans, total = self._sweep_orphans(live)
         over = total > self._policy.maximum_bytes
         if over:

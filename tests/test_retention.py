@@ -8,6 +8,7 @@ reported rather than quietly absorbed.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import random
@@ -15,6 +16,7 @@ from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
+from sqlalchemy.orm import Session
 
 from tubedepth.database import Database
 from tubedepth.errors import ConfigurationError
@@ -403,3 +405,101 @@ def test_the_disproportionate_refusal_is_overridable(
 
     assert outcome.orphans_removed == 1
     assert payloads.path_for("video.metadata", stranded.digest) is None
+
+
+def test_a_failed_commit_leaves_no_row_pointing_at_a_deleted_payload(
+    tmp_path: Path,
+    database: Database,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The row DELETEs must be durable before any payload file is unlinked.
+
+    `Database.session()` commits on context exit, and a commit to a remote
+    PostgreSQL can fail — a network blip, a serialization error. If the files
+    were unlinked inside that still-open transaction, the rollback brings the
+    expired rows back pointing at payloads that no longer exist, the exact
+    state the module's write order ('a crash leaves an orphan rather than a
+    row pointing at nothing') exists to forbid. Committing first means the
+    same failure leaves rows *and* files untouched, and a crash after the
+    commit leaves orphan files, which the next sweep collects.
+    """
+    clock = FakeClock()
+    database, payloads, service = build(
+        tmp_path, database, RetentionPolicy(maximum_age=timedelta(days=30)), clock
+    )
+    digest = store(database, payloads, clock, b'{"expired": true}', "old")
+    clock.advance(timedelta(days=31))
+
+    real_commit = Session.commit
+
+    def commit_that_fails_on_row_deletion(self: Session) -> None:
+        # Only the commit carrying the row DELETEs fails; the setup and
+        # verification sessions above and below commit nothing but reads
+        # and inserts and must keep working.
+        if self.deleted:
+            raise RuntimeError("simulated commit failure: the connection to PostgreSQL blipped")
+        real_commit(self)
+
+    monkeypatch.setattr(Session, "commit", commit_that_fails_on_row_deletion)
+
+    with pytest.raises(RuntimeError, match="simulated commit failure"):
+        service.prune()
+
+    assert payloads.path_for("video.metadata", digest) is not None, (
+        "the payload was unlinked before the row DELETEs were durable — "
+        "the rolled-back rows now point at nothing"
+    )
+    with database.session() as session:
+        assert session.query(Artifact).count() == 1
+
+
+def test_the_disproportion_guard_judges_the_rows_that_survive_the_age_pass(
+    tmp_path: Path,
+    database: Database,
+) -> None:
+    """The guard must see the index as the sweep will find it, not as it was.
+
+    Issue #31's scenario: a partially interrupted transfer leaves 500 artifact
+    rows — 420 of them past `maximum_age` — beside 450 stranded payload files.
+    Judged against the pre-deletion count, 450 orphans against 500 rows passes
+    the parity threshold; judged against the 80 rows the age pass leaves, it
+    is the catastrophic shape the guard's docstring promises to refuse. The
+    age deletes shrink the denominator the proportionality test depends on,
+    so the decision has to be made on the post-age-pass count — and before
+    anything is deleted, because in this state the 420 expired rows and their
+    payloads are also data an interrupted transfer has not finished moving.
+    """
+    clock = FakeClock(datetime.now(UTC))
+    database, payloads, service = build(
+        tmp_path, database, RetentionPolicy(maximum_age=timedelta(days=30)), clock
+    )
+    with database.session() as session:
+        for index in range(500):
+            fetched = clock() - (timedelta(days=40) if index < 420 else timedelta(hours=1))
+            session.add(
+                Artifact(
+                    kind="video.metadata",
+                    target=f"video{index:06d}",
+                    fingerprint=f"fp-{index:06d}",
+                    digest=hashlib.sha256(f"row-{index}".encode()).hexdigest(),
+                    byte_count=100,
+                    fetched_at=fetched,
+                    fresh_until=fetched + timedelta(hours=6),
+                )
+            )
+    for index in range(450):
+        stranded = payloads.put("video.metadata", json.dumps({"stranded": index}).encode())
+        _age(stranded.path, timedelta(hours=2))
+
+    with pytest.raises(ConfigurationError) as refusal:
+        service.prune()
+
+    assert "450" in str(refusal.value)
+    assert "80" in str(refusal.value)
+    assert "prune" in str(refusal.value)
+    # Refused before anything irreversible: the age pass did not run either,
+    # because deleting a month of rows and payloads out of a store in this
+    # state is destruction of its own.
+    with database.session() as session:
+        assert session.query(Artifact).count() == 500
+    assert sum(1 for _ in payloads.stored_files()) == 450
