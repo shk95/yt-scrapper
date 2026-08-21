@@ -1230,6 +1230,95 @@ def test_an_observation_whose_version_is_unrecorded_is_not_claimed_to_be_fine(
     assert "backfill-schema-versions" in response.json()["error"]["message"]
 
 
+class RetractedSource:
+    """`channel.about`'s story in miniature: v1 withdrawn, v2 current."""
+
+    kind = "channel.retracted"
+    target_type = TargetType.CHANNEL
+    lane = Lane.YOUTUBE
+    cost = SourceCost.CHEAP
+    schema_version = "2"
+    retracted_versions = frozenset({"1"})
+    payload_model: type[BaseModel] = EchoPayload
+    default_freshness = timedelta(hours=6)
+
+    def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
+        return EchoPayload(target=target)
+
+
+def _succeeded_job(database: Database, *, kind: str, digest: str) -> str:
+    """One finished job row, pointing at stored bytes, as the worker leaves it."""
+    with database.session() as session:
+        job = Job(kind=kind, target="dQw4w9WgXcQ", state=JobState.SUCCEEDED, payload_digest=digest)
+        session.add(job)
+        session.flush()
+        return job.identifier
+
+
+def _api_with_retracted_source(tmp_path: Path, database: Database) -> tuple[TestClient, str]:
+    registry = SourceRegistry()
+    registry.register(RetractedSource())  # type: ignore[arg-type]
+    client = TestClient(
+        create_application(
+            database=database, payloads=PayloadStore(tmp_path / "payloads"), registry=registry
+        )
+    )
+    return client, ApiKeyService(database).mint(label="test").secret
+
+
+def test_a_retracted_observation_is_gone_through_the_job_route_too(
+    tmp_path: Path, database: Database
+) -> None:
+    """The same bytes, two doors (#34).
+
+    The retraction gate was built into `GET /v1/artifacts/{digest}` and only
+    there, so a client that kept its job_id and polled `/result` was served
+    the identical withdrawn payload with a 200 — the mechanism protected only
+    readers who happened to arrive holding a digest.
+    """
+    client, key = _api_with_retracted_source(tmp_path, database)
+    digest = _stored_artifact(tmp_path, database, kind="channel.retracted", version="1")
+    job_id = _succeeded_job(database, kind="channel.retracted", digest=digest)
+
+    through_artifact = client.get(f"/v1/artifacts/{digest}", headers={"X-API-Key": key})
+    through_job = client.get(f"/v1/jobs/{job_id}/result", headers={"X-API-Key": key})
+
+    assert through_artifact.status_code == 410
+    assert through_job.status_code == 410, (
+        "the artifact route refuses these bytes as retracted; the job route served them"
+    )
+    body = through_job.json()
+    assert body["error"]["code"] == "retracted"
+    assert job_id in body["error"]["message"], (
+        "the refusal should speak in terms of the id this caller actually holds"
+    )
+
+
+def test_an_unattributed_result_is_refused_on_both_routes(
+    tmp_path: Path, database: Database
+) -> None:
+    """The NULL backstop, through the job door (#34).
+
+    409 rather than 410 for the same reason as the artifact route: nothing is
+    claimed to *be* retracted, only that the question cannot be answered until
+    the backfill records which version collected these bytes.
+    """
+    client, key = _api_with_retracted_source(tmp_path, database)
+    digest = _stored_artifact(tmp_path, database, kind="channel.retracted", version=None)
+    job_id = _succeeded_job(database, kind="channel.retracted", digest=digest)
+
+    through_artifact = client.get(f"/v1/artifacts/{digest}", headers={"X-API-Key": key})
+    through_job = client.get(f"/v1/jobs/{job_id}/result", headers={"X-API-Key": key})
+
+    assert through_artifact.status_code == 409
+    assert through_job.status_code == 409, (
+        "an unattributed payload was served through the job route as though known good"
+    )
+    body = through_job.json()
+    assert body["error"]["code"] == "conflict"
+    assert "backfill-schema-versions" in body["error"]["message"]
+
+
 def test_a_shared_digest_says_how_many_observations_it_covers(
     api: tuple[TestClient, str, Database], tmp_path: Path
 ) -> None:

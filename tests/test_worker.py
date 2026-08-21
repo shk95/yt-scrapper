@@ -1066,6 +1066,106 @@ def test_a_stop_during_the_wait_is_not_made_to_wait_it_out(
     assert elapsed < 5.0, f"a 30s poll made a stop take {elapsed:.1f}s"
 
 
+def test_a_stop_mid_drain_ends_the_drain_after_the_job_in_flight(
+    tmp_path: Path, database: Database
+) -> None:
+    """The stop event has to bite *inside* a drain, not only between drains (#35).
+
+    `serve` checks the stop event between drains, but a drain over a deep
+    queue — a watch fan-out, a 500-target batch — can run for hours. The
+    stop handler's own log line promises "stopping after the current pass",
+    and an operator's `systemctl stop` during a backlog otherwise becomes a
+    guaranteed SIGKILL at `TimeoutStopSec`: the drain keeps claiming brand
+    new jobs until the queue is empty.
+
+    The source sets the stop event from inside the first job, which is the
+    deterministic version of a signal landing mid-drain. The drain must
+    finish that in-flight job and claim nothing more.
+    """
+    stop = threading.Event()
+
+    class StopsItself(EchoSource):
+        kind = "video.stops"
+
+        def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
+            stop.set()
+            return super().collect(target, egress, runtime)
+
+    source = StopsItself()
+    worker = Worker(
+        database=database,
+        registry=_registry(source),
+        payloads=PayloadStore(tmp_path / "payloads"),
+        name="worker-1",
+        concurrency=1,
+    )
+    for index in range(4):
+        enqueue(database, "video.stops", f"video{index:06d}")
+
+    completed = worker.serve(poll=30.0, stop=stop)
+
+    assert completed == 1, f"the stop was ignored for the rest of the drain: {completed} ran"
+    with database.session() as session:
+        assert session.query(Job).filter(Job.state == JobState.QUEUED).count() == 3
+
+
+def test_a_stop_mid_drain_is_honoured_by_every_pump_thread(
+    tmp_path: Path, database: Database, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The concurrent drain's pump loops must also stop claiming on the event.
+
+    Four pump threads each hold one job in flight when the stop lands — the
+    barrier is what makes "mid-drain, all threads busy" a fact rather than a
+    hope. Every thread must finish the job it already has and then claim
+    nothing, leaving the second half of the queue where it is. In-flight
+    work finishing (rather than being abandoned) is half of the promise;
+    "exits after in-flight jobs only" is the other half.
+
+    The controller's AIMD window starts at 1 and would keep three of the
+    four threads out of `collect` forever while the first waits at the
+    barrier, so `acquire` is bypassed — this test is about the pump loop,
+    not the window. The health services are stubbed for the same reason as
+    the claim-lock race test above: four completions forced onto the same
+    instant collide on their get-or-create, which is not the race under
+    test here either.
+    """
+    from unittest.mock import Mock
+
+    stop = threading.Event()
+    barrier = threading.Barrier(4, timeout=5)
+
+    class StopsTogether(EchoSource):
+        kind = "video.stops"
+        cost = SourceCost.CHEAP  # share 1.0, so all four threads may hold one
+
+        def collect(self, target: str, egress: Egress, runtime: YtdlpRuntime) -> EchoPayload:
+            barrier.wait()
+            stop.set()
+            return super().collect(target, egress, runtime)
+
+    source = StopsTogether()
+    worker = Worker(
+        database=database,
+        registry=_registry(source),
+        payloads=PayloadStore(tmp_path / "payloads"),
+        name="worker-1",
+        concurrency=4,
+    )
+    monkeypatch.setattr(RateController, "acquire", lambda self, egress, lane: True)
+    monkeypatch.setattr(worker, "_health", Mock())
+    monkeypatch.setattr(worker, "_lanes", Mock())
+    for index in range(8):
+        enqueue(database, "video.stops", f"video{index:06d}")
+
+    completed = worker.serve(poll=30.0, stop=stop)
+
+    assert completed == 4, (
+        f"a stop with four jobs in flight should finish exactly those four: {completed} ran"
+    )
+    with database.session() as session:
+        assert session.query(Job).filter(Job.state == JobState.QUEUED).count() == 4
+
+
 def test_a_drain_that_did_work_goes_straight_round_again(
     tmp_path: Path, database: Database
 ) -> None:

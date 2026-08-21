@@ -20,7 +20,7 @@ from sqlalchemy.orm import Session
 from . import __version__
 from .api.application import create_application
 from .collection import CollectionService
-from .database import _MAX_OVERFLOW, _POOL_SIZE, Database
+from .database import _MAX_OVERFLOW, _POOL_SIZE, Database, masked_url
 from .egress.control import RateController
 from .egress.transport import DirectEgress
 from .errors import ConfigurationError, TubedepthError, ValidationError
@@ -39,7 +39,7 @@ from .sources import default_registry
 from .sources.innertube_sources import RECORDABLE_SURFACES, record_surface
 from .sources.registry import SourceRegistry, attempts_for
 from .sources.ytdlp_runtime import LibraryYtdlpRuntime
-from .transfer import mapped_models, transfer
+from .transfer import mapped_models, transfer, verify_source_schema
 from .watchlist import read_watchlist
 from .worker import Worker
 
@@ -130,7 +130,11 @@ def collect(
 
 
 def _database(
-    data_directory: Path, *, pool_size: int = _POOL_SIZE, max_overflow: int = _MAX_OVERFLOW
+    data_directory: Path,
+    *,
+    pool_size: int = _POOL_SIZE,
+    max_overflow: int = _MAX_OVERFLOW,
+    allow_sqlite_source: bool = False,
 ) -> Database:
     """Open the database every CLI entry point uses.
 
@@ -155,14 +159,28 @@ def _database(
     contributes to that URL at all (there is no SQLite fallback under it to
     contribute, since the cutover, #15); it is created here only because most
     callers of `_database()` also open the payload store under the same path.
+
+    `allow_sqlite_source` exists for exactly one caller: `migrate`'s
+    post-upgrade attribution count, so that migrating an old SQLite file
+    forward — the remedy `tubedepth transfer`'s preflight names (#33) —
+    succeeds end to end instead of printing `✓` and then exiting non-zero
+    from its own follow-up query. Nothing that *runs* the service passes it;
+    the PostgreSQL-only refusal in `Database` stands for every other command.
     """
     data_directory.mkdir(parents=True, exist_ok=True)
     url = database_url()
-    database = Database(url, pool_size=pool_size, max_overflow=max_overflow)
+    database = Database(
+        url,
+        allow_sqlite_source=allow_sqlite_source,
+        pool_size=pool_size,
+        max_overflow=max_overflow,
+    )
     database.verify_placement()
     if not database.is_migrated():
+        # The URL is printed masked (#30): this message reaches terminals and
+        # unit logs for every command, and the credential in it can issue DDL.
         raise ConfigurationError(
-            f"no schema at {url} — run: tubedepth migrate --data-dir {data_directory}"
+            f"no schema at {masked_url(url)} — run: tubedepth migrate --data-dir {data_directory}"
         )
     return database
 
@@ -629,12 +647,15 @@ def migrate(
     previous_url = os.environ.get("TUBEDEPTH_DATABASE_URL")
     os.environ["TUBEDEPTH_DATABASE_URL"] = url
     try:
+        # Echoed masked (#30): these lines land in shell scrollback, journalctl
+        # and `docker compose logs`, and the migrator credential in this URL is
+        # the one that can issue DDL.
         if stamp:
             command.stamp(configuration, "head")
-            typer.echo(f"✓ stamped {url} at the current revision")
+            typer.echo(f"✓ stamped {masked_url(url)} at the current revision")
             return
         command.upgrade(configuration, "head")
-        typer.echo(f"✓ {url} is at the current schema")
+        typer.echo(f"✓ {masked_url(url)} is at the current schema")
     finally:
         if previous_url is None:
             os.environ.pop("TUBEDEPTH_DATABASE_URL", None)
@@ -645,7 +666,15 @@ def migrate(
     # this one closes: attribution works by recomputing fingerprints against
     # the versions a kind has had, and retention ages out the rows it would
     # attribute. Say so here, where someone is already standing.
-    database = _database(data_directory)
+    #
+    # `allow_sqlite_source=True` because `migrate` is the escape hatch
+    # `transfer`'s preflight names (#33): bringing a pre-cutover SQLite file
+    # forward is exactly what makes it transferable, and this count used to
+    # construct `Database()` without the flag — so the upgrade succeeded,
+    # printed its `✓`, and the command still exited non-zero. The flag is
+    # inert on PostgreSQL, and every command that runs the service still
+    # opens `_database()` without it.
+    database = _database(data_directory, allow_sqlite_source=True)
     with database.session(readonly=True) as session:
         # tubedepth migrate runs under the migrator credential in a real
         # deployment — the same one env.py just did SET ROLE tubedepth_owner
@@ -735,6 +764,11 @@ def transfer_command(
     # refusal that would tell an operator the URL is pointed at the wrong
     # place before they trust what it reports.
     source.verify_placement()
+    # `transfer()` runs this preflight itself, but `--dry-run` returns before
+    # ever calling it — and a pre-cutover source used to crash the rehearsal
+    # with the very `no such column` the real run would die on (#33), instead
+    # of the refusal naming the gap and the remedy.
+    verify_source_schema(source)
 
     if dry_run:
         models = mapped_models()
@@ -747,7 +781,8 @@ def transfer_command(
     target = Database(target_url)
     target.verify_placement()
     if not target.is_migrated():
-        raise ConfigurationError(f"no schema at {target_url} — run: tubedepth migrate")
+        # Masked (#30): in a real cutover `--to` carries the runtime credential.
+        raise ConfigurationError(f"no schema at {masked_url(target_url)} — run: tubedepth migrate")
 
     outcome = transfer(source=source, target=target)
     for table_name, count in outcome.rows.items():

@@ -24,7 +24,7 @@ import httpx
 import pytest
 
 from tubedepth.egress.transport import DirectEgress
-from tubedepth.errors import ConfigurationError, RateLimitedError, UpstreamError
+from tubedepth.errors import ConfigurationError, ExtractionError, RateLimitedError, UpstreamError
 from tubedepth.identifiers import TargetType, normalize_target
 from tubedepth.sources.trending import TrendingVideosSource
 
@@ -51,6 +51,32 @@ class FakeEgress(DirectEgress):
 
     def http_client(self) -> httpx.Client:  # type: ignore[override]
         return httpx.Client(transport=self._transport)
+
+
+class PagedTransport:
+    """Answers requests from a list of page bodies, and refuses to run away.
+
+    The last page is repeated for any request past the end — which is exactly
+    what a pagination bug does to the real API — and the cap turns an infinite
+    loop into a test failure instead of a hang.
+    """
+
+    def __init__(self, pages: list[dict[str, Any]], cap: int = 6) -> None:
+        self.pages = pages
+        self.cap = cap
+        self.calls = 0
+
+    def __call__(self, request: httpx.Request) -> httpx.Response:
+        self.calls += 1
+        if self.calls > self.cap:
+            raise AssertionError(f"pagination did not terminate within {self.cap} requests")
+        body = self.pages[min(self.calls - 1, len(self.pages) - 1)]
+        return httpx.Response(200, json=body)
+
+
+def paged(pages: list[dict[str, Any]], cap: int = 6) -> tuple[FakeEgress, PagedTransport]:
+    handler = PagedTransport(pages, cap)
+    return FakeEgress(httpx.MockTransport(handler)), handler
 
 
 def test_a_region_code_is_normalised_to_the_shape_the_api_wants() -> None:
@@ -147,3 +173,76 @@ def test_a_key_the_api_refuses_is_a_setting_and_not_a_route_in_trouble(
 
     assert not issubclass(ConfigurationError, RateLimitedError)
     assert not issubclass(ConfigurationError, UpstreamError)
+
+
+def test_a_second_page_is_fetched_when_the_first_has_a_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The ordinary two-page walk, pinned so the loop guards below cannot be
+    satisfied by simply refusing to paginate at all."""
+    monkeypatch.setenv("TUBEDEPTH_DATA_API_KEY", "test-key")
+    egress, handler = paged(
+        [
+            {"items": [{"id": "v1"}, {"id": "v2"}], "nextPageToken": "PAGE-2"},
+            {"items": [{"id": "v3"}]},
+        ]
+    )
+
+    listing = TrendingVideosSource().collect("KR", egress, runtime=None)  # type: ignore[arg-type]
+
+    assert [video.video_id for video in listing.videos] == ["v1", "v2", "v3"]
+    assert handler.calls == 2
+
+
+def test_an_empty_page_with_a_token_is_the_end_of_the_chart(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`items: []` with a truthy `nextPageToken` must end the walk with what
+    was collected — the chart legitimately runs short of the limit — rather
+    than following the token forever at one quota unit per lap."""
+    monkeypatch.setenv("TUBEDEPTH_DATA_API_KEY", "test-key")
+    egress, handler = paged(
+        [
+            {"items": [{"id": "v1"}, {"id": "v2"}], "nextPageToken": "PAGE-2"},
+            {"items": [], "nextPageToken": "PAGE-3"},
+        ]
+    )
+
+    listing = TrendingVideosSource().collect("KR", egress, runtime=None)  # type: ignore[arg-type]
+
+    assert [video.video_id for video in listing.videos] == ["v1", "v2"]
+    assert handler.calls == 2
+
+
+def test_a_next_page_token_that_repeats_ends_the_walk(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A token already followed cannot be followed again: pages that keep
+    echoing the same token would otherwise be fetched until the limit filled
+    with duplicates."""
+    monkeypatch.setenv("TUBEDEPTH_DATA_API_KEY", "test-key")
+    egress, handler = paged(
+        [
+            {"items": [{"id": "v1"}], "nextPageToken": "SAME"},
+            {"items": [{"id": "v2"}], "nextPageToken": "SAME"},
+        ]
+    )
+
+    listing = TrendingVideosSource().collect("KR", egress, runtime=None)  # type: ignore[arg-type]
+
+    assert [video.video_id for video in listing.videos] == ["v1", "v2"]
+    assert handler.calls == 2
+
+
+def test_a_page_with_a_token_but_no_items_list_is_a_parser_mismatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ending the chart early is only allowed for a page that *says* it is
+    empty (`items: []`). A body carrying a `nextPageToken` and no `items` list
+    at all is a response the parser no longer understands, and turning it into
+    a silent short listing is how a broken scraper stays deployed for weeks."""
+    monkeypatch.setenv("TUBEDEPTH_DATA_API_KEY", "test-key")
+    egress, _ = paged([{"nextPageToken": "PAGE-2"}])
+
+    with pytest.raises(ExtractionError):
+        TrendingVideosSource().collect("KR", egress, runtime=None)  # type: ignore[arg-type]

@@ -52,7 +52,7 @@ from ..payload_store import PayloadStore
 from ..repositories import JobRepository, JobState
 from ..services.keys import ApiKeyService, VerifiedKey
 from ..sources import SourceRegistry, default_registry
-from ..sources.registry import attempts_for, retracted_versions_of
+from ..sources.registry import DataSource, attempts_for, retracted_versions_of
 
 logger = logging.getLogger(__name__)
 
@@ -373,6 +373,56 @@ def _job_view(job: Job) -> JobView:
         created_at=job.created_at,
         finished_at=job.finished_at,
     )
+
+
+def _current_source(registry: SourceRegistry, kind: str) -> DataSource | None:
+    """The source behind a kind, or None for a retired kind.
+
+    A retired kind keeps its history: it has no source to ask, so nothing is
+    retracted and nothing is claimed about the current shape.
+    """
+    try:
+        return registry.get(kind)
+    except TubedepthError:
+        return None
+
+
+def _refuse_withdrawn_payload(
+    source: DataSource | None,
+    kind: str,
+    schema_version: str | None,
+    *,
+    subject: str,
+    remedy: str,
+) -> None:
+    """The retraction gate, shared by every route that hands stored bytes out.
+
+    It first lived inline in `GET /v1/artifacts/{digest}`, and the identical
+    bytes walked out through `GET /v1/jobs/{job_id}/result` with a 200 (#34) —
+    a retraction that refuses only one of two doors protects only the readers
+    who happen to arrive holding a digest.
+
+    `subject` names the payload in the terms the caller is actually holding —
+    a digest on the artifact route, a job id on the result route — and
+    `remedy` finishes the 409 from the same standpoint.
+    """
+    retracted = retracted_versions_of(source) if source is not None else frozenset()
+    if retracted and schema_version is None:
+        # Not "fine", "not known". A kind that has withdrawn a version has
+        # rows that predate the column holding NULL, and reading NULL as safe
+        # is how a known-bad observation gets served with a 200 — the exact
+        # thing the withdrawal exists to refuse. 409 rather than 410, because
+        # we are not claiming it *is* retracted: we are saying the question
+        # cannot be answered until something answers it.
+        raise ConflictError(
+            f"the schema version of {subject} was never recorded, and {kind} has "
+            f"withdrawn a version — {remedy}"
+        )
+    if schema_version in retracted:
+        raise RetractedError(
+            f"{subject} was collected by schema version {schema_version}, which is "
+            "retracted: its payloads are wrong rather than merely old"
+        )
 
 
 def get_database(request: Request) -> Database:
@@ -857,31 +907,14 @@ def create_application(
         if artifact is None:
             raise NotFoundError(f"no artifact stored with digest: {digest}")
 
-        # A retired kind keeps its history: it has no source to ask, so nothing
-        # is retracted and nothing is claimed about the current shape.
-        try:
-            source = registry.get(artifact.kind)
-        except TubedepthError:
-            source = None
-
-        retracted = retracted_versions_of(source) if source is not None else frozenset()
-        if retracted and artifact.schema_version is None:
-            # Not "fine", "not known". A kind that has withdrawn a version has
-            # rows that predate the column holding NULL, and reading NULL as
-            # safe is how a known-bad observation gets served with a 200 — the
-            # exact thing the withdrawal exists to refuse. 409 rather than 410,
-            # because we are not claiming it *is* retracted: we are saying the
-            # question cannot be answered until something answers it.
-            raise ConflictError(
-                f"the schema version of {digest} was never recorded, and {artifact.kind} has "
-                "withdrawn a version — run `tubedepth backfill-schema-versions` and ask again"
-            )
-        if artifact.schema_version in retracted:
-            raise RetractedError(
-                f"the {artifact.kind} observation at {digest} was collected by "
-                f"schema version {artifact.schema_version}, which is retracted: its payloads "
-                "are wrong rather than merely old"
-            )
+        source = _current_source(registry, artifact.kind)
+        _refuse_withdrawn_payload(
+            source,
+            artifact.kind,
+            artifact.schema_version,
+            subject=f"the {artifact.kind} observation at {digest}",
+            remedy="run `tubedepth backfill-schema-versions` and ask again",
+        )
 
         try:
             body = json.loads(payloads.read(artifact.digest))
@@ -947,6 +980,7 @@ def create_application(
         job_id: str,
         open_session: Annotated[Session, Depends(get_reading_session)],
         payloads: Annotated[PayloadStore, Depends(get_payloads)],
+        registry: Annotated[SourceRegistry, Depends(get_registry)],
     ) -> PlainTextResponse:
         job = open_session.get(Job, job_id)
         if job is None:
@@ -970,6 +1004,27 @@ def create_application(
                 f"the result of {job_id} is no longer stored: it was collected and has "
                 "since aged out of retention"
             ) from error
+
+        # The bytes the artifact route refuses must not walk out through this
+        # door (#34). The job row does not carry the schema version; the
+        # artifact row behind the digest does, so resolve it the way that
+        # route does. After the read on purpose: a result that aged out of
+        # retention keeps its honest 404 rather than gaining a complaint
+        # about attributing bytes that are no longer here — and a digest
+        # whose artifact rows are gone while its bytes remain reads as
+        # version "not known", which is what it is.
+        observed = open_session.scalars(
+            select(Artifact)
+            .where(Artifact.digest == job.payload_digest, Artifact.kind == job.kind)
+            .order_by(Artifact.fetched_at.desc())
+        ).first()
+        _refuse_withdrawn_payload(
+            _current_source(registry, job.kind),
+            job.kind,
+            observed.schema_version if observed is not None else None,
+            subject=f"the result of job {job_id}",
+            remedy="run `tubedepth backfill-schema-versions` and ask this job again",
+        )
         return PlainTextResponse(body, media_type="application/json")
 
     application.include_router(versioned)

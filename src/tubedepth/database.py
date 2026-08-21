@@ -52,6 +52,19 @@ _POOL_SIZE = 2
 _MAX_OVERFLOW = 2
 
 
+def masked_url(url: str) -> str:
+    """The URL with its password rendered as `***`, for anything user-facing.
+
+    Every message that names a database URL goes through here (#30): the raw
+    value carries a credential, and the places these messages land — shell
+    scrollback, journalctl, `docker compose logs` — are all places nothing
+    expects to find one. The migrator credential, the one `tubedepth migrate`
+    prints on success, is the one that can issue DDL, which is what made this
+    a production finding rather than a nicety.
+    """
+    return make_url(url).render_as_string(hide_password=True)
+
+
 def _write_pool_kwargs(dialect: str, *, pool_size: int, max_overflow: int) -> dict[str, int]:
     return {"pool_size": pool_size, "max_overflow": max_overflow} if dialect == "postgresql" else {}
 
@@ -67,13 +80,13 @@ class Database:
     See `transfer.py` and `docs/status.md` for why the source stays SQLite
     while nothing else does.
 
-    `JobRepository.claim` is a guarded UPDATE (`state == QUEUED` in the WHERE
-    clause) with a rowcount check, which is correct under READ COMMITTED with
-    no lock escalated up front: two workers can both SELECT the same
-    candidate, but only one UPDATE matches a still-QUEUED row — the other
-    affects zero rows and returns None. That is the entire safety mechanism;
-    nothing here escalates a lock ahead of it the way SQLite's BEGIN IMMEDIATE
-    used to.
+    `JobRepository.claim` selects its candidate with `FOR UPDATE SKIP LOCKED`
+    (#37), so two workers never contend for one row — a locked candidate is
+    skipped and the next claimable one taken, rather than the loser reading a
+    false "queue empty" out of a zero-row UPDATE. The guarded UPDATE
+    (`state == QUEUED` in the WHERE clause) with its rowcount check stays
+    underneath as defence in depth; nothing here escalates a lock ahead of
+    the claim the way SQLite's BEGIN IMMEDIATE used to.
     """
 
     SCHEMA = "tubedepth"
@@ -243,6 +256,43 @@ class Database:
         if self.dialect == "postgresql":
             return inspect(self._engine).has_table("jobs", schema=self.SCHEMA)
         return inspect(self._engine).has_table("jobs")
+
+    @property
+    def masked_url(self) -> str:
+        """The URL this opened, with its password masked — the only form this
+        class hands back, so a caller formatting a message cannot reach the
+        secret by accident (#30)."""
+        return masked_url(self._url)
+
+    def schema_gaps(self) -> list[str]:
+        """What the current models expect that this database does not have.
+
+        Missing tables by name, missing columns as `table.column`, in the
+        models' dependency order. Reflection only, no DDL — the same rule as
+        `is_migrated()`. Empty means every mapped column is readable here.
+
+        This exists for `tubedepth transfer`'s preflight (#33): the transfer
+        reads the source through the *current* models, so a source written by
+        a previous release dies mid-copy with `no such column: jobs.refresh`
+        unless someone asks this question first. `is_migrated()` cannot ask it
+        — it checks one table's existence, which a pre-cutover file passes.
+        """
+        schema = self.SCHEMA if self.dialect == "postgresql" else None
+        inspector = inspect(self._engine)
+        gaps: list[str] = []
+        for table in Base.metadata.sorted_tables:
+            if not inspector.has_table(table.name, schema=schema):
+                gaps.append(table.name)
+                continue
+            present = {
+                column["name"] for column in inspector.get_columns(table.name, schema=schema)
+            }
+            gaps.extend(
+                f"{table.name}.{column.name}"
+                for column in table.columns
+                if column.name not in present
+            )
+        return gaps
 
     @contextmanager
     def session(self, *, readonly: bool = False) -> Iterator[Session]:
