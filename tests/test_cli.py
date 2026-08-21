@@ -1019,3 +1019,12 @@ class TestFlatten:
 
         assert second.exit_code == 0, second.output
         assert "flattened 0 of 0 artifact(s)" in second.output
+
+    def test_a_batch_or_limit_below_one_is_refused(self, tmp_path: Path) -> None:
+        # Both used to be accepted and both reported a clean pass having done
+        # nothing at all — the one failure an operator cannot see.
+        for option in ("--batch", "--limit"):
+            result = runner.invoke(
+                application, ["flatten", "--data-dir", str(tmp_path), option, "0"]
+            )
+            assert result.exit_code != 0, f"{option} 0 was accepted: {result.output}"

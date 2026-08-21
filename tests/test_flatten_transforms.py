@@ -12,6 +12,10 @@ from datetime import UTC, datetime
 import pytest
 
 from tubedepth.flatten import (
+    COMMENT_ID_LIMIT,
+    COUNTRY_LIMIT,
+    IDENTIFIER_LIMIT,
+    LANGUAGE_LIMIT,
     FlattenError,
     Observation,
     channel_snapshot_row,
@@ -187,3 +191,79 @@ class TestTranscriptRow:
     def test_a_transcript_without_a_language_is_refused(self) -> None:
         with pytest.raises(FlattenError):
             transcript_row(observed("video.transcript", "abc123"), {"full_text": "말"})
+
+
+class TestColumnBounds:
+    """A field longer than its column is refused here, not by PostgreSQL.
+
+    The flattened tables' identifier columns are bounded strings. A payload
+    field that overruns one reaches the database as a `DataError` that aborts
+    the whole batch — which, before the savepoint below it, stalled the walk
+    on that artifact for ever. Refusing in the transform makes it one counted
+    per-artifact error instead, on the path every other bad payload takes.
+    """
+
+    def test_an_oversize_video_id_is_refused(self) -> None:
+        with pytest.raises(FlattenError, match="video_id"):
+            video_snapshot_row(
+                observed("video.metadata", "abc123"),
+                {"video_id": "v" * (IDENTIFIER_LIMIT + 1), "title": "A title"},
+            )
+
+    def test_an_oversize_channel_id_is_refused(self) -> None:
+        with pytest.raises(FlattenError, match="channel_id"):
+            video_snapshot_row(
+                observed("video.metadata", "abc123"),
+                {
+                    "video_id": "abc123",
+                    "title": "A title",
+                    "channel_id": "U" * (IDENTIFIER_LIMIT + 1),
+                },
+            )
+
+    def test_a_long_title_is_not_refused(self) -> None:
+        # `title` is Text, not a bounded column: length is only refused where
+        # the column actually refuses it.
+        row = video_snapshot_row(
+            observed("video.metadata", "abc123"),
+            {"video_id": "abc123", "title": "t" * 10_000},
+        )
+        assert len(row["title"]) == 10_000
+
+    def test_an_oversize_listing_video_id_is_refused(self) -> None:
+        with pytest.raises(FlattenError, match="video_id"):
+            listing_entry_rows(
+                observed("search.videos", "q"),
+                {"videos": [{"video_id": "v" * (IDENTIFIER_LIMIT + 1)}]},
+            )
+
+    def test_an_oversize_handle_or_country_is_refused(self) -> None:
+        with pytest.raises(FlattenError, match="handle"):
+            channel_snapshot_row(
+                observed("channel.about", "UC1"),
+                {"channel_id": "UC1", "handle": "@" * (IDENTIFIER_LIMIT + 1)},
+            )
+        with pytest.raises(FlattenError, match="country"):
+            channel_snapshot_row(
+                observed("channel.about", "UC1"),
+                {"channel_id": "UC1", "country": "K" * (COUNTRY_LIMIT + 1)},
+            )
+
+    def test_an_oversize_comment_id_or_parent_id_is_refused(self) -> None:
+        with pytest.raises(FlattenError, match="comment_id"):
+            comment_rows(
+                observed("video.comments", "abc123"),
+                {"comments": [{"comment_id": "c" * (COMMENT_ID_LIMIT + 1)}]},
+            )
+        with pytest.raises(FlattenError, match="parent_id"):
+            comment_rows(
+                observed("video.comments", "abc123"),
+                {"comments": [{"comment_id": "c1", "parent_id": "p" * (COMMENT_ID_LIMIT + 1)}]},
+            )
+
+    def test_an_oversize_language_is_refused(self) -> None:
+        with pytest.raises(FlattenError, match="language"):
+            transcript_row(
+                observed("video.transcript", "abc123"),
+                {"language": "e" * (LANGUAGE_LIMIT + 1), "full_text": "words"},
+            )

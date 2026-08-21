@@ -24,6 +24,8 @@ from typing import Any
 
 from sqlalchemy import Select, String, literal, select, tuple_
 from sqlalchemy.dialects.postgresql import insert
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 from sqlalchemy.sql import Executable
 
 from .database import Database
@@ -43,12 +45,28 @@ from .payload_store import PayloadStore
 
 logger = logging.getLogger(__name__)
 
-# How far behind the clock the walk stays. An artifact row is committed after
-# its payload is written, but the two are not one transaction, and a row read
-# the instant it appears can point at a blob whose write has not landed. Five
-# minutes is far longer than that gap and far shorter than the collection
-# intervals, so the cursor is never both behind and stuck.
+# How far behind the clock the walk stays. The cursor is strictly-after, so
+# anything that lands *below* a cursor already written is never read again:
+# two collections committing out of `fetched_at` order — the ordinary result
+# of concurrent workers — would otherwise lose the later commit for good. The
+# same lag covers the smaller hazard that a row read the instant it appears
+# can point at a blob whose write has not landed, the artifact row and its
+# payload not being one transaction. Five minutes is far longer than either
+# gap and far shorter than the collection intervals, so the cursor is never
+# both behind and stuck.
 SAFETY_LAG = timedelta(minutes=5)
+
+# The flattened tables' string columns are bounded (see `models.py`). A
+# payload field longer than its column reaches PostgreSQL as a `DataError`
+# that aborts the whole batch, so the transforms refuse it here instead —
+# where it is one counted per-artifact error, on the path the tests cover.
+# Refused rather than truncated: a silently shortened identifier is a wrong
+# row, and nothing downstream could tell it from a right one.
+IDENTIFIER_LIMIT = 500
+COMMENT_ID_LIMIT = 200
+COUNTRY_LIMIT = 100
+KIND_LIMIT = 64
+LANGUAGE_LIMIT = 64
 
 
 class FlattenError(ValueError):
@@ -102,21 +120,37 @@ def _integer(value: object) -> int | None:
     return value
 
 
-def _required_text(payload: Mapping[str, Any], name: str, kind: str) -> str:
+def _bounded(value: object, limit: int, name: str, kind: str) -> Any:
+    """Refuse a string the column cannot hold. Passes anything else through."""
+    if isinstance(value, str) and len(value) > limit:
+        raise FlattenError(
+            f"a {kind} payload's {name} is {len(value)} characters, "
+            f"over the {limit} its column holds"
+        )
+    return value
+
+
+def _required_text(
+    payload: Mapping[str, Any], name: str, kind: str, limit: int | None = None
+) -> str:
     value = payload.get(name)
     if not isinstance(value, str) or not value:
         raise FlattenError(f"a {kind} payload has no usable {name}: {value!r}")
+    if limit is not None:
+        _bounded(value, limit, name, kind)
     return value
 
 
 def video_snapshot_row(observation: Observation, payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "artifact_id": observation.artifact_id,
-        "video_id": _required_text(payload, "video_id", observation.kind),
+        "video_id": _required_text(payload, "video_id", observation.kind, IDENTIFIER_LIMIT),
         "fetched_at": observation.fetched_at,
         "title": _required_text(payload, "title", observation.kind),
         "channel": payload.get("channel"),
-        "channel_id": payload.get("channel_id"),
+        "channel_id": _bounded(
+            payload.get("channel_id"), IDENTIFIER_LIMIT, "channel_id", observation.kind
+        ),
         "duration_seconds": _integer(payload.get("duration_seconds")),
         "view_count": _integer(payload.get("view_count")),
         "like_count": _integer(payload.get("like_count")),
@@ -145,15 +179,19 @@ def listing_entry_rows(
             {
                 "artifact_id": observation.artifact_id,
                 "position": position,
-                "kind": observation.kind,
-                "target": observation.target,
+                "kind": _bounded(observation.kind, KIND_LIMIT, "kind", observation.kind),
+                "target": _bounded(
+                    observation.target, IDENTIFIER_LIMIT, "target", observation.kind
+                ),
                 "fetched_at": observation.fetched_at,
-                "video_id": video_id,
+                "video_id": _bounded(video_id, IDENTIFIER_LIMIT, "video_id", observation.kind),
                 "title": entry.get("title"),
                 "view_count": _integer(entry.get("view_count")),
                 "duration_seconds": _integer(entry.get("duration_seconds")),
                 "channel": entry.get("channel"),
-                "channel_id": entry.get("channel_id"),
+                "channel_id": _bounded(
+                    entry.get("channel_id"), IDENTIFIER_LIMIT, "channel_id", observation.kind
+                ),
                 "published_at": _instant(entry.get("published_at")),
             }
         )
@@ -163,14 +201,14 @@ def listing_entry_rows(
 def channel_snapshot_row(observation: Observation, payload: Mapping[str, Any]) -> dict[str, Any]:
     return {
         "artifact_id": observation.artifact_id,
-        "channel_id": _required_text(payload, "channel_id", observation.kind),
+        "channel_id": _required_text(payload, "channel_id", observation.kind, IDENTIFIER_LIMIT),
         "fetched_at": observation.fetched_at,
         "name": payload.get("name"),
-        "handle": payload.get("handle"),
+        "handle": _bounded(payload.get("handle"), IDENTIFIER_LIMIT, "handle", observation.kind),
         "subscriber_count_approximate": _integer(payload.get("subscriber_count_approximate")),
         "view_count": _integer(payload.get("view_count")),
         "video_count": _integer(payload.get("video_count")),
-        "country": payload.get("country"),
+        "country": _bounded(payload.get("country"), COUNTRY_LIMIT, "country", observation.kind),
     }
 
 
@@ -190,12 +228,16 @@ def comment_rows(observation: Observation, payload: Mapping[str, Any]) -> list[d
             continue
         text = comment.get("text")
         rows[comment_id] = {
-            "video_id": observation.target,
-            "comment_id": comment_id,
-            "parent_id": comment.get("parent_id"),
+            "video_id": _bounded(observation.target, IDENTIFIER_LIMIT, "target", observation.kind),
+            "comment_id": _bounded(comment_id, COMMENT_ID_LIMIT, "comment_id", observation.kind),
+            "parent_id": _bounded(
+                comment.get("parent_id"), COMMENT_ID_LIMIT, "parent_id", observation.kind
+            ),
             "text": text if isinstance(text, str) else "",
             "author": comment.get("author"),
-            "author_id": comment.get("author_id"),
+            "author_id": _bounded(
+                comment.get("author_id"), IDENTIFIER_LIMIT, "author_id", observation.kind
+            ),
             "like_count": _integer(comment.get("like_count")),
             "is_hearted_by_uploader": bool(comment.get("is_hearted_by_uploader", False)),
             "is_pinned": bool(comment.get("is_pinned", False)),
@@ -209,8 +251,8 @@ def comment_rows(observation: Observation, payload: Mapping[str, Any]) -> list[d
 def transcript_row(observation: Observation, payload: Mapping[str, Any]) -> dict[str, Any]:
     segments = payload.get("segments")
     return {
-        "video_id": observation.target,
-        "language": _required_text(payload, "language", observation.kind),
+        "video_id": _bounded(observation.target, IDENTIFIER_LIMIT, "target", observation.kind),
+        "language": _required_text(payload, "language", observation.kind, LANGUAGE_LIMIT),
         "is_automatic": bool(payload.get("is_automatic", False)),
         "full_text": payload.get("full_text") or "",
         "segment_count": len(segments) if isinstance(segments, list) else 0,
@@ -342,12 +384,33 @@ class FlattenOutcome:
 
 
 @dataclass(frozen=True, slots=True)
+class _Entry:
+    """One index row, copied out of the read session.
+
+    Plain data on purpose: the payload is read from disk and transformed
+    after that session has closed, and a mapped instance would be expired by
+    then. It also keeps the ORM out of the write transaction entirely.
+    """
+
+    observation: Observation
+    digest: str
+
+
+@dataclass(frozen=True, slots=True)
 class _Flattened:
     """One artifact's worth of work: what to execute, and what to count."""
 
     statements: list[Executable]
     handled: bool
     unhandled_parts: int
+
+
+@dataclass(frozen=True, slots=True)
+class _Prepared:
+    """A flattened artifact waiting for the write transaction."""
+
+    entry: _Entry
+    work: _Flattened
 
 
 class FlattenService:
@@ -399,10 +462,33 @@ class FlattenService:
             )
         return statement.order_by(Artifact.fetched_at, Artifact.identifier).limit(size)
 
-    def _payload(self, artifact: Artifact) -> Mapping[str, Any]:
-        decoded = json.loads(self._payloads.read(artifact.digest))
+    def _read_batch(self, cursor: tuple[datetime, str] | None, size: int) -> list[_Entry]:
+        """The next batch as plain data, through the read engine.
+
+        Deliberately its own short session: everything after this — opening
+        blobs, decompressing and parsing them — happens with no transaction
+        held. A batch of comment harvests is tens of megabytes of JSON, and
+        parsing it inside the write transaction is what would run the pass
+        into `transaction_timeout` on the histories where it matters most.
+        """
+        with self._database.session(readonly=True) as session:
+            return [
+                _Entry(
+                    observation=Observation(
+                        artifact_id=artifact.identifier,
+                        kind=artifact.kind,
+                        target=artifact.target,
+                        fetched_at=artifact.fetched_at,
+                    ),
+                    digest=artifact.digest,
+                )
+                for artifact in session.scalars(self._batch_query(cursor, size))
+            ]
+
+    def _payload(self, entry: _Entry) -> Mapping[str, Any]:
+        decoded = json.loads(self._payloads.read(entry.digest))
         if not isinstance(decoded, Mapping):
-            raise FlattenError(f"a {artifact.kind} payload is not an object")
+            raise FlattenError(f"a {entry.observation.kind} payload is not an object")
         return decoded
 
     def _route(
@@ -419,18 +505,13 @@ class FlattenService:
             statements.append(handler.upsert(rows))
         return True
 
-    def _flatten(self, artifact: Artifact) -> _Flattened:
+    def _flatten(self, entry: _Entry) -> _Flattened:
         """Turn one artifact into statements. Raises what the caller counts."""
-        observation = Observation(
-            artifact_id=artifact.identifier,
-            kind=artifact.kind,
-            target=artifact.target,
-            fetched_at=artifact.fetched_at,
-        )
-        payload = self._payload(artifact)
+        observation = entry.observation
+        payload = self._payload(entry)
         statements: list[Executable] = []
 
-        if artifact.kind != BUNDLE_KIND:
+        if observation.kind != BUNDLE_KIND:
             return _Flattened(statements, self._route(observation, payload, statements), 0)
 
         parts = payload.get("parts")
@@ -444,10 +525,10 @@ class FlattenService:
             # The bundle's identity, with the part's kind: the rows belong to
             # the artifact that was collected, and there is only one of it.
             part_observation = Observation(
-                artifact_id=artifact.identifier,
+                artifact_id=observation.artifact_id,
                 kind=part_kind,
-                target=artifact.target,
-                fetched_at=artifact.fetched_at,
+                target=observation.target,
+                fetched_at=observation.fetched_at,
             )
             if self._route(part_observation, part, statements):
                 handled = True
@@ -455,7 +536,31 @@ class FlattenService:
                 unhandled += 1
         return _Flattened(statements, handled, unhandled)
 
-    def _write_cursor(self, session: Any, cursor: tuple[datetime, str]) -> None:
+    def _execute(self, session: Session, item: _Prepared) -> bool:
+        """Write one artifact's rows inside a savepoint. False if it failed.
+
+        The transforms refuse what they can see is unwritable, but they
+        cannot see everything the database will refuse. Without the
+        savepoint, one such row aborts the batch, the cursor never passes the
+        artifact, and every firing after it dies on the same row — the pass
+        stops for good on one bad observation, which is exactly what the
+        design forbids. The savepoint keeps it a counted error instead.
+        """
+        try:
+            with session.begin_nested():
+                for statement in item.work.statements:
+                    session.execute(statement)
+        except SQLAlchemyError as error:
+            logger.warning(
+                "artifact %s (%s) would not write: %s",
+                item.entry.observation.artifact_id,
+                item.entry.observation.kind,
+                error,
+            )
+            return False
+        return True
+
+    def _write_cursor(self, session: Session, cursor: tuple[datetime, str]) -> None:
         fetched_at, identifier = cursor
         statement = insert(FlattenProgress).values(
             identifier=FLATTEN_PROGRESS_ID,
@@ -479,9 +584,15 @@ class FlattenService:
     ) -> FlattenOutcome:
         """Flatten everything settled since the last pass.
 
-        One transaction per batch: the rows and the cursor that says they
-        were written commit together, so an interrupted pass resumes at an
-        artifact it has not already flattened rather than at one it has.
+        A batch is read and transformed first, and only then written: one
+        transaction per batch, holding nothing but the statements and the
+        cursor that says they were written, which commit together so an
+        interrupted pass resumes at an artifact it has not already flattened
+        rather than at one it has. The blob reads and the JSON parsing stay
+        outside it — a batch of comment harvests is tens of megabytes, and
+        parsing them under an open transaction is how a pass hits
+        `transaction_timeout`, aborts, never advances the cursor, and then
+        replays the same batch for ever.
 
         `dry_run` does the reads and the transforms and rolls the batch back,
         reporting the counts a real run would report. Its cursor lives in
@@ -497,38 +608,40 @@ class FlattenService:
 
         while limit is None or seen < limit:
             size = batch_size if limit is None else min(batch_size, limit - seen)
+            entries = self._read_batch(cursor, size)
+            if not entries:
+                break
+            # The batch commits as one, so its cursor is the last row in it.
+            cursor = (entries[-1].observation.fetched_at, entries[-1].observation.artifact_id)
+
+            prepared: list[_Prepared] = []
+            for entry in entries:
+                seen += 1
+                try:
+                    prepared.append(_Prepared(entry, self._flatten(entry)))
+                except FileNotFoundError:
+                    # Retention deletes payloads on schedule; an artifact
+                    # row outliving its blob is that policy working.
+                    missing += 1
+                except (FlattenError, json.JSONDecodeError, UnicodeDecodeError) as error:
+                    logger.warning(
+                        "artifact %s (%s) does not flatten: %s",
+                        entry.observation.artifact_id,
+                        entry.observation.kind,
+                        error,
+                    )
+                    errors += 1
+
             with self._database.session() as session:
-                artifacts = list(session.scalars(self._batch_query(cursor, size)))
-                if not artifacts:
-                    break
-                # The batch commits as one, so its cursor is the last row in
-                # it — and it is read here, before anything can expire the
-                # instances (`dry_run` rolls this session back below).
-                cursor = (artifacts[-1].fetched_at, artifacts[-1].identifier)
-                for artifact in artifacts:
-                    seen += 1
-                    try:
-                        work = self._flatten(artifact)
-                    except FileNotFoundError:
-                        # Retention deletes payloads on schedule; an artifact
-                        # row outliving its blob is that policy working.
-                        missing += 1
-                        continue
-                    except (FlattenError, json.JSONDecodeError, UnicodeDecodeError) as error:
-                        logger.warning(
-                            "artifact %s (%s) does not flatten: %s",
-                            artifact.identifier,
-                            artifact.kind,
-                            error,
-                        )
+                for item in prepared:
+                    if item.work.statements and not self._execute(session, item):
                         errors += 1
                         continue
-                    for statement in work.statements:
-                        session.execute(statement)
-                    if work.handled:
-                        flattened[artifact.kind] = flattened.get(artifact.kind, 0) + 1
-                    unhandled += work.unhandled_parts
-                    if not work.handled and not work.unhandled_parts:
+                    kind = item.entry.observation.kind
+                    if item.work.handled:
+                        flattened[kind] = flattened.get(kind, 0) + 1
+                    unhandled += item.work.unhandled_parts
+                    if not item.work.handled and not item.work.unhandled_parts:
                         unhandled += 1
                 if dry_run:
                     session.rollback()

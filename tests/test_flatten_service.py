@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from sqlalchemy import func, select
 
+from tubedepth import flatten as flatten_module
 from tubedepth.database import Database
 from tubedepth.flatten import FlattenService
 from tubedepth.models import (
@@ -409,6 +410,59 @@ def test_an_unreadable_payload_counts_as_an_error_not_a_crash(
     assert outcome.errors == 2
     assert outcome.flattened == {"video.metadata": 1}
     assert count(database, VideoSnapshot) == 1
+    assert flatten.run().artifacts_seen == 0
+
+
+def test_a_row_the_database_refuses_is_an_error_the_walk_passes(
+    database: Database, payloads: PayloadStore, recorder: Recorder, monkeypatch
+) -> None:
+    """One unwritable row must not stall the pipeline for ever.
+
+    The transforms refuse the oversize fields they can see, so this poisons a
+    handler instead: it is the only way to reach the case they cannot see —
+    anything the database refuses for a reason flatten did not anticipate.
+    Without the per-artifact savepoint that row aborts the batch, the cursor
+    never passes it, and every firing after it dies on the same artifact.
+    """
+    poison = "v" * (flatten_module.IDENTIFIER_LIMIT + 1)
+    original = flatten_module._HANDLERS["video.metadata"]
+
+    def poisoned(observation, payload):
+        rows = original.transform(observation, payload)
+        if payload.get("title") == "Poisoned":
+            rows[0]["video_id"] = poison
+        return rows
+
+    monkeypatch.setitem(
+        flatten_module._HANDLERS,
+        "video.metadata",
+        flatten_module._Handler(poisoned, original.upsert),
+    )
+
+    recorder.store("video.metadata", "vid1", metadata("vid1", "Fine", 1))
+    recorder.store(
+        "video.metadata",
+        "vid2",
+        metadata("vid2", "Poisoned", 2),
+        fetched_at=COLLECTED + timedelta(minutes=1),
+    )
+    recorder.store(
+        "video.metadata",
+        "vid3",
+        metadata("vid3", "Also fine", 3),
+        fetched_at=COLLECTED + timedelta(minutes=2),
+    )
+    flatten = service(database, payloads, FakeClock())
+
+    outcome = flatten.run()
+
+    assert outcome.artifacts_seen == 3
+    assert outcome.errors == 1
+    assert outcome.flattened == {"video.metadata": 2}
+    # The two good artifacts in the same batch still committed.
+    assert sorted(row.title for row in rows(database, VideoSnapshot)) == ["Also fine", "Fine"]
+    # And the cursor is past the bad one, so the next firing is not the same
+    # failure again.
     assert flatten.run().artifacts_seen == 0
 
 

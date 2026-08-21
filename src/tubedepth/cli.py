@@ -858,9 +858,11 @@ def flatten(
     data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
         "var"
     ),
-    batch: Annotated[int, typer.Option("--batch", help="Artifacts per transaction")] = 200,
+    # `min=1` on both: a batch of 0 reads nothing for ever and a limit of 0
+    # reports a clean pass over a full backlog, and both look like success.
+    batch: Annotated[int, typer.Option("--batch", min=1, help="Artifacts per transaction")] = 200,
     limit: Annotated[
-        int | None, typer.Option("--limit", help="Stop after this many artifacts")
+        int | None, typer.Option("--limit", min=1, help="Stop after this many artifacts")
     ] = None,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Report what a pass would do, write nothing")
