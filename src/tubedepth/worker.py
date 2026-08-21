@@ -89,7 +89,9 @@ class Worker:
         # Replaced by `serve`'s own event for the duration of a run. Held
         # rather than passed to `_wait` so that the wait has one argument and
         # is a seam a test can stand in for; an unset event here also makes
-        # `_wait` a plain sleep for anyone calling it outside `serve`.
+        # `_wait` a plain sleep for anyone calling it outside `serve`, and
+        # `_stopping()` a constant False for a bare `drain()` — a one-shot
+        # `tubedepth work` has no stop handler and drains to the end.
         self._stop = threading.Event()
         # How many drains this process has run. Not a metric — the API reports
         # nothing about it — but a resident worker has no restart count any
@@ -157,6 +159,23 @@ class Worker:
             control = session.get(WorkerControl, WORKER_CONTROL_ID)
             return bool(control and control.paused)
 
+    def _stopping(self) -> bool:
+        """Whether this worker has been asked to stop.
+
+        Read everywhere `paused()` is read inside a drain, and for the same
+        reason: the stop handler promises "stopping after the current pass",
+        and a check that lives only between drains makes that promise false
+        for exactly the queues deep enough for anyone to want to stop —
+        claiming kept going until systemd's stop timeout delivered a SIGKILL
+        mid-job, and the abandoned leases sat out their full term (#35).
+        Jobs already in flight finish; nothing new is claimed.
+
+        A stop must also beat a pause check: this runs first in every
+        compound condition because it is a memory read, where `paused()` is
+        a database round trip a stopping worker has no reason to pay.
+        """
+        return self._stop.is_set()
+
     def reap(self) -> int:
         """Return jobs whose worker stopped reporting. Safe to call often."""
         with self._database.session() as session:
@@ -197,7 +216,12 @@ class Worker:
 
         if self._concurrency == 1:
             completed = 0
-            while (limit is None or completed < limit) and not self.paused() and self.run_once():
+            while (
+                (limit is None or completed < limit)
+                and not self._stopping()
+                and not self.paused()
+                and self.run_once()
+            ):
                 completed += 1
             self.deliver_webhooks()
             return completed
@@ -218,7 +242,11 @@ class Worker:
                 # 500 targets and one listing fans out to the whole cap, so
                 # "it takes effect on the next restart" had come to mean "not
                 # until the sweep it is trying to stop has finished".
-                if self.paused():
+                # The stop event for the same reason (#35): `serve` checks it
+                # only between drains, and a drain over a deep queue kept
+                # claiming new jobs until systemd's stop timeout turned the
+                # graceful signal into a SIGKILL mid-job.
+                if self._stopping() or self.paused():
                     return
                 with counted:
                     if limit is not None and reserved >= limit:
@@ -320,8 +348,8 @@ class Worker:
         described as free — "SQLite serialises writers regardless" — which was
         true only because SQLite's own write lock meant nothing was lost by
         adding a second one around it. PostgreSQL claims run concurrently
-        under READ COMMITTED (`JobRepository.claim`'s guarded UPDATE plus
-        rowcount check is what makes that safe on its own — see `Database`'s
+        under READ COMMITTED (`JobRepository.claim`'s `FOR UPDATE SKIP
+        LOCKED` SELECT is what makes that safe on its own — see its
         docstring), so this lock is what gives that back up: every worker
         thread's `_claim()`, database round trip included, now runs one at a
         time, for as long as the process holds this lock rather than as long
