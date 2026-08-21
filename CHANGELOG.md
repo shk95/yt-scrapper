@@ -20,6 +20,8 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-21
+
 ### Added
 
 - **The watch list can harvest comments, and can watch a playlist.** The
@@ -477,7 +479,8 @@ for. Not yet exercised under sustained load; see the honest limits in the
   longer reaped as dead and retried.
 - The query indexes the plan specified and nobody had added.
 
-[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/slopindustries/yt-scrapper/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.1...v1.0.2
