@@ -51,6 +51,7 @@ from ..models import WORKER_CONTROL_ID, Artifact, Job, LaneHealth, WorkerControl
 from ..payload_store import PayloadStore
 from ..repositories import JobRepository, JobState
 from ..services.keys import ApiKeyService, VerifiedKey
+from ..settings import api_key_required
 from ..sources import SourceRegistry, default_registry
 from ..sources.registry import DataSource, attempts_for, retracted_versions_of
 
@@ -458,7 +459,19 @@ def get_session(request: Request) -> Iterator[Session]:
 def require_api_key(
     request: Request,
     presented: Annotated[str | None, Security(API_KEY_HEADER)],
-) -> VerifiedKey:
+) -> VerifiedKey | None:
+    """The key, or None when this deployment does not ask for one.
+
+    None rather than a stand-in `VerifiedKey`: a job submitted with no key has
+    no key to attribute it to, and inventing an identifier for it would put a
+    row in `jobs.api_key_id` that names nothing in `api_keys`.
+
+    A key presented to an instance that does not require one is still verified,
+    so a caller that keeps sending its header keeps its attribution and its
+    allowance, and a wrong key still fails loudly rather than being ignored.
+    """
+    if not request.app.state.require_api_key and not presented:
+        return None
     if not presented:
         raise UnauthenticatedError("api key missing or not recognised")
     return ApiKeyService(request.app.state.database).verify(presented)
@@ -469,8 +482,14 @@ def create_application(
     database: Database,
     payloads: PayloadStore,
     registry: SourceRegistry | None = None,
+    require_key: bool | None = None,
 ) -> FastAPI:
     registry = registry or default_registry()
+    # Resolved once, here, rather than read per request: an operator who
+    # changes the variable expects a restart to be what applies it, and a
+    # dependency that re-read the environment would make the same instance
+    # answer 401 and 202 to the same request depending on when it arrived.
+    require_key = api_key_required() if require_key is None else require_key
 
     application = FastAPI(
         title="tubedepth",
@@ -481,6 +500,7 @@ def create_application(
     application.state.database = database
     application.state.payloads = payloads
     application.state.registry = registry
+    application.state.require_api_key = require_key
 
     @application.exception_handler(TubedepthError)
     async def handle_domain_error(request: Request, error: Exception) -> JSONResponse:
@@ -651,7 +671,7 @@ def create_application(
         submission: JobSubmission,
         response: Response,
         open_session: Annotated[Session, Depends(get_session)],
-        api_key: Annotated[VerifiedKey, Depends(require_api_key)],
+        api_key: Annotated[VerifiedKey | None, Depends(require_api_key)],
         registry: Annotated[SourceRegistry, Depends(get_registry)],
         payloads: Annotated[PayloadStore, Depends(get_payloads)],
         database: Annotated[Database, Depends(get_database)],
@@ -673,7 +693,7 @@ def create_application(
         job = Job(
             kind=submission.kind,
             target=target,
-            api_key_id=api_key.identifier,
+            api_key_id=api_key.identifier if api_key else None,
             refresh=submission.refresh,
             # How many tries a kind is worth is a property of what collecting
             # it costs, which the registry knows and a submitter does not — so
@@ -697,7 +717,7 @@ def create_application(
     def submit_batch(
         submission: BatchSubmission,
         open_session: Annotated[Session, Depends(get_session)],
-        api_key: Annotated[VerifiedKey, Depends(require_api_key)],
+        api_key: Annotated[VerifiedKey | None, Depends(require_api_key)],
         registry: Annotated[SourceRegistry, Depends(get_registry)],
         payloads: Annotated[PayloadStore, Depends(get_payloads)],
         database: Annotated[Database, Depends(get_database)],
@@ -743,7 +763,7 @@ def create_application(
             job = Job(
                 kind=submission.kind,
                 target=target,
-                api_key_id=api_key.identifier,
+                api_key_id=api_key.identifier if api_key else None,
                 refresh=submission.refresh,
                 max_attempts=attempts_for(source),
                 webhook_url=str(submission.webhook_url) if submission.webhook_url else None,

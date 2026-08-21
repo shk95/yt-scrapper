@@ -52,6 +52,15 @@ x-runtime-environment: &runtime-environment
   # safe default: the source refuses that kind as a configuration error and
   # nothing else is affected (sources/trending.py).
   TUBEDEPTH_DATA_API_KEY: ${TUBEDEPTH_DATA_API_KEY:-}
+  # Whether `/v1` demands an `X-API-Key`. Off by default: this stack is
+  # published on loopback and reached by the rest of the fleet, where a key
+  # per caller is a secret to distribute for an audit column. Turn it on for
+  # anything the api port is exposed to (settings.api_key_required).
+  #
+  # Read by `serve` alone, and it sits in the shared block anyway so that the
+  # four services keep one env definition — a second block for one variable is
+  # the drift this anchor exists to prevent.
+  TUBEDEPTH_REQUIRE_API_KEY: ${TUBEDEPTH_REQUIRE_API_KEY:-0}
 
 services:
   # ------------------------------------------------------------------------

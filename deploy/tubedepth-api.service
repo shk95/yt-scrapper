@@ -51,6 +51,12 @@ EnvironmentFile=%h/.config/tubedepth/database.env
 # draws on. Measure before making a big number the default.
 #Environment=TUBEDEPTH_LISTING_LIMIT=100
 #Environment=TUBEDEPTH_COMMENT_LIMIT=200
+# Whether `/v1` demands an `X-API-Key`. Off unless set: ExecStart below binds
+# to loopback, and on a host the fleet has to itself a key per caller is a
+# secret to distribute for an audit column. Uncomment it — and mint a key with
+# `tubedepth key create` — before putting a reverse proxy in front of this,
+# because from that moment the port is not loopback any more.
+#Environment=TUBEDEPTH_REQUIRE_API_KEY=1
 # --frozen so a restart cannot silently resolve a newer dependency than the one
 # in uv.lock. A service that upgrades itself on restart is a service whose
 # version nobody can state, and yt-dlp is deliberately uncapped in
