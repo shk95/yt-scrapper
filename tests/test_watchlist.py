@@ -22,25 +22,39 @@ def written(tmp_path: Path, body: str, name: str = "watchlist.txt") -> Path:
     return path
 
 
-def test_each_directive_becomes_the_kind_and_follow_up_it_names(tmp_path: Path) -> None:
+def test_each_directive_becomes_the_kind_and_follow_ups_it_names(tmp_path: Path) -> None:
     """The whole table, in one test, because the table is the format.
 
     A directive that mapped to the wrong kind would be a watch list collecting
     something other than what it says — and nothing downstream could notice,
-    since every kind here is a real kind.
+    since every kind here is a real kind. The `+comments` variants exist
+    because "every video's metadata" and "every video's metadata and comments"
+    are both things a schedule has to be able to say, and the second must be
+    opt-in per line: comments are the most expensive kind in the system.
     """
     path = written(
         tmp_path,
-        "video    dQw4w9WgXcQ\nchannel  @director_pihyunjung\nsearch   kpop debut\ntrending KR\n",
+        "video             dQw4w9WgXcQ\n"
+        "channel           @director_pihyunjung\n"
+        "channel+comments  @director_pihyunjung\n"
+        "search            kpop debut\n"
+        "search+comments   kpop debut\n"
+        "playlist          UU5oM4Ai05dQqiVL6rypAo_A\n"
+        "playlist+comments UU5oM4Ai05dQqiVL6rypAo_A\n"
+        "trending          KR\n",
     )
 
     directives = read_watchlist(path)
 
-    assert [(one.kind, one.target, one.follow_up) for one in directives] == [
-        ("video.metadata", "dQw4w9WgXcQ", None),
-        ("channel.videos", "@director_pihyunjung", "video.metadata"),
-        ("search.videos", "kpop debut", "video.metadata"),
-        ("trending.videos", "KR", "video.metadata"),
+    assert [(one.kind, one.target, one.follow_ups) for one in directives] == [
+        ("video.metadata", "dQw4w9WgXcQ", ()),
+        ("channel.videos", "@director_pihyunjung", ("video.metadata",)),
+        ("channel.videos", "@director_pihyunjung", ("video.metadata", "video.comments")),
+        ("search.videos", "kpop debut", ("video.metadata",)),
+        ("search.videos", "kpop debut", ("video.metadata", "video.comments")),
+        ("playlist.items", "UU5oM4Ai05dQqiVL6rypAo_A", ("video.metadata",)),
+        ("playlist.items", "UU5oM4Ai05dQqiVL6rypAo_A", ("video.metadata", "video.comments")),
+        ("trending.videos", "KR", ("video.metadata",)),
     ]
 
 
@@ -143,9 +157,15 @@ def test_a_watch_list_that_is_not_there_is_refused_and_the_message_names_it(
 
 
 def test_the_directive_is_matched_whatever_case_it_is_written_in(tmp_path: Path) -> None:
-    path = written(tmp_path, "Video dQw4w9WgXcQ\nTRENDING KR\n")
+    path = written(
+        tmp_path, "Video dQw4w9WgXcQ\nTRENDING KR\nChannel+Comments @director_pihyunjung\n"
+    )
 
-    assert [one.kind for one in read_watchlist(path)] == ["video.metadata", "trending.videos"]
+    assert [one.kind for one in read_watchlist(path)] == [
+        "video.metadata",
+        "trending.videos",
+        "channel.videos",
+    ]
 
 
 def test_tabs_and_stray_whitespace_around_a_line_do_not_change_what_it_means(

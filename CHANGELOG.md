@@ -20,6 +20,25 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+### Added
+
+- **The watch list can harvest comments, and can watch a playlist.** The
+  listing directives gained `+comments` variants — `channel+comments`,
+  `search+comments`, `playlist+comments` — that fan out to a `video.comments`
+  job per video found, alongside the `video.metadata` every listing directive
+  already queues. Opt-in per line rather than a default or a flag, because
+  comments are the most expensive kind in the system and a schedule that
+  harvests them should say so where the size of the list is decided. A
+  `playlist` directive is new too: a channel's `/videos` tab holds neither
+  Shorts nor past live streams, so the complete uploads history was already
+  `playlist.items` on the `UU…` playlist — now a watch list can say that.
+
+  Mechanically, a two-follow-up line queues the same listing twice, once per
+  follow-up, because a job carries exactly one `follow_up_kind`. Only the
+  first is forced past the freshness window; the second rides the cache the
+  first just wrote, so the listing's artifact history still gains one
+  observation per pass, not two.
+
 ## [1.1.0] - 2026-08-21
 
 ### Changed
