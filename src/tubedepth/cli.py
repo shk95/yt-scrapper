@@ -25,6 +25,7 @@ from .egress.control import RateController
 from .egress.transport import DirectEgress
 from .errors import ConfigurationError, TubedepthError, ValidationError
 from .fixture_capture import redact_for_fixture
+from .flatten import FlattenService
 from .identifiers import normalize_target, normalize_video_identifier
 from .innertube.client import InnerTubeClient
 from .models import WORKER_CONTROL_ID, Artifact, Base, Job, JobState, WorkerControl, utcnow
@@ -850,6 +851,77 @@ def prune(
             err=True,
         )
         raise SystemExit(1)
+
+
+@application.command()
+def flatten(
+    data_directory: Annotated[Path, typer.Option("--data-dir", envvar="TUBEDEPTH_DATA_DIR")] = Path(
+        "var"
+    ),
+    batch: Annotated[int, typer.Option("--batch", help="Artifacts per transaction")] = 200,
+    limit: Annotated[
+        int | None, typer.Option("--limit", help="Stop after this many artifacts")
+    ] = None,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Report what a pass would do, write nothing")
+    ] = False,
+    every: Annotated[
+        float,
+        typer.Option(
+            "--every",
+            envvar="TUBEDEPTH_FLATTEN_SECONDS",
+            help="Stay up and flatten again this often, in seconds. 0 runs once and exits.",
+        ),
+    ] = 0.0,
+) -> None:
+    """Unpack stored payloads into the queryable tables, incrementally.
+
+    The artifact index keeps observations as blobs on disk, which PostgREST
+    cannot see into; this walks everything new since the last pass and
+    upserts the flattened rows. Idempotent by construction — the tables'
+    keys make a replayed artifact a no-op — so rerunning after a crash is
+    the recovery procedure, not a hazard.
+
+    Without `--every` this runs one pass and exits, which is what a timer
+    wants and how `deploy/tubedepth-flatten.timer` runs it. `--every` is for
+    the environments with no scheduler, compose among them.
+    """
+    configure_logging()
+    service = FlattenService(
+        database=_database(data_directory), payloads=_payload_store(data_directory)
+    )
+
+    def sweep() -> None:
+        outcome = service.run(batch_size=batch, limit=limit, dry_run=dry_run)
+        flattened = sum(outcome.flattened.values())
+        prefix = "would flatten" if dry_run else "flattened"
+        typer.echo(
+            f"✓ {prefix} {flattened} of {outcome.artifacts_seen} artifact(s)"
+            + "".join(f"\n  {kind}: {count}" for kind, count in sorted(outcome.flattened.items()))
+        )
+        if outcome.skipped_unhandled:
+            typer.echo(f"  skipped {outcome.skipped_unhandled} artifact(s) of unhandled kinds")
+        if outcome.skipped_missing_payload:
+            typer.echo(
+                f"  skipped {outcome.skipped_missing_payload} artifact(s) whose payload is gone"
+            )
+        if outcome.errors:
+            typer.echo(f"  {outcome.errors} payload(s) would not flatten — see the log", err=True)
+
+    if every <= 0:
+        sweep()
+        return
+
+    stop = _stopping_on_signals()
+    sweep()
+    while not stop.wait(every):
+        try:
+            sweep()
+        except Exception:
+            # Deliberately everything, matching `watch`: after the first
+            # pass, staying up and complaining beats exiting and flattening
+            # nothing.
+            logger.exception("a flatten pass failed; retried on the next interval")
 
 
 keys_app = typer.Typer(name="key", help="Manage API keys.", no_args_is_help=True)
