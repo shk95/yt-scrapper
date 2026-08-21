@@ -29,7 +29,7 @@ from pydantic import BaseModel
 
 from ..egress.control import Lane
 from ..egress.transport import Egress
-from ..errors import ConfigurationError, RateLimitedError, UpstreamError
+from ..errors import ConfigurationError, ExtractionError, RateLimitedError, UpstreamError
 from ..identifiers import TargetType
 from ..schemas import ListedVideo, VideoListing
 from .registry import SourceCost
@@ -149,13 +149,38 @@ class TrendingVideosSource:
 
         collected: list[dict[str, Any]] = []
         page: str | None = None
+        followed: set[str] = set()
         with egress.http_client() as client:
             while len(collected) < self._limit:
                 body = self._page(client, target, key, page, len(collected))
-                collected += body.get("items") or []
+                items = body.get("items")
+                collected += items or []
                 page = body.get("nextPageToken")
                 if not page:
                     break
+                # A token promises another page, and the loop condition alone
+                # would follow it forever. Two guards, because the API has
+                # shipped both failure shapes: a page that adds nothing, and a
+                # token that repeats. Each lap is a quota unit, spent while
+                # holding the job's lease.
+                if not items:
+                    if not isinstance(items, list):
+                        # No `items` list at all is not the chart running
+                        # short — it is a response this parser no longer
+                        # understands, and returning what was collected so far
+                        # would be the silent short listing that stays
+                        # deployed for weeks.
+                        raise ExtractionError(
+                            f"the trending chart answered with a nextPageToken and no items"
+                            f" list: {target}"
+                        )
+                    # `items: []` is the API saying the chart is empty of its
+                    # own accord — end of chart, not an error: the chart
+                    # legitimately runs short of the limit.
+                    break
+                if page in followed:
+                    break
+                followed.add(page)
         return parse_chart({"items": collected[: self._limit]}, region=target)
 
     def _page(
