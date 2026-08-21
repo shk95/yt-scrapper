@@ -59,6 +59,10 @@ def build_api(tmp_path: Path, database: Database) -> tuple[TestClient, str, Data
         database=database,
         payloads=PayloadStore(tmp_path / "payloads"),
         registry=registry,
+        # Explicit, because the deployed default is off: this suite is where
+        # the 401s are asserted, so it has to ask for the mode that produces
+        # them rather than inherit whatever the environment says.
+        require_key=True,
     )
     minted = ApiKeyService(database).mint(label="test")
     # TestClient rather than an ASGITransport: the transport is async-only, and
@@ -69,6 +73,25 @@ def build_api(tmp_path: Path, database: Database) -> tuple[TestClient, str, Data
 @pytest.fixture
 def api(tmp_path: Path, database: Database) -> tuple[TestClient, str, Database]:
     return build_api(tmp_path, database)
+
+
+def build_open_api(tmp_path: Path, database: Database) -> TestClient:
+    """The same application in the mode a private deployment actually runs."""
+    registry = SourceRegistry()
+    registry.register(EchoSource())  # type: ignore[arg-type]
+    return TestClient(
+        create_application(
+            database=database,
+            payloads=PayloadStore(tmp_path / "payloads"),
+            registry=registry,
+            require_key=False,
+        )
+    )
+
+
+@pytest.fixture
+def open_api(tmp_path: Path, database: Database) -> TestClient:
+    return build_open_api(tmp_path, database)
 
 
 class RaisingRegistry(SourceRegistry):
@@ -96,6 +119,7 @@ def build_api_that_fails_with(
         database=database,
         payloads=PayloadStore(tmp_path / "payloads"),
         registry=RaisingRegistry(failure),
+        require_key=True,
     )
     return TestClient(application), ApiKeyService(database).mint(label="test").secret
 
@@ -133,6 +157,66 @@ def test_an_unknown_key_gets_the_same_answer_as_a_missing_one(
 
     assert missing.status_code == unknown.status_code == 401
     assert missing.json() == unknown.json()
+
+
+def test_no_key_is_needed_when_this_deployment_does_not_ask_for_one(
+    open_api: TestClient, database: Database
+) -> None:
+    # The deployed default. Private network, fleet-internal callers, no secret
+    # to distribute — see settings.api_key_required.
+    submitted = open_api.post("/v1/jobs", json={"kind": "video.echo", "target": "dQw4w9WgXcQ"})
+
+    assert submitted.status_code == 202
+    assert open_api.get("/v1/sources").status_code == 200
+    with database.session() as session:
+        # Nothing to attribute it to, and no invented identifier standing in
+        # for one: `api_key_id` names a row in `api_keys` or it names nothing.
+        assert session.query(Job).one().api_key_id is None
+
+
+def test_every_versioned_route_is_reachable_without_a_key_when_keys_are_off(
+    open_api: TestClient,
+) -> None:
+    """The mirror of the "auth is on" walk below.
+
+    Asserting one route opens would not catch a dependency left on a handler
+    rather than on the router, which is exactly the shape this switch could be
+    got wrong in — so this walks the document the same way.
+    """
+    paths = open_api.get("/openapi.json").json()["paths"]
+
+    versioned = {path: spec for path, spec in paths.items() if path.startswith("/v1/")}
+    assert versioned, "no versioned routes found to check"
+
+    for path, spec in versioned.items():
+        for method in spec:
+            response = open_api.request(method.upper(), path.replace("{job_id}", "someid"), json={})
+            assert response.status_code != 401, f"{method.upper()} {path} still demanded a key"
+
+
+def test_a_key_still_verifies_when_this_deployment_does_not_require_one(
+    open_api: TestClient, database: Database
+) -> None:
+    """Sending one is not ignored — it attributes, and a wrong one still fails.
+
+    A caller that kept its header through the cutover keeps its audit trail;
+    one whose key was revoked finds out rather than being quietly promoted to
+    anonymous access.
+    """
+    minted = ApiKeyService(database).mint(label="still-a-client")
+
+    submitted = open_api.post(
+        "/v1/jobs",
+        json={"kind": "video.echo", "target": "dQw4w9WgXcQ"},
+        headers={"X-API-Key": minted.secret},
+    )
+
+    assert submitted.status_code == 202
+    with database.session() as session:
+        assert session.query(Job).one().api_key_id == minted.identifier
+    assert (
+        open_api.get("/v1/sources", headers={"X-API-Key": "ytd_deadbeef_nope"}).status_code == 401
+    )
 
 
 def test_a_valid_key_reaches_the_registry(api: tuple[TestClient, str, Database]) -> None:

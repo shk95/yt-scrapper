@@ -12,7 +12,7 @@ returns it, and [`../CHANGELOG.md`](../CHANGELOG.md) records what changed in it.
 | | |
 | --- | --- |
 | Base URL | `http://127.0.0.1:8080` by default — the API binds to loopback |
-| Authentication | `X-API-Key: ytd_...` on everything under `/v1` |
+| Authentication | none by default; `X-API-Key: ytd_...` on everything under `/v1` where `TUBEDEPTH_REQUIRE_API_KEY` is on |
 | Request body | JSON, `Content-Type: application/json` |
 | Response body | JSON, always an object |
 | Errors | `{"error": {"code": "...", "message": "..."}}` |
@@ -24,12 +24,34 @@ version moves for reasons a client never notices.
 
 **There is no TLS here, and the key travels in a header.** Binding to anything
 other than loopback without a reverse proxy in front puts that key on the wire
-in clear text.
+in clear text — and with authentication off, puts an API anyone can submit jobs
+to on the wire at all.
 
 An interactive OpenAPI document is served at `/docs`, generated from the same
 route definitions this file describes by hand.
 
 ## Authentication
+
+**Off by default.** This service is deployed on a private network and reached
+by the other services in the fleet, where a key per caller bought an audit
+column and a rate limiter at the price of a secret to distribute and rotate. So
+`/v1` takes no header, answers no 401, and applies no per-key allowance unless
+this deployment asks it to:
+
+```sh
+TUBEDEPTH_REQUIRE_API_KEY=1     # in deploy/.env, or the unit's EnvironmentFile
+```
+
+Read once at start-up, so a change takes a restart. A value that is neither a
+yes (`1`, `true`, `yes`, `on`) nor a no (`0`, `false`, `no`, `off`) is refused
+at start-up rather than read as a no — `=treu` quietly serving an open API is
+the failure the variable exists to make visible.
+
+Everything below describes the API with it on. **With it off, every `401
+unauthenticated` in this document does not happen and `X-API-Key` is optional
+— but not ignored: a key that is sent is still verified, so a caller keeps its
+attribution and its allowance, and a revoked key still fails rather than being
+quietly promoted to anonymous access.**
 
 Keys are minted on the machine that runs the service:
 
@@ -702,7 +724,7 @@ shape.
 
 | status | code | meaning |
 | --- | --- | --- |
-| 401 | `unauthenticated` | key missing, malformed, unknown or revoked |
+| 401 | `unauthenticated` | key missing, malformed, unknown or revoked. Never returned where this deployment does not require a key (see Authentication), unless a key was sent and did not verify |
 | 422 | `invalid_request` | a malformed body, a query value that cannot be parsed, a limit outside its bounds, a target this API cannot read, a cursor it did not issue |
 | 404 | `not_found` | no such job or digest, no source registered for that kind — or the video does not have the thing asked for |
 | 404 | `unavailable` | the video exists and cannot be watched from here: private, deleted, members-only, age-gated, region-blocked. Not our bug and not worth retrying |

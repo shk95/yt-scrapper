@@ -17,6 +17,27 @@
 
 ## [Unreleased]
 
+## [1.1.0] - 2026-08-21
+
+### Changed
+
+- **`/v1`이 더 이상 기본적으로 `X-API-Key`를 요구하지 않는다.** 이 서비스는 사설망에
+  배포되어 플릿의 다른 서비스가 호출한다. 거기서 호출자마다 키를 발급하는 것은 감사
+  컬럼과 레이트 리밋을 얻는 대신 배포하고 교체해야 할 비밀을 하나 늘리는 일이었다.
+  인증은 이제 `TUBEDEPTH_REQUIRE_API_KEY`(`1`/`true`/`yes`/`on`) 뒤에 있고, 설정하지
+  않으면 꺼져 있으며 시작할 때 한 번 읽는다. 예도 아니오도 아닌 값은 아니오로 읽지 않고
+  시작 시점에 거부한다.
+
+  삭제가 아니라 스위치인 이유: "사설망에 있다"와 "닿는다"의 차이는 방화벽 규칙 하나이고,
+  다시 켜면 모든 401과 키별 할당량이 이전 그대로 돌아온다. 키는 여전히
+  `tubedepth key`로 발급·조회·폐기한다. **키를 요구하지 않는 인스턴스에 키를 보내도
+  검증은 그대로 이루어지므로** 호출자는 자기 귀속 이력과 할당량을 유지하고, 폐기된 키는
+  조용히 익명 접근으로 승격되는 대신 실패한다. 키 없이 등록된 잡은 지어낸 식별자 대신
+  `api_key_id`를 남기지 않는다.
+
+  **이 인스턴스가 플릿 밖에서도 닿는다면 업그레이드 전에
+  `TUBEDEPTH_REQUIRE_API_KEY=1`을 설정할 것** — 그러지 않으면 업그레이드가 문을 연다.
+
 ## [1.0.3] - 2026-08-21
 
 ### Fixed
@@ -346,7 +367,8 @@
 - 워커가 실행 중 리스를 갱신한다. 긴 댓글 수집이 죽은 것으로 회수되어 재시도되던 문제.
 - 계획서에 있었으나 아무도 넣지 않았던 조회 인덱스.
 
-[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.3...HEAD
+[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.1.0...HEAD
+[1.1.0]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.0...v1.0.1

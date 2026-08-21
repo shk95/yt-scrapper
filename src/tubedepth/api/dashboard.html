@@ -84,7 +84,7 @@
   <h1>tubedepth <span id="version"></span></h1>
   <div class="grow"></div>
   <span class="pill" id="updated"></span>
-  <input id="key" type="password" placeholder="X-API-Key" size="26" autocomplete="off">
+  <input id="key" type="password" placeholder="X-API-Key (only if required)" size="26" autocomplete="off">
   <button id="save">use key</button>
   <button id="refresh">refresh</button>
 </header>
@@ -173,11 +173,16 @@ for (const id of ["table", "kind", "state", "range"]) {
 }
 
 async function api(path, { method = "GET", body } = {}) {
+  // The header only when there is one to send. Most deployments run with
+  // TUBEDEPTH_REQUIRE_API_KEY off and nobody types a key into the box above;
+  // sending `X-API-Key:` empty on every request would put a header nothing
+  // reads through whatever proxy is in front.
+  const headers = {};
+  if (key()) headers["X-API-Key"] = key();
+  if (body) headers["Content-Type"] = "application/json";
   const response = await fetch(path, {
     method,
-    headers: body
-      ? { "X-API-Key": key(), "Content-Type": "application/json" }
-      : { "X-API-Key": key() },
+    headers,
     body: body ? JSON.stringify(body) : undefined,
   });
   if (response.status === 401) throw new Error("no key, or the key was rejected");

@@ -7,11 +7,11 @@ Data API does not expose.
 
 Chapters, the "most replayed" heatmap, tags, exact publish times, caption text,
 whole comment threads, SponsorBlock segments, related videos, channel About
-panels, community posts. A client submits a **job** with an API key and
+panels, community posts. A client submits a **job** and
 collects normalised JSON.
 
 ```sh
-curl -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+curl -X POST -H 'Content-Type: application/json' \
      -d '{"kind":"video.metadata","target":"dQw4w9WgXcQ"}' localhost:8080/v1/jobs
 # 202 + job_id → poll → chapters, most_replayed (100 buckets), tags, published_at …
 # a fresh result already stored answers 200 with the data, and no job is created
@@ -55,22 +55,32 @@ tool/doctor.sh                        # toolchain, PostgreSQL reachability, hook
 uv sync --extra dev
 just check                            # format + lint + the test suite (needs Docker)
 
-uv run tubedepth key create --label local   # the secret is printed once
 uv run tubedepth serve --port 8080 &        # the API, on 127.0.0.1 by default
 uv run tubedepth work --concurrency 6       # the worker, a separate process
 ```
 
 ```sh
-KEY=ytd_...
-curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+curl -s -X POST -H 'Content-Type: application/json' \
      -d '{"kind":"video.metadata","target":"https://youtu.be/dQw4w9WgXcQ"}' \
      localhost:8080/v1/jobs                  # 202 + job_id, or 200 with a cached result
-curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$ID/result
+curl -s localhost:8080/v1/jobs/$ID/result
 ```
 
-**A key's rate limit is counted inside one process.** Run two API processes and
-each grants the same key its own allowance — this is written for a single
-instance, and anywhere else the number means nothing.
+**`/v1` takes no key by default.** This is built for a private network where
+the callers are the rest of the fleet, and there a key per caller is a secret
+to distribute for an audit column. Where the port is reachable by anything
+else, turn authentication on and mint a key:
+
+```sh
+TUBEDEPTH_REQUIRE_API_KEY=1 uv run tubedepth serve --port 8080
+uv run tubedepth key create --label local   # the secret is printed once
+curl -s -H "X-API-Key: $KEY" localhost:8080/v1/sources
+```
+
+**A key's rate limit is counted inside one process**, and only where keys are
+required. Run two API processes and each grants the same key its own allowance
+— this is written for a single instance, and anywhere else the number means
+nothing.
 
 ## Dashboard
 
@@ -80,8 +90,9 @@ uv run tubedepth serve --port 8080
 
 `http://localhost:8080/` shows queue state, per-source health, a 24-hour
 completion trend, and a record browser over jobs and artifacts. The page itself
-needs no key; you type one into the browser and it rides along as `X-API-Key`
-on every read after that. Keys come from `tubedepth key create`.
+needs no key, and neither does `/v1` unless this deployment requires one. Where
+it does, you type a key into the browser and it rides along as `X-API-Key` on
+every read after that. Keys come from `tubedepth key create`.
 
 It references no external resource, so it loads on a private network with no
 route to the internet.

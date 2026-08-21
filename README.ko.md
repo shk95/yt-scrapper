@@ -9,7 +9,7 @@ SponsorBlock 구간, 관련 영상, 채널 About, 커뮤니티 게시물. 클라
 **작업(job)을 등록**하고 정규화된 JSON을 받아간다.
 
 ```sh
-curl -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+curl -X POST -H 'Content-Type: application/json' \
      -d '{"kind":"video.metadata","target":"dQw4w9WgXcQ"}' localhost:8080/v1/jobs
 # 202 + job_id → 폴링 → chapters, most_replayed(100버킷), tags, published_at …
 # 이미 신선한 결과가 있으면 잡을 만들지 않고 200 + 결과
@@ -52,21 +52,30 @@ tool/doctor.sh                        # 툴체인·PostgreSQL 접속·훅 확인
 uv sync --extra dev
 just check                            # format + lint + 테스트 스위트 (Docker 필요)
 
-uv run tubedepth key create --label local   # 키는 이때 한 번만 출력된다
 uv run tubedepth serve --port 8080 &        # API (기본 127.0.0.1)
 uv run tubedepth work --concurrency 6       # 워커는 별도 프로세스
 ```
 
 ```sh
-KEY=ytd_...
-curl -s -X POST -H "X-API-Key: $KEY" -H 'Content-Type: application/json' \
+curl -s -X POST -H 'Content-Type: application/json' \
      -d '{"kind":"video.metadata","target":"https://youtu.be/dQw4w9WgXcQ"}' \
      localhost:8080/v1/jobs                  # 202 + job_id, 캐시에 있으면 200 + 결과
-curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$ID/result
+curl -s localhost:8080/v1/jobs/$ID/result
 ```
 
-**키별 rate limit은 프로세스 안에서만 셉니다.** API 프로세스를 두 개 띄우면 각자
-자기 몫을 갖게 됩니다 — 한 대로 운영하는 전제이고, 그게 아니면 이 값은 믿을 수 없습니다.
+**`/v1`은 기본적으로 키를 받지 않습니다.** 호출자가 플릿의 다른 서비스뿐인 사설망을
+전제로 만든 서비스이고, 거기서 호출자마다 키를 발급하는 것은 감사 컬럼 하나를 위해
+배포할 비밀을 늘리는 일입니다. 포트가 그 밖에서도 닿는다면 인증을 켜고 키를 만드세요.
+
+```sh
+TUBEDEPTH_REQUIRE_API_KEY=1 uv run tubedepth serve --port 8080
+uv run tubedepth key create --label local   # 키는 이때 한 번만 출력된다
+curl -s -H "X-API-Key: $KEY" localhost:8080/v1/sources
+```
+
+**키별 rate limit은 프로세스 안에서만 세고**, 키를 요구하는 배포에서만 적용됩니다.
+API 프로세스를 두 개 띄우면 각자 자기 몫을 갖게 됩니다 — 한 대로 운영하는 전제이고,
+그게 아니면 이 값은 믿을 수 없습니다.
 
 ## 대시보드
 
@@ -75,8 +84,9 @@ uv run tubedepth serve --port 8080
 ```
 
 `http://localhost:8080/` 에서 큐 상태, 소스별 건강, 24시간 완료 추이, 그리고 잡·수집물
-레코드 브라우저를 볼 수 있다. 페이지 자체는 키가 필요 없고, 브라우저에서 키를 입력하면
-그 뒤의 모든 조회에 `X-API-Key` 헤더로 실린다. 키는 `tubedepth key create`로 만든다.
+레코드 브라우저를 볼 수 있다. 페이지 자체는 키가 필요 없고, 이 배포가 요구하지 않는 한
+`/v1`도 마찬가지다. 요구하는 배포라면 브라우저에서 키를 입력하면 그 뒤의 모든 조회에
+`X-API-Key` 헤더로 실린다. 키는 `tubedepth key create`로 만든다.
 
 외부 리소스를 하나도 참조하지 않으므로 인터넷이 닿지 않는 사설망에서도 그대로 뜬다.
 
