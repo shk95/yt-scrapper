@@ -136,21 +136,28 @@ systemctl --user daemon-reload
 systemctl --user enable --now tubedepth-watch.timer
 ```
 
-The list is typed — `video`, `channel`, `search` or `trending`, then the
-target — so one schedule collects a fixed set of videos, a channel's uploads, a
-trend keyword and a region's chart at once. A directive that is not one of the
-four is refused naming the line, because a typo that quietly collects nothing
-is what a watch list is worst at showing you. Where there is no timer — compose
-— `tubedepth watch --every 3600` stays resident instead.
+The list is typed — `video`, `channel`, `search`, `playlist` or `trending`,
+then the target — so one schedule collects a fixed set of videos, a channel's
+uploads, a trend keyword, a playlist and a region's chart at once. The listing
+directives also come in a `+comments` variant (`channel+comments`,
+`search+comments`, `playlist+comments`) that additionally harvests every found
+video's comments. A directive that is not one of these is refused naming the
+line, because a typo that quietly collects nothing is what a watch list is
+worst at showing you. Where there is no timer — compose —
+`tubedepth watch --every 3600` stays resident instead.
 
-**Size the list deliberately, and note the four types do not cost the same.**
+**Size the list deliberately, and note the types do not cost the same.**
 A `video` line is one forced collection per firing, out of the same per-address
 budget everything else draws on; thirty of them hourly is about one percent of
-the measured throughput. A `channel`, `search` or `trending` line fans out to a
-`video.metadata` job per video it finds, up to `TUBEDEPTH_LISTING_LIMIT`
-(default 100) — **one such line can be a hundred collections, not one.**
-`deploy/watchlist.example.txt` has the arithmetic. The behaviour of this system
-under sustained load well above that has not been measured.
+the measured throughput. A `channel`, `search`, `playlist` or `trending` line
+fans out to a `video.metadata` job per video it finds, up to
+`TUBEDEPTH_LISTING_LIMIT` (default 100) — **one such line can be a hundred
+collections, not one.** A `+comments` line fans out to a comment harvest per
+video on top of that, and comments are the most expensive kind in the system —
+roughly one request per twenty comments, minutes of wall clock per
+well-commented video. `deploy/watchlist.example.txt` has the arithmetic. The
+behaviour of this system under sustained load well above that has not been
+measured.
 
 Splitting the API from the worker is not a matter of taste. yt-dlp extraction
 blocks and holds memory; run them together and one comment harvest sets the p99

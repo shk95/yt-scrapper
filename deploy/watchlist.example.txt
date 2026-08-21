@@ -9,7 +9,18 @@
 #   video    <id or watch?v= / youtu.be URL>   collect this one video
 #   channel  <@handle or UC… id or URL>        enumerate the channel's videos
 #   search   <query, spaces and all>           enumerate a search
+#   playlist <PL…/UU… id or URL>               enumerate the playlist's entries
 #   trending <ISO 3166-1 alpha-2 region>       enumerate the region's chart
+#
+# `channel`, `search` and `playlist` also come as `channel+comments`,
+# `search+comments` and `playlist+comments`: the same enumeration, fanning out
+# to a comment harvest per video as well as its metadata. Opt-in per line and
+# not a default, because comments are the most expensive kind in the system —
+# see the arithmetic below before writing one.
+#
+# A channel's `/videos` tab holds neither Shorts nor past live streams. For
+# the complete uploads history, `playlist` on the channel's uploads playlist
+# (the UC… id with UC swapped for UU) is both wider and cheaper.
 #
 # Blank lines are skipped, and so is any line whose first non-whitespace
 # character is `#`. There is no inline comment syntax: a `#` anywhere else on
@@ -29,8 +40,8 @@
 # percent, and the behaviour of this system under that kind of sustained load
 # has not been measured — see docs/status.md.
 #
-# A `channel`, `search` or `trending` line is far more expensive. Each one
-# fans out to a `video.metadata` job per video it finds, up to
+# A `channel`, `search`, `playlist` or `trending` line is far more expensive.
+# Each one fans out to a `video.metadata` job per video it finds, up to
 # TUBEDEPTH_LISTING_LIMIT (default 100). **One channel line can be a hundred
 # collections, not one.** Ten of them at the default cap is a thousand jobs an
 # hour, which is a third of the measured ~3,100 jobs/h ceiling — from ten
@@ -38,11 +49,23 @@
 # not itself forced, so a video already held fresh costs nothing the second
 # time; the enumeration is, so new videos do appear.
 #
+# A `+comments` line adds a `video.comments` job per video on top. Comments
+# are roughly one request per twenty comments, capped at
+# TUBEDEPTH_COMMENT_LIMIT (default 200) per video — so its first pass over a
+# hundred-video listing can be upwards of a thousand requests, and a
+# well-commented video takes minutes of wall clock on its own. The 24h comment
+# freshness window is what makes the steady state affordable: after the first
+# pass, only new videos and day-old harvests collect again. Start with one
+# such line and watch the queue before adding another.
+#
 # `trending` needs TUBEDEPTH_DATA_API_KEY in the unit's EnvironmentFile — the
 # chart is the one source that comes from the official Data API. Without a key
 # the job fails with a ConfigurationError. Nothing else here needs one.
 
-video    dQw4w9WgXcQ
-channel  @director_pihyunjung
-search   케이팝 데뷔
-trending KR
+video             dQw4w9WgXcQ
+channel           @director_pihyunjung
+channel+comments  @beauty_channel
+search            케이팝 데뷔
+search+comments   화장품
+playlist          UU5oM4Ai05dQqiVL6rypAo_A
+trending          KR

@@ -305,25 +305,36 @@ def _watch_pass(database: Database, registry: SourceRegistry, watchlist: Path) -
                 f"{directive.target!r} is an option, not a target"
             )
 
+    queued = 0
     with database.session() as session:
         for directive in directives:
-            _queue_job(
-                session,
-                registry,
-                kind=directive.kind,
-                target=directive.target,
-                then=directive.follow_up,
-                # Every watch enqueue is forced, with no per-line flag and
-                # nothing to get wrong. Without it a sweep inside the
-                # freshness window is answered from the cache and records no
-                # observation, so the series a watch list exists to build
-                # simply stops moving. On a listing this re-runs the
-                # enumeration; the per-video follow-ups it fans out to stay
-                # cache-governed, because `Worker._queue_follow_up`
-                # deliberately does not propagate the flag.
-                refresh=True,
-            )
-    return len(directives)
+            # A job carries exactly one `follow_up_kind`, so a directive with
+            # two follow-ups (`channel+comments`) is two listing jobs.
+            for index, follow_up in enumerate(directive.follow_ups or (None,)):
+                _queue_job(
+                    session,
+                    registry,
+                    kind=directive.kind,
+                    target=directive.target,
+                    then=follow_up,
+                    # One forced enqueue per line, with no per-line flag and
+                    # nothing to get wrong. Without it a sweep inside the
+                    # freshness window is answered from the cache and records no
+                    # observation, so the series a watch list exists to build
+                    # simply stops moving. On a listing this re-runs the
+                    # enumeration; the per-video follow-ups it fans out to stay
+                    # cache-governed, because `Worker._queue_follow_up`
+                    # deliberately does not propagate the flag.
+                    #
+                    # Only the *first* job of a multi-follow-up line is forced.
+                    # Forcing every one would run the same enumeration once per
+                    # follow-up and append near-identical rows to the listing's
+                    # history each pass; unforced, the later jobs ride the cache
+                    # the first just wrote and fan out the same videos.
+                    refresh=index == 0,
+                )
+                queued += 1
+    return queued
 
 
 @application.command()
@@ -351,12 +362,15 @@ def watch(
 ) -> None:
     """Queue a whole watch list, forced, once or on an interval.
 
-    The list is typed — `video`, `channel`, `search`, `trending`, one directive
-    per line — which is what lets one schedule collect by channel, by trend
-    keyword and by region at the same time. A `channel`, `search` or `trending`
-    line carries `--then video.metadata`, so it fans out to a job per video it
+    The list is typed — `video`, `channel`, `search`, `playlist`, `trending`,
+    one directive per line — which is what lets one schedule collect by
+    channel, by trend keyword and by region at the same time. A listing line
+    carries `--then video.metadata`, so it fans out to a job per video it
     finds: one such line is up to `TUBEDEPTH_LISTING_LIMIT` collections, not
-    one. `deploy/watchlist.example.txt` has the arithmetic.
+    one. The `+comments` variants (`channel+comments`, `search+comments`,
+    `playlist+comments`) fan out to a comment harvest per video as well — the
+    most expensive kind in the system, opted into line by line.
+    `deploy/watchlist.example.txt` has the arithmetic.
 
     The list is a required argument rather than an option with a default,
     because the failure worth designing against is a watcher that quietly

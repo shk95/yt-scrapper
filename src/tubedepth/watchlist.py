@@ -1,10 +1,13 @@
 """The watch list `tubedepth watch` reads: one typed directive per line.
 
 ```
-video    dQw4w9WgXcQ
-channel  @director_pihyunjung
-search   kpop debut
-trending KR
+video             dQw4w9WgXcQ
+channel           @director_pihyunjung
+channel+comments  @beauty_channel
+search            kpop debut
+search+comments   화장품
+playlist          UU5oM4Ai05dQqiVL6rypAo_A
+trending          KR
 ```
 
 The type is written down because the target alone cannot carry it. A bare-id
@@ -52,7 +55,7 @@ class Directive:
 
     kind: str
     target: str
-    follow_up: str | None
+    follow_ups: tuple[str, ...]
     line: int
 
 
@@ -63,11 +66,21 @@ class Directive:
 # A listing directive carries `video.metadata` as its follow-up because a
 # listing on its own is an enumeration, not a collection: without it a watch
 # list of channels records which videos exist and nothing about any of them.
-DIRECTIVES: Mapping[str, tuple[str, str | None]] = {
-    "video": ("video.metadata", None),
-    "channel": ("channel.videos", "video.metadata"),
-    "search": ("search.videos", "video.metadata"),
-    "trending": ("trending.videos", "video.metadata"),
+#
+# The `+comments` variants add `video.comments` to that fan-out, and they are
+# separate directives rather than a default or a per-line flag: comments are
+# the most expensive kind in the system (roughly one request per twenty
+# comments), so collecting them for every video a listing finds has to be
+# something an operator wrote down deliberately, line by line.
+DIRECTIVES: Mapping[str, tuple[str, tuple[str, ...]]] = {
+    "video": ("video.metadata", ()),
+    "channel": ("channel.videos", ("video.metadata",)),
+    "channel+comments": ("channel.videos", ("video.metadata", "video.comments")),
+    "search": ("search.videos", ("video.metadata",)),
+    "search+comments": ("search.videos", ("video.metadata", "video.comments")),
+    "playlist": ("playlist.items", ("video.metadata",)),
+    "playlist+comments": ("playlist.items", ("video.metadata", "video.comments")),
+    "trending": ("trending.videos", ("video.metadata",)),
 }
 
 COMMENT = "#"
@@ -117,5 +130,5 @@ def _directive(line: str, *, path: Path, number: int) -> Directive:
     target = rest.strip()
     if not target:
         raise ValidationError(f"{path} line {number}: {name!r} names nothing to collect")
-    kind, follow_up = kind_and_follow_up
-    return Directive(kind=kind, target=target, follow_up=follow_up, line=number)
+    kind, follow_ups = kind_and_follow_up
+    return Directive(kind=kind, target=target, follow_ups=follow_ups, line=number)
