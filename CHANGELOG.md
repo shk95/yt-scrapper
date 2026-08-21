@@ -20,6 +20,8 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+## [1.0.3] - 2026-08-21
+
 ### Fixed
 
 - **A stop request is honoured mid-drain (#35).** The stop event was checked
@@ -431,7 +433,8 @@ for. Not yet exercised under sustained load; see the honest limits in the
   longer reaped as dead and retried.
 - The query indexes the plan specified and nobody had added.
 
-[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.2...HEAD
+[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.3...HEAD
+[1.0.3]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.1...v1.0.2
 [1.0.1]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.0...v1.0.1
 [1.0.0]: https://github.com/slopindustries/yt-scrapper/compare/v0.1.0...v1.0.0
