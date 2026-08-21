@@ -33,10 +33,10 @@
       "read_pool_size": 2,
       "read_max_overflow": 2
     },
-    "workers_and_schedulers": 0,
+    "workers_and_schedulers": 1,
     "migration": 1,
     "rolling_deploy_overlap": 0,
-    "service_spare": 7
+    "service_spare": 6
   },
   "session_defaults": {
     "timezone": "UTC",
