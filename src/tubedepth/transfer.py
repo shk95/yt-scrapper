@@ -87,6 +87,33 @@ def _count_rows(session: Session, model: type) -> int:
     return session.scalar(select(func.count()).select_from(model)) or 0
 
 
+def verify_source_schema(source: Database) -> None:
+    """Refuse a source the current models cannot read, before a row moves.
+
+    The copy SELECTs through the *current* models, so a SQLite file written by
+    a previous release — no `jobs.refresh`, no `artifacts.schema_version`, no
+    `worker_control` or `lane_health` — dies partway through the cutover with
+    `sqlite3.OperationalError: no such column: jobs.refresh` (#33). Mid-cutover
+    is the worst place for that, and `--dry-run` used to crash the same way,
+    so the rehearsal never warned. Inspecting what the file actually holds
+    turns that into a refusal that names the gap and the remedy, before
+    anything is read or written.
+
+    Public and called from `transfer()` itself rather than only from the CLI,
+    the same argument as `verify_placement()` above: every caller gets it,
+    not only the one that remembered to ask. The CLI's `--dry-run` path calls
+    it directly, because that path returns before ever reaching here.
+    """
+    gaps = source.schema_gaps()
+    if gaps:
+        raise ConfigurationError(
+            f"the transfer source at {source.masked_url} predates the current "
+            f"schema — it is missing {', '.join(gaps)}. Bring the file forward "
+            "first: run `tubedepth migrate` with TUBEDEPTH_DATABASE_URL pointed "
+            "at this source, then re-run `tubedepth transfer`"
+        )
+
+
 def _refuse_a_target_that_already_holds_rows(
     target: Database, tables: list[Table], models: dict[str, type]
 ) -> None:
@@ -214,6 +241,7 @@ def transfer(*, source: Database, target: Database) -> TransferOutcome:
     """
     source.verify_placement()
     target.verify_placement()
+    verify_source_schema(source)
 
     tables = list(Base.metadata.sorted_tables)
     models = mapped_models()

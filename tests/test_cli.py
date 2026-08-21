@@ -16,6 +16,7 @@ from pathlib import Path
 
 import pytest
 from sqlalchemy import create_engine, func, select, text
+from sqlalchemy.engine import make_url
 from sqlalchemy.exc import DBAPIError
 from typer.testing import CliRunner
 
@@ -803,6 +804,76 @@ def test_transfer_dry_run_checks_the_source_placement_too(
     assert result.exit_code != 0
     assert isinstance(result.exception, ConfigurationError)
     assert "wrong search_path" in str(result.exception)
+
+
+def _the_password() -> str:
+    """The password inside `TUBEDEPTH_DATABASE_URL`, which must never reach
+    output. `_cli_database_url` points every test here at the migrator
+    credential — the one that can issue DDL, which is what makes #30 worth a
+    regression test rather than a cosmetic one."""
+    password = make_url(database_url()).password
+    assert password, "these tests need a URL that actually carries a password"
+    return password
+
+
+def test_migrate_masks_the_password_in_its_success_line(tmp_path: Path) -> None:
+    """#30: `tubedepth migrate` echoed the full URL, password included — into
+    shell scrollback, journalctl, and `docker compose logs`, none of which are
+    places a DDL credential belongs."""
+    password = _the_password()
+
+    result = runner.invoke(application, ["migrate", "--data-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert f":{password}@" not in result.output, "the migrator password reached stdout"
+    assert "***" in result.output, "the URL should still be shown, just masked"
+
+
+def test_migrate_stamp_masks_the_password_too(tmp_path: Path) -> None:
+    """The other echo in the same command — `--stamp` prints the URL as well."""
+    password = _the_password()
+
+    result = runner.invoke(application, ["migrate", "--stamp", "--data-dir", str(tmp_path)])
+
+    assert result.exit_code == 0, result.output
+    assert f":{password}@" not in result.output
+    assert "***" in result.output
+
+
+def test_the_no_schema_refusal_masks_the_password(tmp_path: Path) -> None:
+    """The same URL reaches `_database()`'s `no schema at {url}` refusal, which
+    `main()` prints for every command — so the masking has to live in one
+    helper both call, not inline at `migrate`'s echoes."""
+    password = _the_password()
+
+    result = runner.invoke(application, ["jobs", "--data-dir", str(tmp_path)])
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ConfigurationError)
+    message = str(result.exception)
+    assert "no schema at" in message and "tubedepth migrate" in message
+    assert f":{password}@" not in message, "the password reached an error message"
+    assert "***" in message
+
+
+def test_transfer_masks_the_target_password_in_its_no_schema_refusal(tmp_path: Path) -> None:
+    """`transfer` has its own copy of the no-schema refusal, formatted from
+    `--to` — a URL that in a real cutover carries the runtime credential."""
+    password = _the_password()
+    source_url = f"sqlite+pysqlite:///{tmp_path / 'source.db'}"
+    Database(source_url, allow_sqlite_source=True).create_schema()
+
+    result = runner.invoke(
+        application,
+        ["transfer", "--from", source_url, "--to", database_url()],
+    )
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ConfigurationError), result.output
+    message = str(result.exception)
+    assert "no schema at" in message
+    assert f":{password}@" not in message, "the password reached an error message"
+    assert "***" in message
 
 
 def test_prune_refuses_a_store_whose_index_is_somewhere_else(tmp_path: Path) -> None:

@@ -26,6 +26,7 @@ real migrator/runtime roles and the real `tubedepth` schema.
 from __future__ import annotations
 
 import os
+import sqlite3
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
@@ -45,6 +46,12 @@ from tubedepth.models import (
 from tubedepth.transfer import transfer
 
 FETCHED_AT = datetime(2026, 7, 30, 3, 4, 5, 123456, tzinfo=UTC)
+
+# The revision the previous release's SQLite file was at: the initial schema,
+# before `jobs.refresh` (50ee31ae8b82), `artifacts.schema_version`
+# (c258991c1082), `lane_health` (e0aeb4cca69f) and `worker_control`
+# (1d55f4476c01) existed.
+PRE_CUTOVER_REVISION = "6a8b245e9049"
 
 
 def _seeded(path: Path) -> Database:
@@ -361,6 +368,166 @@ def test_placement_is_checked_on_both_source_and_target(
 
     with pytest.raises(ConfigurationError, match="wrong search_path"):
         transfer(source=source, target=target)
+
+
+# --- A genuinely old source (#33) -------------------------------------------
+
+
+def _pre_cutover_source(path: Path) -> str:
+    """A SQLite file exactly as the previous release left it, and its URL.
+
+    The schema comes from replaying the migration history up to
+    `PRE_CUTOVER_REVISION` — the recorded DDL of the earliest revision, not
+    `create_schema()` on today's models. That difference is the whole point:
+    every other source in this file is seeded through the current models, so
+    none of them could ever be old, which is exactly the gap #33 lived in
+    (and `decisions/003`'s lesson about exercising the calling path).
+
+    The rows go in with raw SQL for the same reason — the current `Job` model
+    cannot describe a row with no `refresh` column.
+    """
+    from alembic import command
+    from alembic.config import Config
+
+    url = f"sqlite+pysqlite:///{path}"
+    root = Path(__file__).resolve().parent.parent
+    configuration = Config(str(root / "alembic.ini"))
+    configuration.set_main_option("script_location", str(root / "migrations"))
+    # `migrations/env.py` resolves the URL through `settings.database_url`,
+    # the environment — the same seam `cli.migrate` itself uses.
+    previous = os.environ.get("TUBEDEPTH_DATABASE_URL")
+    os.environ["TUBEDEPTH_DATABASE_URL"] = url
+    try:
+        command.upgrade(configuration, PRE_CUTOVER_REVISION)
+    finally:
+        if previous is None:
+            os.environ.pop("TUBEDEPTH_DATABASE_URL", None)
+        else:
+            os.environ["TUBEDEPTH_DATABASE_URL"] = previous
+
+    connection = sqlite3.connect(path)
+    try:
+        with connection:
+            connection.execute(
+                "INSERT INTO jobs (identifier, kind, target, state, attempt_count,"
+                " max_attempts, scheduled_at, created_at, webhook_attempts)"
+                " VALUES ('job-old', 'video.metadata', 'a', 'queued', 0, 3,"
+                " '2026-07-30 03:04:05.000000', '2026-07-30 03:04:05.000000', 0)"
+            )
+            connection.execute(
+                "INSERT INTO artifacts (identifier, kind, target, fingerprint, digest,"
+                " byte_count, fetched_at, fresh_until)"
+                " VALUES ('artifact-old', 'video.metadata', 'a', 'fp-old', 'd-old', 1,"
+                " '2026-07-30 03:04:05.123456', '2026-07-30 09:04:05.123456')"
+            )
+    finally:
+        connection.close()
+    return url
+
+
+def test_a_pre_cutover_source_is_refused_by_name_before_a_row_is_read(tmp_path: Path) -> None:
+    """The current models SELECT columns the old file does not have, so without
+    a preflight the crossing dies partway through with
+    `sqlite3.OperationalError: no such column: jobs.refresh` — mid-cutover,
+    the worst possible place. The refusal must name the gap and the remedy."""
+    source_url = _pre_cutover_source(tmp_path / "old.db")
+    source = Database(source_url, allow_sqlite_source=True)
+    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}", allow_sqlite_source=True)
+    target.create_schema()
+
+    with pytest.raises(ConfigurationError) as refused:
+        transfer(source=source, target=target)
+
+    message = str(refused.value)
+    assert "jobs.refresh" in message, "the missing column the SELECT would have died on"
+    assert "artifacts.schema_version" in message
+    assert "worker_control" in message and "lane_health" in message
+    assert "tubedepth migrate" in message, "the remedy: bring the file forward, then re-run"
+    assert "transfer" in message
+
+    # Refused before anything moved — the target is still safe to point at.
+    with target.session(readonly=True) as reading:
+        assert reading.scalar(select(func.count()).select_from(Job)) == 0
+
+
+def test_migrate_brings_a_pre_cutover_file_forward_and_transfer_then_succeeds(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The escape hatch the preflight's remedy names, end to end.
+
+    `tubedepth migrate` against the old file used to upgrade it and then exit
+    non-zero anyway: the post-migrate attribution count reopened the database
+    without `allow_sqlite_source`, and the constructor's PostgreSQL-only
+    refusal fired after the `✓` line had already printed. The service's own
+    refusal to *run* on SQLite is untouched — only `migrate`'s post-check may
+    open the file it just migrated.
+    """
+    from typer.testing import CliRunner
+
+    from tubedepth.cli import application
+
+    source_url = _pre_cutover_source(tmp_path / "old.db")
+    monkeypatch.setenv("TUBEDEPTH_DATABASE_URL", source_url)
+
+    result = CliRunner().invoke(application, ["migrate", "--data-dir", str(tmp_path / "var")])
+
+    assert result.exit_code == 0, result.output
+    assert "current schema" in result.output
+    # The old artifact predates schema versions, so the post-migrate count —
+    # the very query that used to be unreachable — reports it.
+    assert "1 artifact(s) do not name the schema version" in result.output
+
+    source = Database(source_url, allow_sqlite_source=True)
+    target = Database(f"sqlite+pysqlite:///{tmp_path / 'target.db'}", allow_sqlite_source=True)
+    target.create_schema()
+
+    outcome = transfer(source=source, target=target)
+
+    assert outcome.rows == {
+        "jobs": 1,
+        "artifacts": 1,
+        "api_keys": 0,
+        "worker_control": 0,
+        "lane_health": 0,
+        "source_health": 0,
+    }
+    with target.session(readonly=True) as reading:
+        moved = reading.get(Job, "job-old")
+        assert moved is not None
+        assert moved.refresh is False, "the migration's server default, carried across"
+
+
+def test_transfer_dry_run_refuses_a_pre_cutover_source_instead_of_crashing(
+    tmp_path: Path,
+) -> None:
+    """`--dry-run` is the rehearsal an operator trusts before the real thing,
+    and it used to crash with the same `OperationalError` (or print counts
+    against tables it could not read). It returns before `transfer()` — the
+    only other caller of the preflight on this path — so it needs its own
+    call, the same shape as its own `verify_placement()`."""
+    from typer.testing import CliRunner
+
+    from tubedepth.cli import application
+
+    source_url = _pre_cutover_source(tmp_path / "old.db")
+
+    result = CliRunner().invoke(
+        application,
+        [
+            "transfer",
+            "--from",
+            source_url,
+            "--to",
+            "postgresql+psycopg://u:p@h:5432/db",
+            "--dry-run",
+        ],
+    )
+
+    assert result.exit_code != 0
+    assert isinstance(result.exception, ConfigurationError), result.output
+    message = str(result.exception)
+    assert "jobs.refresh" in message
+    assert "tubedepth migrate" in message
 
 
 # --- PostgreSQL round trip -------------------------------------------------
