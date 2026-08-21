@@ -12,6 +12,7 @@ import sys
 import threading
 import time
 from collections.abc import Callable, Iterator
+from datetime import timedelta
 from pathlib import Path
 
 import pytest
@@ -935,3 +936,95 @@ def test_prune_sweeps_an_indexless_store_when_told_to(tmp_path: Path) -> None:
     )
 
     assert result.exit_code == 0, result.output
+
+
+class TestFlatten:
+    """`tubedepth flatten`, end to end through the CLI.
+
+    One video.metadata artifact and its payload, arranged the way collection
+    actually leaves them: a payload file under the store's content address,
+    and an artifact row in the index pointing at that digest. `fetched_at` is
+    set an hour in the past so `FlattenService`'s five-minute safety lag never
+    holds it back from a pass run moments after the arrange step.
+    """
+
+    @staticmethod
+    def _store_a_metadata_artifact(data_directory: Path) -> None:
+        import json
+
+        from tubedepth.fingerprints import fingerprint
+        from tubedepth.models import utcnow
+        from tubedepth.payload_store import PayloadStore
+
+        payload = {
+            "video_id": "dQw4w9WgXcQ",
+            "title": "Never Gonna Give You Up",
+            "channel": "Rick Astley",
+            "channel_id": "UCuAXFkgsw1L7xaCfnd5JJOw",
+            "view_count": 1_000_000,
+        }
+        stored = PayloadStore(data_directory / "payloads").put(
+            "video.metadata", json.dumps(payload).encode()
+        )
+        database = _database(data_directory)
+        database.create_schema()
+        fetched_at = utcnow() - timedelta(hours=1)
+        with database.session() as session:
+            session.add(
+                Artifact(
+                    kind="video.metadata",
+                    target="dQw4w9WgXcQ",
+                    fingerprint=fingerprint(
+                        kind="video.metadata", target="dQw4w9WgXcQ", schema_version="1"
+                    ),
+                    digest=stored.digest,
+                    byte_count=stored.byte_count,
+                    fetched_at=fetched_at,
+                    fresh_until=fetched_at + timedelta(hours=6),
+                )
+            )
+
+    def test_flattens_what_the_worker_stored(self, tmp_path: Path) -> None:
+        self._store_a_metadata_artifact(tmp_path)
+
+        result = runner.invoke(application, ["flatten", "--data-dir", str(tmp_path)])
+
+        assert result.exit_code == 0, result.output
+        assert "flattened" in result.output
+        with _database(tmp_path).session(readonly=True) as session:
+            from tubedepth.models import VideoSnapshot
+
+            snapshots = list(session.scalars(select(VideoSnapshot)))
+        assert len(snapshots) == 1
+        assert snapshots[0].video_id == "dQw4w9WgXcQ"
+
+    def test_dry_run_reports_without_writing(self, tmp_path: Path) -> None:
+        self._store_a_metadata_artifact(tmp_path)
+
+        result = runner.invoke(application, ["flatten", "--data-dir", str(tmp_path), "--dry-run"])
+
+        assert result.exit_code == 0, result.output
+        assert "would flatten" in result.output
+        with _database(tmp_path).session(readonly=True) as session:
+            from tubedepth.models import VideoSnapshot
+
+            assert session.scalar(select(func.count()).select_from(VideoSnapshot)) == 0
+
+    def test_a_second_pass_is_a_no_op(self, tmp_path: Path) -> None:
+        self._store_a_metadata_artifact(tmp_path)
+        first = runner.invoke(application, ["flatten", "--data-dir", str(tmp_path)])
+        assert first.exit_code == 0, first.output
+
+        second = runner.invoke(application, ["flatten", "--data-dir", str(tmp_path)])
+
+        assert second.exit_code == 0, second.output
+        assert "flattened 0 of 0 artifact(s)" in second.output
+
+    def test_a_batch_or_limit_below_one_is_refused(self, tmp_path: Path) -> None:
+        # Both used to be accepted and both reported a clean pass having done
+        # nothing at all — the one failure an operator cannot see.
+        for option in ("--batch", "--limit"):
+            result = runner.invoke(
+                application, ["flatten", "--data-dir", str(tmp_path), option, "0"]
+            )
+            assert result.exit_code != 0, f"{option} 0 was accepted: {result.output}"

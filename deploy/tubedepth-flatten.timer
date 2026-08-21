@@ -1,0 +1,28 @@
+# The schedule behind tubedepth-flatten.service.
+#
+# 15 minutes keeps the flattened tables at most one trending-TTL behind. The
+# pass is database-local — it reads payloads already on disk and the rows
+# already in the database, and makes no YouTube traffic — so this cadence
+# costs nothing outside the shared PostgreSQL.
+#
+# Install it with the service beside it; see tubedepth-flatten.service.
+
+[Unit]
+Description=Flatten new payloads every 15 minutes
+
+[Timer]
+OnBootSec=7min
+OnUnitActiveSec=15min
+
+# Fire once for a window that was missed rather than not at all. This machine
+# is a laptop that suspends, so without this an overnight gap would leave the
+# flattened tables stale until the next scheduled firing instead of catching
+# up on wake.
+Persistent=true
+
+# Not on the quarter-hour. Every instance of this timer doing work at :00,
+# :15, :30, :45 is a pattern, and the cost of avoiding it is nothing.
+RandomizedDelaySec=1min
+
+[Install]
+WantedBy=timers.target

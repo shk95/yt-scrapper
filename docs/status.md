@@ -1533,6 +1533,53 @@ timestamp, no level and no ordering, and "which of the 400 harvests overnight hi
 the bot check" is then unanswerable. Interactive CLI output is unchanged. Undo if
 the worker ever stops being long-lived.
 
+### flatten 테이블은 artifacts에 FK를 걸지 않고, 커서는 5분 늦게 걷는다
+
+**결정 2026-08-21.** `tubedepth flatten`이 `artifacts`의 payload blob을 `video_snapshots`,
+`listing_entries`, `channel_snapshots`, `comments`, `transcripts` 다섯 테이블로 증분
+펼친다. 목적은 조회수·제목·댓글 같은 실제 내용을 PostgREST(→ data-portal)가 볼 수 있게
+하는 것이다 — `artifacts`는 인덱스 행일 뿐이고 내용은 디스크의 content-addressed
+`.json.gz`에 있어서 지금까지는 거기 닿지 못했다.
+
+**FK를 걸지 않는 이유.** 각 행은 출처 `artifact_id`를 남기지만 `artifacts`를 참조하는
+외래키는 두지 않는다. retention이 30일 지난 artifact 행과 그 payload blob을 지우는 것과
+무관하게, 펼쳐진 시계열은 남아야 하기 때문이다 — FK를 걸었다면 retention이 지울 때마다
+`ON DELETE`를 고민해야 했고, 어느 쪽을 골라도 "blob은 30일만 살고 정제된 값은 오래
+산다"는 목적과 어긋난다. `artifact_id`는 참조가 아니라 감사용 출처 표기로 남는다.
+
+**커서가 지금 시각보다 5분 늦게 걷는 이유.** 걷는 순서는 `(fetched_at, identifier)`
+오름차순이지만, 여러 collector가 동시에 커밋하면 그 순서대로 커밋이 도착한다는 보장이
+없다 — `fetched_at`이 앞선 행이 `fetched_at`이 뒤선 행보다 늦게 commit되는 경우가 실제로
+생긴다. 커서를 방금 읽은 가장 최근 `fetched_at`까지 바짝 붙여 전진시키면, 아직 commit
+중이던 더 이른 행을 건너뛰고 다시는 보지 못한다. 그래서 `fetched_at < now() - 5분`인
+행만 대상으로 삼는다 — 5분이면 지연 commit이 이미 끝나 있을 만큼 넉넉하고, ETL이 몇 분
+늦게 도는 것은 15분 주기 타이머에서 비용이 아니다. 이 지연은 upsert의 멱등성과
+짝을 이룬다: 같은 artifact를 두 번 이상 지나가도 `video_snapshots`류는
+`ON CONFLICT DO NOTHING`으로, `comments`/`transcripts`는 아래 규칙으로 안전하다.
+
+**comments/transcripts의 upsert가 관측 시각으로 보호되는 이유.** 두 테이블은
+행 추가가 아니라 최신본 유지다 — 댓글 좋아요 수나 transcript 본문은 재관측될 때마다
+갱신되어야 한다. 그런데 재처리(재기동 후 커서 재개, 혹은 손으로 다시 돌린 backfill)는
+오래된 blob을 다시 지나갈 수 있고, 그 오래된 관측이 이미 반영된 최신 관측을 덮어써서는
+안 된다. 그래서 `comments`는 `EXCLUDED.last_seen_at > comments.last_seen_at`일 때만
+`text`/`like_count`/하트/고정/`last_seen_at`을 덮고 (`first_seen_at`은
+`LEAST`로 더 이른 값을 지킨다), `transcripts`는 `fetched_at`이 더 최신일 때만 덮는다.
+관측 시각이 아니라 처리 순서로 승패를 갈랐다면, 재처리 한 번이 최신 댓글 좋아요 수를
+몇 주 전 값으로 되돌릴 수 있었다.
+
+**PostgREST 노출은 이 저장소가 따로 손댈 게 없다.** 새 테이블 6개는 `postgres-bootstrap.sql`의
+`ALTER DEFAULT PRIVILEGES`(규정 1, 위 "규정 적용" 절)와 stack의
+`40-postgrest-tubedepth-grants.sh`가 이미 `tubedepth` schema 전체에 걸어 둔 장치를
+그대로 상속한다 — migration이 `SET ROLE tubedepth_owner`로 테이블을 만들기만 하면
+runtime 쓰기권한과 `postgrest_anon` 읽기권한이 자동으로 잇는다. data-portal에서 새
+테이블이 보이게 하려고 이 저장소 밖을 고칠 필요가 없다.
+
+**`tubedepth-flatten.timer`를 켜는 것과 compose에 반영하는 것은 운영자의 몫이다.**
+이 저장소는 `deploy/tubedepth-flatten.service`/`.timer` 참조본과
+`deploy/docker-compose.yml`의 flatten 서비스 항목까지만 만든다 — watch와 같은 패턴이다.
+실제로 이 host에서 타이머를 `enable --now` 하는 것, 그리고 `../stack`에 compose
+서비스를 미러링하는 것은 이 저장소의 커밋이 할 수 없는 일이고, 사람이 한다.
+
 ---
 
 ## Bugs worth remembering
