@@ -112,7 +112,7 @@ SQLite 대체 경로는 없다: 모든 유닛이 정상 동작하는 `TUBEDEPTH_
 거부한다. 그 URL이 가리키는 role과 schema를 만드는 것이 `deploy/postgres-bootstrap.sql`이고,
 그 뒤의 규정이 `docs/shared-postgres.md`다.
 
-셋째는 선택이고 기본적으로 꺼져 있다. `tubedepth-watch.timer`가 매시간 `tubedepth watch`를
+나머지 둘은 선택이고 기본적으로 꺼져 있다. `tubedepth-watch.timer`가 매시간 `tubedepth watch`를
 돌려서 watch list 전체를 큐에 넣되 신선도 기간을 강제로 넘겨서, 매 회차가 새 관측을 기록하게
 한다. `GET /v1/artifacts`를 캐시가 아니라 미분 가능한 이력으로 만드는 것이 이것이고, 이력은
 실시간으로만 쌓이므로 필요해지기 전에 시작해두는 편이 낫다.
@@ -143,6 +143,17 @@ systemctl --user enable --now tubedepth-watch.timer
 하나, 댓글 많은 영상 하나에 벽시계 몇 분. 산수는 `deploy/watchlist.example.txt`에 있다. 그보다
 한참 위의 지속 부하에서 이 시스템이 어떻게 움직이는지는 측정된 바 없다.
 
+`tubedepth-flatten.timer`가 넷째 유닛이자 나머지 선택 하나다. 15분마다 `tubedepth flatten`을
+돌려서, 지난 회차 이후 수집된 payload를 조회 가능한 테이블로 펼친다 — 평범한 SQL로 저장된
+관측 내부를 볼 수 있게 하는 유일한 경로다. 증분이고 멱등이라 한 번 걸러도 손해가 없고,
+크래시 뒤에는 다시 돌리는 것이 곧 복구 절차다.
+
+```sh
+cp deploy/tubedepth-flatten.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now tubedepth-flatten.timer
+```
+
 API와 워커를 나눈 이유는 취향이 아니다. yt-dlp 추출은 블로킹이고 메모리를 쓰므로,
 같이 돌리면 댓글 수집 하나가 `GET /v1/jobs/{job_id}`의 p99를 결정하고 yt-dlp 크래시가
 API를 같이 죽인다.
@@ -152,9 +163,9 @@ API는 기본적으로 **loopback에만** 바인딩한다. 이 프로젝트의 �
 
 ## Docker로 돌리기
 
-이미지 하나, `deploy/docker-compose.yml`에 서비스 넷. `migrate`가 한 번 돌고,
-`api`·`worker`·`watch`가 그것이 성공적으로 끝나기를 기다린다. 이미지가
-`ENTRYPOINT ["tubedepth"]`라서 세 서비스는 `command:`만 다르다.
+이미지 하나, `deploy/docker-compose.yml`에 서비스 다섯. `migrate`가 한 번 돌고,
+`api`·`worker`·`watch`·`tubedepth-flatten`이 그것이 성공적으로 끝나기를 기다린다. 이미지가
+`ENTRYPOINT ["tubedepth"]`라서 네 서비스는 `command:`만 다르다.
 
 ```sh
 cp deploy/.env.example deploy/.env

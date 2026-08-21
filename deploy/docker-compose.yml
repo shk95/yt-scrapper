@@ -347,6 +347,16 @@ services:
     # `deploy/tubedepth-flatten.timer` runs the one-shot form every 15
     # minutes; here there is no scheduler, so the process stays resident and
     # sweeps on the same cadence.
+    #
+    # **This is the connection `service-db.json` budgets**, the 1 that
+    # `workers_and_schedulers` was raised from 0 for. A pass takes one write
+    # session (the statements and the cursor) and — the batch being read
+    # before that transaction opens — one read session; the timer form on a
+    # host exits and hands both back. Resident here it goes through the same
+    # `_database()` as everything else, so a write engine (2+2) and a read
+    # engine (2+2) keep about 2 idle connections for the life of the
+    # container, 8 at the pool ceiling, the second coming out of
+    # `service_spare` exactly as the watcher's above do. See docs/status.md.
     command: flatten --every 900
     environment: *runtime-environment
     volumes:
