@@ -17,6 +17,25 @@
 
 ## [Unreleased]
 
+## [1.2.0] - 2026-08-21
+
+### Added
+
+- **watch list가 댓글을 수확할 수 있고, 플레이리스트를 감시할 수 있다.** listing
+  directive에 `+comments` 변형 — `channel+comments`, `search+comments`,
+  `playlist+comments` — 이 생겼다. 모든 listing directive가 이미 큐잉하는
+  `video.metadata`에 더해, 찾아낸 영상마다 `video.comments` 잡으로도 퍼진다.
+  기본값이나 플래그가 아니라 줄 단위 opt-in인 이유: 댓글은 이 시스템에서 가장
+  비싼 kind라서, 그것을 수확하는 스케줄은 목록 크기를 정하는 바로 그 자리에
+  적혀 있어야 한다. `playlist` directive도 새로 생겼다. 채널의 `/videos` 탭에는
+  Shorts도 지난 라이브도 없어서, 업로드 전체 이력은 원래 `UU…` 플레이리스트에
+  대한 `playlist.items`였다 — 이제 watch list가 그것을 말할 수 있다.
+
+  기계적으로는, 후속이 둘인 줄은 같은 listing을 후속마다 하나씩 두 번 큐잉한다.
+  잡은 `follow_up_kind`를 정확히 하나 갖기 때문이다. 첫 잡만 신선도 기간을
+  강제로 넘기고, 둘째는 첫째가 방금 쓴 캐시를 탄다 — listing의 artifact 이력은
+  회차당 두 건이 아니라 한 건씩 쌓인다.
+
 ## [1.1.0] - 2026-08-21
 
 ### Changed
@@ -367,7 +386,8 @@
 - 워커가 실행 중 리스를 갱신한다. 긴 댓글 수집이 죽은 것으로 회수되어 재시도되던 문제.
 - 계획서에 있었으나 아무도 넣지 않았던 조회 인덱스.
 
-[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.1.0...HEAD
+[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.2.0...HEAD
+[1.2.0]: https://github.com/slopindustries/yt-scrapper/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.2...v1.0.3
 [1.0.2]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.1...v1.0.2

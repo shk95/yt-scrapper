@@ -126,18 +126,22 @@ systemctl --user daemon-reload
 systemctl --user enable --now tubedepth-watch.timer
 ```
 
-목록에는 타입이 붙는다 — `video`, `channel`, `search`, `trending` 다음에 타깃 — 그래서 스케줄
-하나가 고정된 영상 묶음, 채널 업로드, 트렌드 키워드, 지역 차트를 한꺼번에 수집한다. 넷 중 하나가
-아닌 directive는 줄 번호를 짚어 거부한다. 조용히 아무것도 수집하지 않는 오타야말로 watch list가
-가장 못 보여주는 실패이기 때문이다. 타이머가 없는 환경 — compose — 에서는
-`tubedepth watch --every 3600`이 상주한다.
+목록에는 타입이 붙는다 — `video`, `channel`, `search`, `playlist`, `trending` 다음에 타깃 —
+그래서 스케줄 하나가 고정된 영상 묶음, 채널 업로드, 트렌드 키워드, 플레이리스트, 지역 차트를
+한꺼번에 수집한다. listing directive에는 `+comments` 변형(`channel+comments`,
+`search+comments`, `playlist+comments`)도 있어서, 찾아낸 영상마다 댓글까지 추가로 수확한다.
+이들 중 하나가 아닌 directive는 줄 번호를 짚어 거부한다. 조용히 아무것도 수집하지 않는
+오타야말로 watch list가 가장 못 보여주는 실패이기 때문이다. 타이머가 없는 환경 — compose —
+에서는 `tubedepth watch --every 3600`이 상주한다.
 
-**목록 크기는 의도해서 정하고, 네 타입의 값이 같지 않다는 것을 안다.** `video` 한 줄은 발화마다
+**목록 크기는 의도해서 정하고, 타입마다 값이 같지 않다는 것을 안다.** `video` 한 줄은 발화마다
 강제 수집 한 건이고, 나머지 전부가 쓰는 것과 같은 per-address 예산에서 나간다. 30줄을 시간당
-도는 것은 측정된 처리량의 약 1%다. `channel`·`search`·`trending` 한 줄은 찾아낸 영상마다
-`video.metadata` 잡으로 퍼지며, `TUBEDEPTH_LISTING_LIMIT`(기본 100)까지 간다 — **그런 줄 하나가
-수집 한 건이 아니라 백 건일 수 있다.** 산수는 `deploy/watchlist.example.txt`에 있다. 그보다 한참
-위의 지속 부하에서 이 시스템이 어떻게 움직이는지는 측정된 바 없다.
+도는 것은 측정된 처리량의 약 1%다. `channel`·`search`·`playlist`·`trending` 한 줄은 찾아낸
+영상마다 `video.metadata` 잡으로 퍼지며, `TUBEDEPTH_LISTING_LIMIT`(기본 100)까지 간다 — **그런
+줄 하나가 수집 한 건이 아니라 백 건일 수 있다.** `+comments` 줄은 거기에 더해 영상마다 댓글
+수확 잡 하나씩으로 퍼지는데, 댓글은 이 시스템에서 가장 비싼 kind다 — 대략 댓글 20개당 요청
+하나, 댓글 많은 영상 하나에 벽시계 몇 분. 산수는 `deploy/watchlist.example.txt`에 있다. 그보다
+한참 위의 지속 부하에서 이 시스템이 어떻게 움직이는지는 측정된 바 없다.
 
 API와 워커를 나눈 이유는 취향이 아니다. yt-dlp 추출은 블로킹이고 메모리를 쓰므로,
 같이 돌리면 댓글 수집 하나가 `GET /v1/jobs/{job_id}`의 p99를 결정하고 yt-dlp 크래시가

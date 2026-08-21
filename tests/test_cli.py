@@ -381,6 +381,35 @@ def test_every_job_watch_queues_is_forced_past_the_freshness_window(tmp_path: Pa
     assert result.output.count("(forced)") == 2, result.output
 
 
+def test_a_comments_directive_queues_the_listing_once_per_follow_up(tmp_path: Path) -> None:
+    """`channel+comments` is two listing jobs: one fanning out to metadata,
+    one fanning out to comments.
+
+    Two jobs rather than one job with two follow-ups, because a job carries
+    exactly one `follow_up_kind`. Only the first is forced: forcing both would
+    run the enumeration twice a pass and append two near-identical rows to the
+    listing's artifact history every hour. The second rides the cache the
+    first just wrote — the observation series moves once per pass, and the
+    comments fan-out reads the same enumeration.
+    """
+    watchlist = written_watchlist(
+        tmp_path, "channel+comments @director_pihyunjung\nsearch+comments 화장품\n"
+    )
+
+    result = runner.invoke(
+        application, ["watch", str(watchlist), "--data-dir", str(migrated(tmp_path))]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert queued_jobs(tmp_path) == [
+        ("channel.videos", "@director_pihyunjung", "video.metadata", True),
+        ("channel.videos", "@director_pihyunjung", "video.comments", False),
+        ("search.videos", "화장품", "video.metadata", True),
+        ("search.videos", "화장품", "video.comments", False),
+    ]
+    assert "✓ 4 job(s) queued" in result.output, result.output
+
+
 def test_a_video_line_is_collected_directly_and_fans_out_to_nothing(tmp_path: Path) -> None:
     """A video is already the thing being collected, so a follow-up would be a
     second collection of the same video on every pass."""
