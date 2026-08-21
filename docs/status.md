@@ -384,6 +384,33 @@ Direct egress is a residential KT line in KR.
 
 ## Decisions that are expensive to reverse
 
+### `/v1` 인증은 기본값이 꺼짐이다
+
+**Decided 2026-08-21.** 이 서비스는 사설망에 배포되어 플릿의 다른 서비스가 호출한다.
+그 환경에서 호출자마다 API 키를 발급하는 것은 감사 컬럼(`jobs.api_key_id`)과 키별
+레이트 리밋을 얻는 대신, **배포하고 교체해야 할 비밀을 하나 늘리는** 일이었다. 얻는
+것보다 관리 비용이 컸으므로 기본값을 꺼짐으로 돌렸다.
+
+**삭제가 아니라 스위치인 이유.** `TUBEDEPTH_REQUIRE_API_KEY`(`settings.api_key_required`)
+하나로 켜고 끈다. "사설망에 있다"와 "닿는다"의 차이는 방화벽 규칙 하나이고, 그 규칙이
+바뀌는 날의 대응이 revert가 아니라 변수 하나여야 한다. `api_keys` 테이블,
+`jobs.api_key_id`, `tubedepth key` 명령은 전부 그대로 있고, 켜면 모든 401과 할당량이
+이전과 똑같이 돌아온다. 마이그레이션은 없다.
+
+**꺼져 있어도 보낸 키는 검증한다.** 무시하지 않는 쪽을 골랐다. 헤더를 계속 보내는
+호출자는 귀속 이력과 할당량을 유지하고, 폐기된 키가 조용히 익명 접근으로 승격되지
+않는다. 키 없이 등록된 잡은 지어낸 식별자 대신 `api_key_id`를 남기지 않는다 — 그
+컬럼은 `api_keys`의 행을 가리키거나 아무것도 가리키지 않거나 둘 중 하나여야 한다.
+
+**예도 아니오도 아닌 값은 시작 시점에 거부한다.** `=treu`가 "아니오"로 읽혀 아무도
+선택하지 않은 열린 API를 서빙하는 것이 이 변수가 존재하는 이유인 실패다. 시작할 때 한
+번만 읽으므로 같은 인스턴스가 요청 시점에 따라 401과 202를 오가는 일도 없다.
+
+**주의: 이 인스턴스가 플릿 밖에서도 닿는다면 업그레이드가 문을 연다.** 리버스 프록시를
+앞에 두는 순간 포트는 더 이상 loopback이 아니므로, 그때는 `TUBEDEPTH_REQUIRE_API_KEY=1`을
+먼저 설정해야 한다. `deploy/tubedepth-api.service`와 `deploy/.env.example`에 같은 경고가
+주석으로 붙어 있다.
+
 ### PostgreSQL is where this is going, and why
 
 **Decided 2026-08-20, corrected 2026-08-20.** The other scrapers in this

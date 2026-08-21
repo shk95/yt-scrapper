@@ -20,6 +20,29 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+### Changed
+
+- **`/v1` no longer requires an `X-API-Key` by default.** This service is
+  deployed on a private network and reached by the rest of the fleet, where a
+  key per caller bought an audit column and a rate limiter at the price of a
+  secret to distribute and rotate. Authentication is now behind
+  `TUBEDEPTH_REQUIRE_API_KEY` (`1`/`true`/`yes`/`on`), off unless set and read
+  once at start-up; a value that is neither a yes nor a no is refused there
+  rather than read as a no.
+
+  A switch rather than a removal: the difference between "on a private
+  network" and "reachable" is one firewall rule, and turning it back on
+  restores every 401 and the per-key allowance exactly as they were. Keys are
+  still minted, listed and revoked by `tubedepth key`. **A key that is sent to
+  an instance that does not require one is still verified**, so a caller keeps
+  its attribution and its allowance and a revoked key still fails rather than
+  being quietly promoted to anonymous access; a job submitted without one
+  records no `api_key_id` rather than an invented identifier.
+
+  **If this instance is reachable by anything but the fleet, set
+  `TUBEDEPTH_REQUIRE_API_KEY=1` before upgrading** — otherwise the upgrade
+  opens it.
+
 ## [1.0.3] - 2026-08-21
 
 ### Fixed

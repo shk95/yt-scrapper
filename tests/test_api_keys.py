@@ -11,8 +11,9 @@ from __future__ import annotations
 import pytest
 
 from tubedepth.database import Database
-from tubedepth.errors import RateLimitedError, UnauthenticatedError
+from tubedepth.errors import ConfigurationError, RateLimitedError, UnauthenticatedError
 from tubedepth.services.keys import ApiKeyService
+from tubedepth.settings import api_key_required
 
 
 def service(database: Database) -> tuple[ApiKeyService, Database]:
@@ -118,3 +119,32 @@ def test_a_revoked_key_is_still_listed_and_says_so(database: Database) -> None:
     service.revoke(minted.identifier)
 
     assert [entry.revoked for entry in service.listed()] == [True]
+
+
+def test_a_deployment_asks_for_keys_only_when_it_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Off unless set. This service is reached over a private network by the
+    rest of the fleet, and a key per caller bought an audit column at the price
+    of a secret to distribute — so the header is opt-in."""
+    monkeypatch.delenv("TUBEDEPTH_REQUIRE_API_KEY", raising=False)
+    assert api_key_required() is False
+
+    for spelling in ("1", "true", "TRUE", "yes", "on", " true "):
+        monkeypatch.setenv("TUBEDEPTH_REQUIRE_API_KEY", spelling)
+        assert api_key_required() is True, spelling
+
+    for spelling in ("0", "false", "no", "off", ""):
+        monkeypatch.setenv("TUBEDEPTH_REQUIRE_API_KEY", spelling)
+        assert api_key_required() is False, spelling
+
+
+def test_a_value_that_is_neither_a_yes_nor_a_no_is_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """`=treu` reading as "no" is an open API nobody chose, which is the whole
+    failure this variable exists to make visible."""
+    monkeypatch.setenv("TUBEDEPTH_REQUIRE_API_KEY", "treu")
+
+    with pytest.raises(ConfigurationError):
+        api_key_required()
