@@ -20,6 +20,43 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+### Fixed
+
+- **A stop request is honoured mid-drain (#35).** The stop event was checked
+  only between drains, so `systemctl stop` during a deep queue kept claiming
+  new jobs until the stop timeout delivered SIGKILL mid-job and the abandoned
+  leases sat out their full term. The event is read wherever the pause flag
+  is read: in-flight jobs finish, nothing new is claimed.
+- **A lost claim race no longer reads as an empty queue (#37).** The claim's
+  candidate SELECT carries `FOR UPDATE SKIP LOCKED`, so a contended candidate
+  yields the next claimable job instead of a false "nothing to do" that ended
+  a drain with QUEUED jobs still available.
+- **`prune`'s disproportionate-sweep guard runs before anything is deleted,
+  on the count the sweep will actually face (#31).** It used to run after the
+  age deletes with the pre-deletion count, which passed it in exactly the
+  partial-transfer state it exists to refuse.
+- **`prune` unlinks payload files only after the row deletions commit (#32).**
+  A failed commit used to roll the rows back pointing at files already gone;
+  now the same failure leaves rows and files both intact, and a crash between
+  the two leaves orphans for the next sweep.
+- **Trending pagination ends when a page adds nothing (#36).** An empty
+  `items` beside a `nextPageToken` — or a token that repeats — looped
+  forever, one Data API quota unit per lap, holding the job's lease.
+- **`GET /v1/jobs/{job_id}/result` refuses withdrawn payloads (#34).** A
+  payload collected under a retracted schema version answered 410 through
+  the artifact route and 200 through the job route, for the identical bytes.
+  One shared gate now guards both doors.
+- **`tubedepth migrate` no longer prints the database password (#30).** The
+  migrator credential landed in shell scrollback, journalctl and
+  `docker compose logs`; every message naming a URL now renders the password
+  as `***`.
+- **`tubedepth transfer` preflights a pre-cutover source (#33).** An old
+  SQLite file died mid-transfer on the columns it lacks (and `--dry-run`
+  died the same way after printing plausible counts); the transfer now
+  refuses up front naming each gap, and `tubedepth migrate` can bring the
+  old file forward first — its post-upgrade count no longer refuses the
+  SQLite source it was just asked to migrate.
+
 ## [1.0.2] - 2026-08-21
 
 ### Fixed
