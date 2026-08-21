@@ -388,7 +388,8 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB
 
 수집된 데이터 원본 — 저장된 payload 그대로이며, 다시 인코딩한 것이 아니다.
 
-**응답** 200. 401 `unauthenticated`; 404 `not_found`; 409 `conflict`; 429 `rate_limited`.
+**응답** 200. 401 `unauthenticated`; 404 `not_found`; 409 `conflict`; 410 `retracted`;
+429 `rate_limited`.
 
 ```sh
 curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB/result
@@ -402,6 +403,15 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB/result
 않으므로, 수집한 것이 사라진 뒤에도 잡은 자기가 무엇을 했는지 계속 답할 수 있다. **결과는
 영구적이지 않고, 잡 원장이 영구적이다.** retention 기간 너머까지 데이터가 필요한 클라이언트는
 가져올 때 자기 쪽에 저장해야 한다.
+
+이 결과를 수집한 버전을 소스가 그 뒤에 철회했다면 **410 `retracted`**. 같은 바이트는
+`GET /v1/artifacts/{digest}`를 통해서도 410으로 답하고, job id를 쥐고 있다는 것이 철회를
+우회하는 길이 되지는 않는다 — 철회된 버전의 payload는 낡은 것이 아니라 틀린 것이고, 어느
+라우트로 묻든 마찬가지다.
+
+결과의 schema 버전이 기록된 적 없고 그 kind가 어떤 버전을 철회한 적이 있으면 **409
+`conflict`**도 나온다 — artifact 라우트의 백스톱이 여기에도 똑같이 적용된 것이다.
+`tubedepth backfill-schema-versions`를 돌린 뒤 그 잡에 다시 물으면 된다.
 
 모든 payload에는 `degradations` 목록이 있다. 깨끗한 수집에서는 비어 있고, 그렇지 않으면
 얻지 못한 것의 이름이 들어간다 — 댓글이 꺼진 영상의 `video.bundle`이라든가, 렌더러가 더

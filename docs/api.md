@@ -420,8 +420,8 @@ curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB
 
 The collected data, verbatim — the stored payload, not a re-encoding of it.
 
-**Answers** 200. 401 `unauthenticated`; 404 `not_found`; 409 `conflict`; 429
-`rate_limited`.
+**Answers** 200. 401 `unauthenticated`; 404 `not_found`; 409 `conflict`; 410
+`retracted`; 429 `rate_limited`.
 
 ```sh
 curl -s -H "X-API-Key: $KEY" localhost:8080/v1/jobs/$JOB/result
@@ -437,6 +437,17 @@ retention removes artifacts and never touches the job ledger, so a job stays
 answerable about what it did long after what it collected is gone. **Results
 are not permanent; the job ledger is.** A client that needs the data beyond the
 retention window has to store it when it fetches it.
+
+**410 `retracted`** if the version that collected this result is one the
+source has since withdrawn. The identical bytes answer 410 through
+`GET /v1/artifacts/{digest}`, and a kept job id is not a way around that: a
+withdrawn version's payloads are wrong rather than merely old, whichever route
+asks.
+
+**409 `conflict`** also comes back when the result's schema version was never
+recorded and its kind has withdrawn a version — the artifact route's backstop,
+applied here too. Run `tubedepth backfill-schema-versions` and ask the job
+again.
 
 Every payload carries a `degradations` list. It is empty on a clean collection
 and names what could not be had otherwise — a `video.bundle` whose comments
