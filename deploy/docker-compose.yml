@@ -307,8 +307,9 @@ services:
     #
     # **This costs connections `service-db.json` does not budget for.** That
     # manifest decomposes the 32 as api 8 + worker 2C+4 + migration 1 +
-    # service_spare 7, with `workers_and_schedulers: 0` — true while the only
-    # scheduler was a systemd one-shot that lived for milliseconds. Resident,
+    # workers_and_schedulers 1 + service_spare 6 — and the 1 is the flatten
+    # timer's, not this watcher's: the manifest still assumes schedulers are
+    # one-shots that live for milliseconds. Resident,
     # this container goes through the same `_database()` as everything else, so
     # it builds a write engine (2+2) and a read engine (2+2) and keeps their
     # idle connections for the life of the container: about 2 in steady state
@@ -333,6 +334,41 @@ services:
     # queueing rather than a collection, so it needs far less room than the
     # worker.
     stop_grace_period: 30s
+    restart: unless-stopped
+
+  # ------------------------------------------------------------------------
+  # The flattener: unpacks new payloads into the queryable tables.
+  # ------------------------------------------------------------------------
+  tubedepth-flatten:
+    image: ${TUBEDEPTH_IMAGE:-tubedepth:dev}
+    build:
+      context: ..
+      dockerfile: Dockerfile
+    # `--every` exists for exactly this: compose has no timers. On a host,
+    # `deploy/tubedepth-flatten.timer` runs the one-shot form every 15
+    # minutes; here there is no scheduler, so the process stays resident and
+    # sweeps on the same cadence.
+    #
+    # **This is the connection `service-db.json` budgets**, the 1 that
+    # `workers_and_schedulers` was raised from 0 for. A pass takes one write
+    # session (the statements and the cursor) and — the batch being read
+    # before that transaction opens — one read session; the timer form on a
+    # host exits and hands both back. Resident here it goes through the same
+    # `_database()` as everything else, so a write engine (2+2) and a read
+    # engine (2+2) keep about 2 idle connections for the life of the
+    # container, 8 at the pool ceiling, the second coming out of
+    # `service_spare` exactly as the watcher's above do. See docs/status.md.
+    command: flatten --every 900
+    environment: *runtime-environment
+    volumes:
+      # It reads the payload store the worker writes and reads/writes the
+      # flattened tables in the database; no extraction of its own. It gets
+      # the volume because it shares the env anchor above, so
+      # TUBEDEPTH_DATA_DIR names the same path in this container.
+      - tubedepth-data:/var/lib/tubedepth
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
     restart: unless-stopped
 
 volumes:

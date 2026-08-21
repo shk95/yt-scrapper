@@ -120,7 +120,7 @@ There is no SQLite fallback: every unit refuses to start without a working
 the roles and schema that URL points at, and `docs/shared-postgres.md` is the
 regulation behind it.
 
-The third is optional and off by default: `tubedepth-watch.timer` runs
+The other two are optional and off by default. `tubedepth-watch.timer` runs
 `tubedepth watch` every hour, which queues a whole watch list forced past the
 freshness window so that each pass records a new observation. That is what
 turns `GET /v1/artifacts` from a cache into a history you can differentiate —
@@ -159,6 +159,19 @@ well-commented video. `deploy/watchlist.example.txt` has the arithmetic. The
 behaviour of this system under sustained load well above that has not been
 measured.
 
+`tubedepth-flatten.timer` is the fourth unit and the other optional one: every
+fifteen minutes it runs `tubedepth flatten`, which unpacks the payloads
+collected since its last pass into the queryable tables — the only way anything
+speaking plain SQL sees inside a stored observation. It is incremental and
+idempotent, so a missed firing costs nothing and rerunning after a crash is the
+recovery procedure.
+
+```sh
+cp deploy/tubedepth-flatten.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now tubedepth-flatten.timer
+```
+
 Splitting the API from the worker is not a matter of taste. yt-dlp extraction
 blocks and holds memory; run them together and one comment harvest sets the p99
 of `GET /v1/jobs/{job_id}`, while a yt-dlp crash takes the API with it.
@@ -169,9 +182,9 @@ exposing it.
 
 ## Run it with Docker
 
-One image, four services in `deploy/docker-compose.yml`: `migrate` runs once,
-and `api`, `worker` and `watch` wait for it to complete successfully. They
-differ only by their `command:`, because the image is
+One image, five services in `deploy/docker-compose.yml`: `migrate` runs once,
+and `api`, `worker`, `watch` and `tubedepth-flatten` wait for it to complete
+successfully. They differ only by their `command:`, because the image is
 `ENTRYPOINT ["tubedepth"]`.
 
 ```sh

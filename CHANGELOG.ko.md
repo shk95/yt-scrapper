@@ -17,6 +17,21 @@
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-21
+
+### Added
+
+- **`tubedepth flatten`이 저장된 payload를 조회 가능한 테이블로 펼친다.** 증분·멱등
+  ETL이 `artifacts`를 걸으며 각 payload의 내용을 여섯 테이블 —
+  `video_snapshots`, `listing_entries`, `channel_snapshots`, `comments`,
+  `transcripts`, `flatten_progress` — 중 하나로 라우팅한다. PostgREST(그
+  뒤의 data portal)가 인덱스 행과 불투명한 blob 경로가 아니라 제목·조회수·댓글
+  본문을 볼 수 있게 하는 것이 목적이다. 커서는 지금 시각보다 5분 늦게 걷고,
+  `comments`/`transcripts` upsert는 관측 시각으로 보호되어 오래된 blob을 최신
+  관측 뒤에 재처리해도 값이 되돌아가지 않는다. `deploy/tubedepth-flatten.service`와
+  `.timer`는 참조본으로 실린다(watch와 같은 패턴). 타이머를 켜는 것은
+  운영자의 몫이다.
+
 ## [1.2.0] - 2026-08-21
 
 ### Added
@@ -386,7 +401,8 @@
 - 워커가 실행 중 리스를 갱신한다. 긴 댓글 수집이 죽은 것으로 회수되어 재시도되던 문제.
 - 계획서에 있었으나 아무도 넣지 않았던 조회 인덱스.
 
-[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/slopindustries/yt-scrapper/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/slopindustries/yt-scrapper/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.2...v1.0.3

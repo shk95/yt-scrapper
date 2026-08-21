@@ -20,6 +20,22 @@ How a release is cut: [`docs/releasing.md`](docs/releasing.md).
 
 ## [Unreleased]
 
+## [1.3.0] - 2026-08-21
+
+### Added
+
+- **`tubedepth flatten` unpacks stored payloads into queryable tables.** An
+  incremental, idempotent ETL walks `artifacts` and routes each payload's
+  content into one of six tables — `video_snapshots`, `listing_entries`,
+  `channel_snapshots`, `comments`, `transcripts`, `flatten_progress` — so
+  PostgREST (and the data portal behind it) can see titles, view counts and
+  comment text, not just the index row and an opaque blob path. The cursor
+  walks five minutes behind the clock, and `comments`/`transcripts` upserts
+  are gated on observation recency, so re-processing an old blob after a
+  newer one cannot regress it. `deploy/tubedepth-flatten.service` and
+  `.timer` ship as reference units (watch's pattern); enabling the timer is
+  an operator step.
+
 ## [1.2.0] - 2026-08-21
 
 ### Added
@@ -479,7 +495,8 @@ for. Not yet exercised under sustained load; see the honest limits in the
   longer reaped as dead and retried.
 - The query indexes the plan specified and nobody had added.
 
-[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.2.0...HEAD
+[Unreleased]: https://github.com/slopindustries/yt-scrapper/compare/v1.3.0...HEAD
+[1.3.0]: https://github.com/slopindustries/yt-scrapper/compare/v1.2.0...v1.3.0
 [1.2.0]: https://github.com/slopindustries/yt-scrapper/compare/v1.1.0...v1.2.0
 [1.1.0]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.3...v1.1.0
 [1.0.3]: https://github.com/slopindustries/yt-scrapper/compare/v1.0.2...v1.0.3

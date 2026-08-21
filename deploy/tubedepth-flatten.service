@@ -1,0 +1,56 @@
+# One pass: unpack new payloads into the queryable tables.
+#
+# Started by tubedepth-flatten.timer rather than enabled directly. Reads and
+# writes the database and reads the payload store; it does no extraction of
+# its own, only the unpacking of artifacts the worker already collected.
+#
+# One-shot rather than `tubedepth flatten --every`: systemd already has a
+# scheduler, and a resident process would be a second, worse one — it would
+# miss a firing across a suspend, where `Persistent=true` in the timer does
+# not. `--every` is for the environments with no timer, compose among them.
+#
+# Idempotent by construction — the flattened tables' keys make a replayed
+# artifact a no-op — so a crashed pass needs no cleanup; the next firing
+# picks up where the last one left off.
+#
+#   cp deploy/tubedepth-flatten.* ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now tubedepth-flatten.timer
+
+[Unit]
+Description=tubedepth flatten: unpack new payloads into the queryable tables
+Documentation=file://%h/github_prj/yt-scrapper/docs/superpowers/specs/2026-08-21-flatten-etl-design.md
+After=network-online.target
+
+[Service]
+Type=oneshot
+WorkingDirectory=%h/github_prj/yt-scrapper
+# systemd gives a user service a minimal PATH of its own — the shell's is not
+# inherited — and uv lives in a nix profile under $HOME on this host, because
+# there is no passwordless sudo here (see AGENTS.md). Without this line
+# `/usr/bin/env uv` resolves to nothing and the unit exits 127 the first time
+# it is enabled.
+Environment=PATH=%h/.nix-profile/bin:/usr/local/bin:/usr/bin:/bin
+Environment=TUBEDEPTH_DATA_DIR=%h/github_prj/yt-scrapper/var
+# Required since the PostgreSQL cutover (#15) — this unit's `flatten` opens
+# the database like every other command, and there is no SQLite fallback.
+# Same file the api/worker units use; see tubedepth-worker.service for how to
+# create it.
+EnvironmentFile=%h/.config/tubedepth/worker.env
+ExecStart=/usr/bin/env uv run --frozen tubedepth flatten
+
+# Not restarted. A pass that failed is not worth retrying in a tight loop —
+# the next firing is soon enough, and a database that has gone missing should
+# show up as a repeating failure rather than a spin.
+
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+# uv writes while it runs, and ProtectHome=read-only covers all of it: its
+# cache under ~/.cache/uv, and a lock inside the project's .venv. Naming the
+# three paths keeps the sandbox strict; loosening ProtectHome would not.
+ReadWritePaths=%h/github_prj/yt-scrapper/var %h/github_prj/yt-scrapper/.venv %h/.cache/uv
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true

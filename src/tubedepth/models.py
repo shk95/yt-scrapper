@@ -7,9 +7,20 @@ from __future__ import annotations
 
 import enum
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 
-from sqlalchemy import DateTime, Enum, Float, Index, Integer, String, Text, TypeDecorator
+from sqlalchemy import (
+    BigInteger,
+    Date,
+    DateTime,
+    Enum,
+    Float,
+    Index,
+    Integer,
+    String,
+    Text,
+    TypeDecorator,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column
 
 
@@ -309,3 +320,139 @@ class SourceHealth(Base):
     last_failure_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
     last_error_code: Mapped[str | None] = mapped_column(String(64), nullable=True)
     last_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class VideoSnapshot(Base):
+    """One video.metadata observation, flattened for SQL.
+
+    Deliberately no foreign key to `artifacts`: retention deletes artifact
+    rows after their window, and these rows are the long-lived series that
+    is meant to survive that. `artifact_id` is provenance and the
+    idempotency key, not a reference anything enforces.
+    """
+
+    __tablename__ = "video_snapshots"
+    __table_args__ = (Index("ix_video_snapshot_series", "video_id", "fetched_at"),)
+
+    artifact_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    video_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    title: Mapped[str] = mapped_column(Text, nullable=False)
+    channel: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_id: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    view_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    like_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    comment_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    # The coarse fallback for the exact instant above; YouTube stopped
+    # returning `published_at` for some videos (see schemas.VideoMetadata).
+    published_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+
+
+class ListingEntry(Base):
+    """One position in one listing observation — a ranking time series."""
+
+    __tablename__ = "listing_entries"
+    __table_args__ = (
+        Index("ix_listing_entry_series", "target", "fetched_at"),
+        Index("ix_listing_entry_video", "video_id"),
+    )
+
+    artifact_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    # 0-based position within the listing at observation time.
+    position: Mapped[int] = mapped_column(Integer, primary_key=True)
+    kind: Mapped[str] = mapped_column(String(64), nullable=False)
+    target: Mapped[str] = mapped_column(String(500), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    video_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    title: Mapped[str | None] = mapped_column(Text, nullable=True)
+    view_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    duration_seconds: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    channel: Mapped[str | None] = mapped_column(Text, nullable=True)
+    channel_id: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    published_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+
+
+class ChannelSnapshot(Base):
+    """One channel.about observation, flattened for SQL."""
+
+    __tablename__ = "channel_snapshots"
+    __table_args__ = (Index("ix_channel_snapshot_series", "channel_id", "fetched_at"),)
+
+    artifact_id: Mapped[str] = mapped_column(String(32), primary_key=True)
+    channel_id: Mapped[str] = mapped_column(String(500), nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    handle: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    # Rounded by YouTube; the name says so. Nothing more precise exists.
+    subscriber_count_approximate: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    view_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    video_count: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    country: Mapped[str | None] = mapped_column(String(100), nullable=True)
+
+
+class CommentRecord(Base):
+    """One comment, deduplicated across harvests.
+
+    Harvests overlap: the same comment appears in every 24h harvest of its
+    video. This table keeps one row per (video_id, comment_id); mutable
+    fields follow the newest observation, `first_seen_at`/`last_seen_at`
+    record the observed lifespan.
+    """
+
+    __tablename__ = "comments"
+    __table_args__ = (Index("ix_comment_published", "video_id", "published_at"),)
+
+    # The harvest payload does not carry the video id; the artifact's
+    # `target` is it.
+    video_id: Mapped[str] = mapped_column(String(500), primary_key=True)
+    comment_id: Mapped[str] = mapped_column(String(200), primary_key=True)
+    # None means top-level, deliberately not a sentinel string
+    # (see schemas.Comment).
+    parent_id: Mapped[str | None] = mapped_column(String(200), nullable=True)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    author: Mapped[str | None] = mapped_column(Text, nullable=True)
+    author_id: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    like_count: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
+    is_hearted_by_uploader: Mapped[bool] = mapped_column(nullable=False, default=False)
+    is_pinned: Mapped[bool] = mapped_column(nullable=False, default=False)
+    published_at: Mapped[datetime | None] = mapped_column(UtcDateTime, nullable=True)
+    first_seen_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    last_seen_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+
+
+class TranscriptRecord(Base):
+    """The newest transcript per (video, language)."""
+
+    __tablename__ = "transcripts"
+
+    video_id: Mapped[str] = mapped_column(String(500), primary_key=True)
+    language: Mapped[str] = mapped_column(String(64), primary_key=True)
+    is_automatic: Mapped[bool] = mapped_column(nullable=False, default=False)
+    full_text: Mapped[str] = mapped_column(Text, nullable=False)
+    segment_count: Mapped[int] = mapped_column(Integer, nullable=False)
+    fetched_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+
+
+# One row, addressed by a fixed key. Same pattern as WorkerControl.
+FLATTEN_PROGRESS_ID = "flatten"
+
+
+class FlattenProgress(Base):
+    """Where the flatten pass has read to. One row.
+
+    The cursor is the pair `(cursor_fetched_at, cursor_identifier)` because
+    `fetched_at` alone is not a total order — two observations can share an
+    instant, and a cursor that cannot break the tie either re-reads or
+    skips one of them.
+    """
+
+    __tablename__ = "flatten_progress"
+
+    identifier: Mapped[str] = mapped_column(
+        String(32), primary_key=True, default=FLATTEN_PROGRESS_ID
+    )
+    cursor_fetched_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False)
+    cursor_identifier: Mapped[str] = mapped_column(String(32), nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(UtcDateTime, nullable=False, default=utcnow)

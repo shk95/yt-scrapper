@@ -151,6 +151,15 @@ def test_every_row_of_every_table_arrives(tmp_path: Path) -> None:
         "worker_control": 1,
         "lane_health": 2,
         "source_health": 2,
+        # The flatten tables: in `Base.metadata` like everything else, so a
+        # transfer carries them too, empty here since nothing has populated
+        # them from an artifact yet.
+        "video_snapshots": 0,
+        "listing_entries": 0,
+        "channel_snapshots": 0,
+        "comments": 0,
+        "transcripts": 0,
+        "flatten_progress": 0,
     }
 
 
@@ -490,6 +499,12 @@ def test_migrate_brings_a_pre_cutover_file_forward_and_transfer_then_succeeds(
         "worker_control": 0,
         "lane_health": 0,
         "source_health": 0,
+        "video_snapshots": 0,
+        "listing_entries": 0,
+        "channel_snapshots": 0,
+        "comments": 0,
+        "transcripts": 0,
+        "flatten_progress": 0,
     }
     with target.session(readonly=True) as reading:
         moved = reading.get(Job, "job-old")
