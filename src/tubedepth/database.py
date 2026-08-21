@@ -67,13 +67,13 @@ class Database:
     See `transfer.py` and `docs/status.md` for why the source stays SQLite
     while nothing else does.
 
-    `JobRepository.claim` is a guarded UPDATE (`state == QUEUED` in the WHERE
-    clause) with a rowcount check, which is correct under READ COMMITTED with
-    no lock escalated up front: two workers can both SELECT the same
-    candidate, but only one UPDATE matches a still-QUEUED row — the other
-    affects zero rows and returns None. That is the entire safety mechanism;
-    nothing here escalates a lock ahead of it the way SQLite's BEGIN IMMEDIATE
-    used to.
+    `JobRepository.claim` selects its candidate with `FOR UPDATE SKIP LOCKED`
+    (#37), so two workers never contend for one row — a locked candidate is
+    skipped and the next claimable one taken, rather than the loser reading a
+    false "queue empty" out of a zero-row UPDATE. The guarded UPDATE
+    (`state == QUEUED` in the WHERE clause) with its rowcount check stays
+    underneath as defence in depth; nothing here escalates a lock ahead of
+    the claim the way SQLite's BEGIN IMMEDIATE used to.
     """
 
     SCHEMA = "tubedepth"

@@ -145,29 +145,28 @@ def test_a_claim_works_on_a_session_that_has_already_written(
 
 
 def test_two_concurrent_claims_never_return_the_same_job(database_url_for_tests: str) -> None:
-    """The guarantee `Database`'s docstring argues for, forced rather than hoped for.
+    """One job, two racing claims, exactly one winner — forced, not hoped for.
 
-    `JobRepository.claim` is a SELECT for a candidate followed by a guarded
-    UPDATE (`WHERE state == QUEUED`, rowcount checked). Under READ COMMITTED
-    that is supposed to be enough on its own, with no BEGIN IMMEDIATE-style
-    lock escalation up front: two sessions may both see the same row as
-    QUEUED, but only one UPDATE can win, and the guard is what stops the
-    loser from claiming a job someone else already has.
+    In-process threads racing each other rarely land in the contested
+    window by chance — session setup and the connection pool serialise them
+    first, as the two tests above admit. This test does not hope for luck:
+    a `before_cursor_execute` hook pauses worker A's claim between its
+    SELECT and its UPDATE, while worker B runs a complete claim — SELECT,
+    UPDATE, COMMIT — against the same one-job queue. Only once B has fully
+    finished is A released to send its own UPDATE.
 
-    In-process threads racing each other rarely land in that window by
-    chance — session setup and the connection pool serialise them first, as
-    the two tests above admit. This test does not hope for luck: a
-    `before_cursor_execute` hook pauses worker A's UPDATE *after* it has
-    already read the candidate as QUEUED but *before* the statement reaches
-    the server, while worker B runs a complete claim — SELECT, UPDATE,
-    COMMIT — to the same job. Only once B has fully committed is A released
-    to send its own UPDATE. If the WHERE clause or the rowcount check were
-    missing, A's UPDATE would blindly overwrite B's already-running row and
-    both calls would return a job.
-
-    Confirmed to actually discriminate: patching `claim` to skip the rowcount
-    check (returning the row regardless of `taken.rowcount`) makes this test
-    fail with two winners, exactly as expected.
+    What the interleaving proves has shifted once since it was written.
+    Originally the SELECT took no lock, so A and B both read the same row
+    as QUEUED and the guarded UPDATE (`WHERE state == QUEUED`, rowcount
+    checked) was the entire mechanism — removing the rowcount check made
+    this test fail with two winners. Since #37 the SELECT locks its
+    candidate with `FOR UPDATE SKIP LOCKED`, so B never sees A's row at
+    all: A holds the lock through the pause, B's claim honestly reports the
+    queue as empty, and A wins. The invariant asserted — one job is never
+    handed to two workers, whichever side of the pause wins it — is the
+    same, and this stays as the pin on the whole claim stack: if the
+    locking SELECT were ever refactored away, the UPDATE guard is what
+    would keep this green, and losing *both* is what makes it fail.
     """
     database = queued_database(database_url_for_tests, "static.echo")
 
@@ -212,6 +211,65 @@ def test_two_concurrent_claims_never_return_the_same_job(database_url_for_tests:
 
     claims = [job for job in (results.get("a"), results.get("b")) if job is not None]
     assert len(claims) == 1, f"exactly one claim may succeed for one job, got {claims}"
+
+
+def test_a_lost_claim_race_does_not_read_as_an_empty_queue(database_url_for_tests: str) -> None:
+    """Losing a race over one candidate must not end a drain with jobs left (#37).
+
+    Worker A claims the head of the queue and sits on its still-open
+    transaction — the exact window a concurrent claimant lands in. Worker B
+    then claims. The queue holds a second QUEUED job, so the only honest
+    answers for B are that job or a wait; `None` would be read by every
+    caller as "queue empty" and stop B's drain with work still available.
+
+    Before `FOR UPDATE SKIP LOCKED`, B's SELECT found the same candidate as
+    A (A's UPDATE was uncommitted, so the row still read as QUEUED), B's own
+    UPDATE then blocked on A's row lock, and once A committed it matched
+    zero rows — so B returned None and its drain ended one job early. The
+    orchestration below is deterministic either way: B is joined with a
+    short timeout, A is released, and the old behaviour fails the final
+    assertion with `None` rather than hanging the suite.
+    """
+    database = queued_database(database_url_for_tests, "job.first", "job.second")
+
+    worker_a_holds_its_claim = threading.Event()
+    worker_a_may_commit = threading.Event()
+    results: dict[str, str | None] = {}
+
+    def worker_a() -> None:
+        with database.session() as session:
+            job = JobRepository(session).claim(worker="A", lease=LEASE)
+            results["a"] = None if job is None else job.kind
+            worker_a_holds_its_claim.set()
+            # The transaction stays open — the claimed row stays locked —
+            # until the main thread has seen what B got.
+            worker_a_may_commit.wait(timeout=15)
+
+    def worker_b() -> None:
+        with database.session() as session:
+            job = JobRepository(session).claim(worker="B", lease=LEASE)
+            results["b"] = None if job is None else job.kind
+
+    thread_a = threading.Thread(target=worker_a)
+    thread_b = threading.Thread(target=worker_b)
+    thread_a.start()
+    try:
+        assert worker_a_holds_its_claim.wait(timeout=10), "worker A never claimed"
+        thread_b.start()
+        # With SKIP LOCKED, B never waits on A at all; five seconds is a
+        # hang, not a slow claim. Under the old mechanism B blocks here on
+        # A's row lock, which is itself part of the failure being pinned.
+        thread_b.join(timeout=5)
+    finally:
+        worker_a_may_commit.set()
+        thread_a.join(timeout=15)
+        thread_b.join(timeout=15)
+
+    assert results["a"] == "job.first"
+    assert results["b"] == "job.second", (
+        f"the loser of the claim race read the queue as empty: got {results['b']!r} "
+        "with a QUEUED job still available"
+    )
 
 
 def test_a_readonly_session_does_not_block_a_concurrent_writer(

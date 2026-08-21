@@ -27,17 +27,32 @@ class JobRepository:
     def claim(
         self, *, worker: str, lease: timedelta, kinds: Sequence[str] | None = None
     ) -> Job | None:
-        """Take exactly one queued job, or return None.
+        """Take exactly one queued job, or return None — and None means the
+        queue truly had nothing to offer, not that a race was lost.
 
-        Under PostgreSQL's READ COMMITTED, two workers can both SELECT the
-        same candidate — nothing here escalates a lock ahead of the write the
-        way SQLite's BEGIN IMMEDIATE once did. Safety comes entirely from the
-        UPDATE that follows: `state == QUEUED` is in its WHERE clause, so of
-        two workers racing the same candidate only the one that commits first
-        actually flips a still-QUEUED row, and the rowcount check is how the
-        loser finds out it got nothing rather than believing it claimed a job
-        it did not. That guard is the whole mechanism now, not a second layer
-        on top of one.
+        The SELECT locks its candidate with `FOR UPDATE SKIP LOCKED`, which
+        is what makes that sentence true. Without it, two workers under READ
+        COMMITTED could both SELECT the same candidate; the loser's guarded
+        UPDATE matched zero rows, `claim` returned None, and every caller
+        read that as "queue empty" — a one-shot drain exited with QUEUED
+        jobs still available, and serve mode stalled until the next poll
+        tick on every collision (#37). SKIP LOCKED makes the race unlosable
+        instead of detected: a candidate another transaction holds is simply
+        not seen, and the SELECT moves on to the next claimable row.
+        PostgreSQL-specific, which this service is by declaration (#15).
+
+        Chosen over the alternative — a bounded SELECT+UPDATE retry when the
+        UPDATE matches zero rows — because a retry loop inside `claim` would
+        keep a worker claiming after it has been asked to stop: the stop
+        event (#35) lives in the caller's loop, and the caller can only
+        honour it between calls. A claim that never needs a second attempt
+        has no such window.
+
+        The UPDATE below keeps its `state == QUEUED` guard and rowcount
+        check anyway. The locked row cannot change under this transaction,
+        so the guard should never fire — it stays as defence in depth, so
+        the lease/attempt semantics do not silently rest on a locking hint
+        alone if the SELECT is ever refactored.
         """
         now = self._clock()
         conditions = [Job.state == JobState.QUEUED, Job.scheduled_at <= now]
@@ -51,6 +66,10 @@ class JobRepository:
             .where(*conditions)
             .order_by(Job.scheduled_at, Job.created_at)
             .limit(1)
+            # Rows another claim holds are skipped, not waited on: LIMIT
+            # counts rows actually locked, so a locked head-of-queue means
+            # the next claimable row, not None.
+            .with_for_update(skip_locked=True)
         ).one_or_none()
         if candidate is None:
             return None
